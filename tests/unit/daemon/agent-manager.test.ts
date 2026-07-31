@@ -287,6 +287,53 @@ describe('AgentManager.restartAgent - BUG-007 fix (rebuild Telegram poller)', ()
   });
 });
 
+describe('AgentManager.stopAgent - disable-resurrection fix (stop wins vs queued restart)', () => {
+  let testDir: string;
+  let ctxRoot: string;
+  let frameworkRoot: string;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'cortextos-am-stop-test-'));
+    ctxRoot = join(testDir, 'instance');
+    frameworkRoot = join(testDir, 'framework');
+    mkdirSync(join(ctxRoot, 'config'), { recursive: true });
+    mkdirSync(join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice'), { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('user-initiated stop drops a queued pendingRestart (stop wins)', async () => {
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+    (am as any).agents.set('alice', {
+      process: { stop: vi.fn().mockResolvedValue(undefined) },
+      checker: { stop: vi.fn() },
+    });
+    (am as any).pendingRestarts.add('alice');
+    const startSpy = vi.spyOn(am, 'startAgent').mockResolvedValue();
+
+    await am.stopAgent('alice', true);
+
+    expect(startSpy).not.toHaveBeenCalled();
+    expect((am as any).pendingRestarts.has('alice')).toBe(false);
+  });
+
+  it('internal (restart-all) stop still honors a queued pendingRestart (BUG-011 preserved)', async () => {
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+    (am as any).agents.set('alice', {
+      process: { stop: vi.fn().mockResolvedValue(undefined) },
+      checker: { stop: vi.fn() },
+    });
+    (am as any).pendingRestarts.add('alice');
+    const startSpy = vi.spyOn(am, 'startAgent').mockResolvedValue();
+
+    await am.stopAgent('alice');
+
+    expect(startSpy).toHaveBeenCalledWith('alice', '');
+  });
+});
+
 describe('buildReplyContext - Telegram reply context (BUG fix: media replies lost)', () => {
   it('returns undefined when no reply message', () => {
     expect(buildReplyContext(undefined)).toBeUndefined();
