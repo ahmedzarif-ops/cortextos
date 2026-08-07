@@ -233,8 +233,8 @@ describe('migrateCronsForAgent', () => {
     expect(crons).toHaveLength(1);
     expect(crons[0].name).toBe('heartbeat');
 
-    // Log must mention the skip reason
-    const skipLog = logs.find(l => l.includes('one-shot') && l.includes('skip'));
+    // Log must mention the skip reason, flagged UNMIGRATABLE (real gap, not a routine skip)
+    const skipLog = logs.find(l => l.includes('one-shot') && l.includes('UNMIGRATABLE'));
     expect(skipLog).toBeTruthy();
 
     expect(markerExists(tmpCtxRoot, 'gamma')).toBe(true);

@@ -153,6 +153,44 @@ function runTeachingCheck(args: TeachingCheckArgs): void {
 // ---------------------------------------------------------------------------
 
 /**
+ * Closed set of keys/type-values CronEntry actually supports. A config.json
+ * entry carrying anything outside this set (e.g. `enabled`, a leftover from
+ * confusing this shape with CronDefinition's) is silently dropped by
+ * convertEntry today — validateCronEntryShape surfaces that instead of
+ * letting it pass unnoticed.
+ */
+const KNOWN_CRON_ENTRY_KEYS = new Set(['name', 'interval', 'cron', 'fire_at', 'prompt', 'type']);
+const KNOWN_CRON_ENTRY_TYPES = new Set(['recurring', 'once', 'disabled']);
+
+/**
+ * Check a raw config.json cron entry against the CronEntry schema before
+ * conversion. Returns human-readable warnings for any key or type value
+ * outside the known set — advisory only, never blocks migration.
+ */
+function validateCronEntryShape(entry: Record<string, unknown>): string[] {
+  const warnings: string[] = [];
+  const name = typeof entry.name === 'string' ? entry.name : '(unnamed)';
+
+  for (const key of Object.keys(entry)) {
+    if (!KNOWN_CRON_ENTRY_KEYS.has(key)) {
+      warnings.push(
+        `cron "${name}" has unrecognised key "${key}" — CronEntry only supports ` +
+          `${[...KNOWN_CRON_ENTRY_KEYS].join(', ')}; this key has no effect and is silently dropped`,
+      );
+    }
+  }
+
+  if (entry.type !== undefined && !KNOWN_CRON_ENTRY_TYPES.has(entry.type as string)) {
+    warnings.push(
+      `cron "${name}" has unrecognised type "${String(entry.type)}" — expected one of ` +
+        `${[...KNOWN_CRON_ENTRY_TYPES].join(', ')}; convertEntry falls back to "recurring"`,
+    );
+  }
+
+  return warnings;
+}
+
+/**
  * Convert a single CronEntry (config.json format) to a CronDefinition (crons.json format).
  *
  * Returns null with a reason string when the entry cannot be converted (e.g. one-shot crons).
@@ -204,10 +242,14 @@ function convertEntry(
         skip: `cron "${name}" has type "once" with past fire_at "${fire_at}" — skipping (already fired or expired)`,
       };
     }
-    // Future one-shot — still not representable in CronDefinition as of Subtask 1.1
+    // Future one-shot — still not representable in CronDefinition as of Subtask 1.1.
+    // This is a real gap, not a routine skip: the operator's intended future
+    // action will never fire. Prefixed so it doesn't read like the other,
+    // expected skip reasons below.
     return {
-      skip: `cron "${name}" has type "once" with future fire_at "${fire_at}" — skipping. ` +
-        `TODO: once CronDefinition supports fire_at, migrate this as a one-shot.`,
+      skip: `UNMIGRATABLE: cron "${name}" has type "once" with future fire_at "${fire_at}" — ` +
+        `this cron will NOT fire. CronDefinition has no fire_at support yet (TODO: once it does, ` +
+        `migrate this as a one-shot instead of dropping it).`,
     };
   }
 
@@ -364,6 +406,10 @@ function runMigrationCore(
   const skipped: string[] = [];
 
   for (const entry of configCrons) {
+    for (const warning of validateCronEntryShape(entry as unknown as Record<string, unknown>)) {
+      log(`  WARNING for "${agentName}": ${warning}`);
+    }
+
     const result = convertEntry(entry, agentName);
     if ('cron' in result) {
       converted.push(result.cron);
