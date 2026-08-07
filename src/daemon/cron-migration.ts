@@ -153,13 +153,30 @@ function runTeachingCheck(args: TeachingCheckArgs): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Closed set of keys/type-values CronEntry actually supports. A config.json
- * entry carrying anything outside this set (e.g. `enabled`, a leftover from
- * confusing this shape with CronDefinition's) is silently dropped by
- * convertEntry today — validateCronEntryShape surfaces that instead of
- * letting it pass unnoticed.
+ * Closed set of keys CronEntry actually supports, bound to the type at
+ * compile time: this object must have exactly one property per CronEntry
+ * field. Adding, removing, or renaming a CronEntry field without updating
+ * this map is a TypeScript error (excess or missing property), not a
+ * silent runtime gap — the previous version was a hand-maintained
+ * `Set(['name', ...])` literal with no link back to CronEntry, so the two
+ * could drift with no compiler signal.
  */
-const KNOWN_CRON_ENTRY_KEYS = new Set(['name', 'interval', 'cron', 'fire_at', 'prompt', 'type']);
+const CRON_ENTRY_KEY_MAP: Record<keyof CronEntry, true> = {
+  name: true,
+  interval: true,
+  cron: true,
+  fire_at: true,
+  prompt: true,
+  type: true,
+};
+const KNOWN_CRON_ENTRY_KEYS = new Set<string>(Object.keys(CRON_ENTRY_KEY_MAP));
+
+/**
+ * A config.json entry carrying a key outside CRON_ENTRY_KEY_MAP (e.g.
+ * `enabled`, a leftover from confusing this shape with CronDefinition's) is
+ * silently dropped by convertEntry today — validateCronEntryShape surfaces
+ * that instead of letting it pass unnoticed.
+ */
 const KNOWN_CRON_ENTRY_TYPES = new Set(['recurring', 'once', 'disabled']);
 
 /**
