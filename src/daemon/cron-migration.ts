@@ -174,15 +174,17 @@ const KNOWN_CRON_ENTRY_KEYS = new Set<string>(Object.keys(CRON_ENTRY_KEY_MAP));
 /**
  * A config.json entry carrying a key outside CRON_ENTRY_KEY_MAP (e.g.
  * `enabled`, a leftover from confusing this shape with CronDefinition's) is
- * silently dropped by convertEntry today — validateCronEntryShape surfaces
- * that instead of letting it pass unnoticed.
+ * refused before it ever reaches convertEntry — see validateCronEntryShape
+ * and its call site in runMigrationCore.
  */
 const KNOWN_CRON_ENTRY_TYPES = new Set(['recurring', 'once', 'disabled']);
 
 /**
  * Check a raw config.json cron entry against the CronEntry schema before
  * conversion. Returns human-readable warnings for any key or type value
- * outside the known set — advisory only, never blocks migration.
+ * outside the known set. Any non-empty result gates the entry: the caller
+ * (runMigrationCore) refuses it outright instead of attempting conversion —
+ * this function no longer just describes a problem, it decides one.
  */
 function validateCronEntryShape(entry: Record<string, unknown>): string[] {
   const warnings: string[] = [];
@@ -255,8 +257,16 @@ function convertEntry(
       };
     }
     if (fireAtMs <= Date.now()) {
+      // "Already fired" would overstate what is actually known: this branch
+      // is a single timestamp comparison with no fire-history lookup anywhere
+      // in this function or its call chain, so a one-shot that never fired at
+      // all is indistinguishable from one that fired exactly as intended.
+      // Worded — and prefixed like the UNMIGRATABLE future-fire_at case below
+      // — for what is verifiable rather than what is assumed.
       return {
-        skip: `cron "${name}" has type "once" with past fire_at "${fire_at}" — skipping (already fired or expired)`,
+        skip: `CANNOT-VERIFY: cron "${name}" has type "once" with fire_at "${fire_at}" in the past — ` +
+          `dropping without firing it. No fire-history record exists to confirm this ever fired; ` +
+          `it is being discarded on the strength of a timestamp comparison alone.`,
       };
     }
     // Future one-shot — still not representable in CronDefinition as of Subtask 1.1.
@@ -317,6 +327,18 @@ export interface MigrationResult {
   cronsMigrated?: number;
   /** Names of crons that were skipped (one-shots, missing fields, etc.). */
   cronsSkipped?: string[];
+  /**
+   * Names of crons refused outright because validateCronEntryShape found an
+   * unrecognised key or type — these are never passed to convertEntry at
+   * all. Distinct from `cronsSkipped`: a skip is convertEntry declining a
+   * well-formed entry (e.g. a legitimate past one-shot); a refusal is the
+   * shape check gating a malformed one before conversion is even attempted.
+   * A caller (e.g. the migrate-crons CLI) should treat a non-empty
+   * `cronsRefused` as an exit-nonzero condition — the whole point of
+   * gating instead of only warning is that it must be checkable without
+   * reading log text.
+   */
+  cronsRefused?: string[];
 }
 
 /**
@@ -421,10 +443,23 @@ function runMigrationCore(
   // Convert each entry
   const converted: CronDefinition[] = [];
   const skipped: string[] = [];
+  const refused: string[] = [];
 
   for (const entry of configCrons) {
-    for (const warning of validateCronEntryShape(entry as unknown as Record<string, unknown>)) {
-      log(`  WARNING for "${agentName}": ${warning}`);
+    const warnings = validateCronEntryShape(entry as unknown as Record<string, unknown>);
+
+    // An unrecognised key or type gates the entry outright — it is never
+    // passed to convertEntry. This is the difference between a shape
+    // problem (refused, before conversion) and convertEntry declining a
+    // well-formed entry for its own reasons (skipped, e.g. a legitimate
+    // past one-shot). Refusing here, rather than only warning, is what
+    // makes "unknown key" checkable by a caller without reading log text.
+    if (warnings.length > 0) {
+      for (const warning of warnings) {
+        log(`  REFUSED for "${agentName}": ${warning}`);
+      }
+      refused.push(entry.name);
+      continue;
     }
 
     const result = convertEntry(entry, agentName);
@@ -442,7 +477,7 @@ function runMigrationCore(
   writeMarker(ctxRoot, agentName);
 
   log(
-    `Migration complete for "${agentName}": ${converted.length} migrated, ${skipped.length} skipped`,
+    `Migration complete for "${agentName}": ${converted.length} migrated, ${skipped.length} skipped, ${refused.length} refused`,
   );
 
   return {
@@ -450,6 +485,7 @@ function runMigrationCore(
     status: 'migrated',
     cronsMigrated: converted.length,
     cronsSkipped: skipped,
+    cronsRefused: refused,
   };
 }
 

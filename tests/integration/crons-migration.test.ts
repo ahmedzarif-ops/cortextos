@@ -270,6 +270,73 @@ describe('migrateCronsForAgent', () => {
     expect(markerExists(tmpCtxRoot, 'delta')).toBe(true);
   });
 
+  it('words the past fire_at skip for what is actually known, not "already fired"', () => {
+    const agentDir = join(tmpFrameworkRoot, 'orgs', 'testorg', 'agents', 'delta-wording');
+    const pastTs = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    writeConfigJson(agentDir, [
+      { name: 'past-shot-2', type: 'once', fire_at: pastTs, prompt: 'Maybe this ran, maybe it never did.' },
+    ]);
+    const configPath = join(agentDir, 'config.json');
+
+    const logs: string[] = [];
+    migrateCronsForAgent('delta-wording', configPath, tmpCtxRoot, {
+      log: (msg) => logs.push(msg),
+    });
+
+    const skipLog = logs.find(l => l.includes('past-shot-2'));
+    expect(skipLog).toBeTruthy();
+    // convertEntry cannot distinguish "fired" from "never fired" — no
+    // fire-history lookup exists anywhere in its call chain, so the wording
+    // must not assert "already fired or expired" as if it were verified.
+    expect(skipLog).not.toContain('already fired or expired');
+    expect(skipLog).toContain('CANNOT-VERIFY');
+    expect(skipLog).toContain('No fire-history record exists');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Unrecognised key / type: refused outright, not attempted, not silently
+  // dropped by convertEntry — gate, not print.
+  // ---------------------------------------------------------------------------
+
+  it('refuses (not migrates, not merely warns) a cron entry with an unrecognised key', () => {
+    const agentDir = join(tmpFrameworkRoot, 'orgs', 'testorg', 'agents', 'refuse-key');
+    writeConfigJson(agentDir, [
+      // "crontab" is not a CronEntry key — this is the real data-agent shape
+      // (type:"crontab" + a "crontab" key holding the cron expression).
+      { name: 'bad-shape', type: 'crontab', crontab: '0 6 * * *', prompt: 'never converts' },
+      { name: 'good-entry', type: 'recurring', cron: '0 7 * * *', prompt: 'converts fine' },
+    ]);
+    const configPath = join(agentDir, 'config.json');
+
+    const logs: string[] = [];
+    const result = migrateCronsForAgent('refuse-key', configPath, tmpCtxRoot, {
+      log: (msg) => logs.push(msg),
+    });
+
+    expect(result.cronsRefused).toContain('bad-shape');
+    expect(result.cronsSkipped ?? []).not.toContain('bad-shape');
+    expect(result.cronsMigrated).toBe(1);
+
+    const crons = readCrons('refuse-key');
+    expect(crons.map(c => c.name)).toEqual(['good-entry']);
+
+    const refusedLog = logs.find(l => l.includes('REFUSED') && l.includes('bad-shape'));
+    expect(refusedLog).toBeTruthy();
+  });
+
+  it('refuses a cron entry with an unrecognised type even when it has an otherwise valid schedule', () => {
+    const agentDir = join(tmpFrameworkRoot, 'orgs', 'testorg', 'agents', 'refuse-type');
+    writeConfigJson(agentDir, [
+      { name: 'weird-type', type: 'crontab', cron: '0 6 * * *', prompt: 'has a valid cron field, wrong type' },
+    ]);
+    const configPath = join(agentDir, 'config.json');
+
+    const result = migrateCronsForAgent('refuse-type', configPath, tmpCtxRoot, { log: () => {} });
+
+    expect(result.cronsRefused).toContain('weird-type');
+    expect(result.cronsMigrated).toBe(0);
+  });
+
   // ---------------------------------------------------------------------------
   // Test 6: Missing `type` field → defaults to recurring
   // ---------------------------------------------------------------------------
