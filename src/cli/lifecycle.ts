@@ -145,7 +145,11 @@ export function renderLocalHuman(snapshot: LifecycleStatusSnapshot): string {
       ...snapshot.check.reason_codes.map(code => `- ${code}`),
     );
   }
-  lines.push('', 'No files or processes were changed.');
+  lines.push(
+    '',
+    'No configuration, lifecycle state, or process lifecycle was changed.',
+    'A responsive daemon may record normal access logs for the status request.',
+  );
   return lines.join('\n');
 }
 

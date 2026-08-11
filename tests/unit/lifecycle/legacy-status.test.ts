@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   lstatSync,
+  readFileSync,
   readdirSync,
   rmSync,
   writeFileSync,
@@ -12,6 +13,7 @@ import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
+import packageMetadata from '../../../package.json';
 import {
   collectLegacyStatus,
   isLegacyAgentStatus,
@@ -32,6 +34,7 @@ import {
   renderRedactedHuman,
   validateLifecycleStatusOptions,
 } from '../../../src/cli/lifecycle';
+import { CORTEXTOS_VERSION } from '../../../src/version';
 
 const tempRoots: string[] = [];
 const originalInstanceId = process.env.CTX_INSTANCE_ID;
@@ -53,7 +56,7 @@ function makeFixture(version = '0.1.1'): { root: string; frameworkRoot: string; 
   const frameworkRoot = join(root, 'framework');
   const ctxRoot = join(root, 'state');
   mkdirSync(frameworkRoot, { recursive: true });
-  mkdirSync(ctxRoot, { recursive: true });
+  mkdirSync(join(ctxRoot, 'state'), { recursive: true });
   writeJson(join(frameworkRoot, 'package.json'), { name: 'cortextos', version });
   return { root, frameworkRoot, ctxRoot };
 }
@@ -260,6 +263,73 @@ describe('legacy lifecycle status collector', () => {
     });
 
     expect(existsSync(marker)).toBe(false);
+  });
+
+  it('scrubs Git redirection and tracing while disabling lazy fetches', async () => {
+    const { root, frameworkRoot, ctxRoot } = makeFixture();
+    const decoyRoot = join(root, 'decoy');
+    mkdirSync(decoyRoot, { recursive: true });
+    writeFileSync(join(decoyRoot, 'decoy.txt'), 'decoy', 'utf-8');
+    for (const repository of [frameworkRoot, decoyRoot]) {
+      execFileSync('git', ['init'], { cwd: repository, stdio: 'ignore' });
+      execFileSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: repository });
+      execFileSync('git', ['config', 'user.name', 'Lifecycle Test'], { cwd: repository });
+      execFileSync('git', ['add', '.'], { cwd: repository });
+      execFileSync('git', ['commit', '-m', 'fixture'], { cwd: repository, stdio: 'ignore' });
+    }
+    const frameworkCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: frameworkRoot,
+      encoding: 'utf-8',
+    }).trim();
+    const realGit = execFileSync('which', ['git'], { encoding: 'utf-8' }).trim();
+    const binRoot = join(root, 'bin');
+    const environmentLog = join(root, 'git-environment.jsonl');
+    const traceCanary = join(root, 'GIT_TRACE_WRITE_CANARY');
+    mkdirSync(binRoot, { recursive: true });
+    const wrapper = join(binRoot, 'git');
+    writeFileSync(wrapper, [
+      '#!/bin/sh',
+      `printf '%s|%s|%s|%s|%s|%s\\n' "\${GIT_NO_LAZY_FETCH-unset}" "\${GIT_OPTIONAL_LOCKS-unset}" "\${GIT_TERMINAL_PROMPT-unset}" "\${GIT_DIR-unset}" "\${GIT_WORK_TREE-unset}" "\${GIT_TRACE-unset}" >> ${environmentLog}`,
+      `exec ${realGit} "$@"`,
+      '',
+    ].join('\n'), 'utf-8');
+    chmodSync(wrapper, 0o700);
+
+    const previous = {
+      PATH: process.env.PATH,
+      GIT_DIR: process.env.GIT_DIR,
+      GIT_WORK_TREE: process.env.GIT_WORK_TREE,
+      GIT_TRACE: process.env.GIT_TRACE,
+    };
+    let snapshot;
+    try {
+      process.env.PATH = `${binRoot}:${previous.PATH ?? ''}`;
+      process.env.GIT_DIR = join(decoyRoot, '.git');
+      process.env.GIT_WORK_TREE = decoyRoot;
+      process.env.GIT_TRACE = traceCanary;
+      snapshot = await collectLegacyStatus({
+        instanceId: 'default',
+        ctxRoot,
+        frameworkRoot,
+        probeDaemon: async () => ({ kind: 'absent' }),
+      });
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+
+    expect(snapshot!.application.source_commit).toBe(frameworkCommit);
+    expect(existsSync(traceCanary)).toBe(false);
+    const invocations = readdirNames(root).includes('git-environment.jsonl')
+      ? readFileSync(environmentLog, 'utf-8')
+        .trim().split('\n').map(line => line.split('|'))
+      : [];
+    expect(invocations.length).toBeGreaterThan(0);
+    for (const invocation of invocations) {
+      expect(invocation).toEqual(['1', '0', '0', 'unset', 'unset', 'unset']);
+    }
   });
 
   it('rejects malformed fields in otherwise status-shaped IPC entries', () => {
@@ -528,6 +598,76 @@ describe('legacy lifecycle status collector', () => {
     );
   });
 
+  it('fails closed when agent discovery exceeds its directory-entry bound', async () => {
+    const { frameworkRoot, ctxRoot } = makeFixture();
+    const agentsRoot = join(frameworkRoot, 'agents');
+    mkdirSync(agentsRoot, { recursive: true });
+    for (let index = 0; index <= 4096; index += 1) {
+      writeFileSync(join(agentsRoot, `entry-${index}`), '', 'utf-8');
+    }
+
+    const snapshot = await collectLegacyStatus({
+      instanceId: 'default',
+      ctxRoot,
+      frameworkRoot,
+      probeDaemon: async () => ({ kind: 'absent' }),
+    });
+
+    expect(snapshot.snapshot_status).toBe('partial');
+    expect(snapshot.runtime.agents.enabled).toBeNull();
+    expect(snapshot.observations.map(item => item.code)).toContain(
+      'CORTEXT_STATUS_AGENT_CONFIG_INVALID',
+    );
+  });
+
+  it('blocks a responsive instance whose state directory is missing', async () => {
+    const { frameworkRoot, ctxRoot } = makeFixture();
+    rmSync(join(ctxRoot, 'state'), { recursive: true, force: true });
+
+    const snapshot = await collectLegacyStatus({
+      instanceId: 'default',
+      ctxRoot,
+      frameworkRoot,
+      probeDaemon: responsive({ kind: 'responsive', statuses: [] }),
+    });
+
+    expect(snapshot.snapshot_status).toBe('partial');
+    expect(snapshot.state.status).toBe('missing');
+    expect(snapshot.overall.status).toBe('blocked');
+    expect(snapshot.observations.map(item => item.code)).toContain('CORTEXT_STATUS_STATE_MISSING');
+    expect(evaluateStatusCheck(snapshot, 'usable@v1').reason_codes).toContain(
+      'CORTEXT_CHECK_STATE_NOT_READABLE',
+    );
+    expect(evaluateStatusCheck(snapshot, 'healthy@v1').result).toBe('fail');
+  });
+
+  it('does not let an explicit instance consume an ambient root for another instance', async () => {
+    const home = tempRoot('explicit-instance');
+    const frameworkRoot = join(home, 'framework');
+    const canonicalRoot = join(home, '.cortextos', 'wanted');
+    const ambientRoot = join(home, '.cortextos', 'other');
+    mkdirSync(frameworkRoot, { recursive: true });
+    mkdirSync(join(canonicalRoot, 'state'), { recursive: true });
+    mkdirSync(join(ambientRoot, 'state'), { recursive: true });
+    writeJson(join(frameworkRoot, 'package.json'), {
+      name: 'cortextos', version: CORTEXTOS_VERSION,
+    });
+    process.env.CTX_ROOT = ambientRoot;
+
+    const snapshot = await collectLegacyStatus({
+      instanceId: 'wanted',
+      homeDir: home,
+      frameworkRoot,
+      includePaths: true,
+      probeDaemon: async () => ({ kind: 'absent' }),
+    });
+
+    expect(snapshot.state.root).toBe(canonicalRoot);
+    expect(snapshot.observations.map(item => item.code)).not.toContain(
+      'CORTEXT_STATUS_LEGACY_ROOT_AUTHORITY_UNPROVEN',
+    );
+  });
+
   it('leaves complete framework and instance tree metadata unchanged', async () => {
     const { root, frameworkRoot, ctxRoot } = makeFixture();
     addAgent(frameworkRoot, 'team', 'observer', { enabled: true });
@@ -725,6 +865,10 @@ describe('lifecycle status check policies', () => {
     expect(evaluateStatusCheck(snapshot, 'usable@v1').result).toBe('pass');
   });
 
+  it('derives CLI and lifecycle version evidence from package metadata', () => {
+    expect(CORTEXTOS_VERSION).toBe(packageMetadata.version);
+  });
+
   it('fails update-safe closed on unsupported legacy capabilities in exact order', async () => {
     const snapshot = await healthyLegacySnapshot();
     expect(evaluateStatusCheck(snapshot, 'update-safe@v1')).toEqual({
@@ -745,6 +889,46 @@ describe('lifecycle status check policies', () => {
         'CORTEXT_CHECK_ROLLBACK_NOT_READY',
       ],
     });
+  });
+
+  it('never lets healthy or update-safe pass when usable fails', async () => {
+    const healthy = await healthyLegacySnapshot();
+    const blocked = structuredClone(healthy) as any;
+    blocked.overall.status = 'blocked';
+    blocked.overall.highest_severity = null;
+    blocked.capabilities.profile = 'managed_running_v1';
+    blocked.manager.integrity = 'verified';
+    blocked.manager.trust_status = 'verified';
+    blocked.manager.recovery_launcher_status = 'verified';
+    blocked.consistency.status = 'stable';
+    for (const key of [
+      'trust_metadata_revision',
+      'compatibility_matrix_revision',
+      'lifecycle_generation',
+      'writer_epoch',
+      'selected_release_id',
+      'config_revision',
+      'observation_manifest_version',
+      'config_observation_digest',
+      'state_schema',
+      'state_layout_generation',
+      'state_control_observation_digest',
+      'component_lock_revision',
+    ]) blocked.basis[key] = 'present';
+    blocked.device.writer_role = 'active';
+    blocked.device.lease_status = 'held';
+    blocked.state.migration_status = 'idle';
+    blocked.application.integrity = 'verified';
+    blocked.compatibility.status = 'compatible';
+    blocked.recovery.latest_checkpoint.verification = 'passed';
+    blocked.recovery.latest_state_backup.verification = 'passed';
+    blocked.recovery.rollback_status = 'ready';
+
+    expect(evaluateStatusCheck(blocked, 'usable@v1').result).toBe('fail');
+    expect(evaluateStatusCheck(blocked, 'healthy@v1').result).toBe('fail');
+    const updateSafe = evaluateStatusCheck(blocked, 'update-safe@v1');
+    expect(updateSafe.result).toBe('fail');
+    expect(updateSafe.reason_codes).toContain('CORTEXT_CHECK_OVERALL_DISALLOWED');
   });
 
   it('orders namespace and containment failures by the pinned v1 sequence', async () => {

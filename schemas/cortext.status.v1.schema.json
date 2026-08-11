@@ -41,9 +41,15 @@
               ]
             },
             "version": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "version_evidence": {
@@ -171,25 +177,45 @@
           "additionalProperties": false,
           "properties": {
             "profile": {
-              "enum": [
-                "manager_uninitialized_v1",
-                "managed_stopped_v1",
-                "managed_running_v1",
-                "legacy_bridge_v1"
-              ],
+              "const": "legacy_bridge_v1",
               "type": "string"
             },
             "supported": {
               "items": {
+                "enum": [
+                  "legacy_layout",
+                  "legacy_application_evidence",
+                  "legacy_state_readability",
+                  "legacy_agent_inventory",
+                  "legacy_daemon_ipc",
+                  "redacted_projection",
+                  "check_policies_v1"
+                ],
                 "type": "string"
               },
-              "type": "array"
+              "maxItems": 7,
+              "minItems": 7,
+              "type": "array",
+              "uniqueItems": true
             },
             "unsupported": {
               "items": {
+                "enum": [
+                  "transaction_basis",
+                  "device_identity",
+                  "writer_lease",
+                  "release_integrity",
+                  "component_lock",
+                  "recovery_index",
+                  "update_metadata",
+                  "compatibility_matrix"
+                ],
                 "type": "string"
               },
-              "type": "array"
+              "maxItems": 8,
+              "minItems": 8,
+              "type": "array",
+              "uniqueItems": true
             }
           },
           "required": [
@@ -450,6 +476,8 @@
               "type": "string"
             },
             "version": {
+              "maxLength": 64,
+              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$",
               "type": "string"
             }
           },
@@ -814,9 +842,20 @@
                 },
                 "evidence_codes": {
                   "items": {
+                    "enum": [
+                      "CORTEXT_ISOLATION_LIVE_ROOT_DISJOINT",
+                      "CORTEXT_ISOLATION_PROCESS_NAMESPACE_DISJOINT",
+                      "CORTEXT_ISOLATION_MANAGED_INTEGRATIONS_ROUTED",
+                      "CORTEXT_ISOLATION_BOUNDARY_ENFORCED",
+                      "CORTEXT_ISOLATION_HOST_CREDENTIALS_UNAVAILABLE",
+                      "CORTEXT_ISOLATION_EGRESS_POLICY_ENFORCED",
+                      "CORTEXT_ISOLATION_HOST_ACCESS_CONSTRAINED"
+                    ],
                     "type": "string"
                   },
-                  "type": "array"
+                  "maxItems": 7,
+                  "type": "array",
+                  "uniqueItems": true
                 },
                 "host_access": {
                   "enum": [
@@ -1119,62 +1158,368 @@
       "type": "string"
     },
     "StatusCheckResult": {
-      "additionalProperties": false,
-      "properties": {
-        "policy": {
-          "$ref": "#/definitions/StatusCheckPolicy"
-        },
-        "policy_version": {
-          "enum": [
-            "cortext.check.usable/v1",
-            "cortext.check.healthy/v1",
-            "cortext.check.update-safe/v1",
-            "cortext.check.sandbox-namespace/v1",
-            "cortext.check.security-contained/v1"
-          ],
-          "type": "string"
-        },
-        "reason_codes": {
-          "items": {
-            "$ref": "#/definitions/StatusCheckReasonCode"
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "policy": {
+              "const": "usable",
+              "type": "string"
+            },
+            "policy_version": {
+              "const": "cortext.check.usable/v1",
+              "type": "string"
+            },
+            "reason_codes": {
+              "maxItems": 0,
+              "minItems": 0,
+              "type": "array"
+            },
+            "result": {
+              "const": "pass",
+              "type": "string"
+            }
           },
-          "type": "array"
-        },
-        "result": {
-          "enum": [
-            "pass",
-            "fail"
+          "required": [
+            "policy",
+            "policy_version",
+            "result",
+            "reason_codes"
           ],
-          "type": "string"
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "policy": {
+              "const": "usable",
+              "type": "string"
+            },
+            "policy_version": {
+              "const": "cortext.check.usable/v1",
+              "type": "string"
+            },
+            "reason_codes": {
+              "items": {
+                "$ref": "#/definitions/StatusCheckReasonCode"
+              },
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "result": {
+              "const": "fail",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy",
+            "policy_version",
+            "result",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "policy": {
+              "const": "healthy",
+              "type": "string"
+            },
+            "policy_version": {
+              "const": "cortext.check.healthy/v1",
+              "type": "string"
+            },
+            "reason_codes": {
+              "maxItems": 0,
+              "minItems": 0,
+              "type": "array"
+            },
+            "result": {
+              "const": "pass",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy",
+            "policy_version",
+            "result",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "policy": {
+              "const": "healthy",
+              "type": "string"
+            },
+            "policy_version": {
+              "const": "cortext.check.healthy/v1",
+              "type": "string"
+            },
+            "reason_codes": {
+              "items": {
+                "$ref": "#/definitions/StatusCheckReasonCode"
+              },
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "result": {
+              "const": "fail",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy",
+            "policy_version",
+            "result",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "policy": {
+              "const": "update-safe",
+              "type": "string"
+            },
+            "policy_version": {
+              "const": "cortext.check.update-safe/v1",
+              "type": "string"
+            },
+            "reason_codes": {
+              "maxItems": 0,
+              "minItems": 0,
+              "type": "array"
+            },
+            "result": {
+              "const": "pass",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy",
+            "policy_version",
+            "result",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "policy": {
+              "const": "update-safe",
+              "type": "string"
+            },
+            "policy_version": {
+              "const": "cortext.check.update-safe/v1",
+              "type": "string"
+            },
+            "reason_codes": {
+              "items": {
+                "$ref": "#/definitions/StatusCheckReasonCode"
+              },
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "result": {
+              "const": "fail",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy",
+            "policy_version",
+            "result",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "policy": {
+              "const": "sandbox-namespace",
+              "type": "string"
+            },
+            "policy_version": {
+              "const": "cortext.check.sandbox-namespace/v1",
+              "type": "string"
+            },
+            "reason_codes": {
+              "maxItems": 0,
+              "minItems": 0,
+              "type": "array"
+            },
+            "result": {
+              "const": "pass",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy",
+            "policy_version",
+            "result",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "policy": {
+              "const": "sandbox-namespace",
+              "type": "string"
+            },
+            "policy_version": {
+              "const": "cortext.check.sandbox-namespace/v1",
+              "type": "string"
+            },
+            "reason_codes": {
+              "items": {
+                "$ref": "#/definitions/StatusCheckReasonCode"
+              },
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "result": {
+              "const": "fail",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy",
+            "policy_version",
+            "result",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "policy": {
+              "const": "security-contained",
+              "type": "string"
+            },
+            "policy_version": {
+              "const": "cortext.check.security-contained/v1",
+              "type": "string"
+            },
+            "reason_codes": {
+              "maxItems": 0,
+              "minItems": 0,
+              "type": "array"
+            },
+            "result": {
+              "const": "pass",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy",
+            "policy_version",
+            "result",
+            "reason_codes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "policy": {
+              "const": "security-contained",
+              "type": "string"
+            },
+            "policy_version": {
+              "const": "cortext.check.security-contained/v1",
+              "type": "string"
+            },
+            "reason_codes": {
+              "items": {
+                "$ref": "#/definitions/StatusCheckReasonCode"
+              },
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "result": {
+              "const": "fail",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy",
+            "policy_version",
+            "result",
+            "reason_codes"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "policy",
-        "policy_version",
-        "result",
-        "reason_codes"
-      ],
-      "type": "object"
+      ]
     },
     "StatusObservation": {
       "additionalProperties": false,
       "properties": {
         "code": {
+          "enum": [
+            "CORTEXT_STATUS_LEGACY_LAYOUT",
+            "CORTEXT_STATUS_LEGACY_CAPABILITIES_LIMITED",
+            "CORTEXT_STATUS_LEGACY_ROOT_AUTHORITY_UNPROVEN",
+            "CORTEXT_STATUS_FRAMEWORK_NOT_FOUND",
+            "CORTEXT_STATUS_APPLICATION_VERSION_UNKNOWN",
+            "CORTEXT_STATUS_FRAMEWORK_MODIFIED",
+            "CORTEXT_STATUS_VERSION_CONFLICT",
+            "CORTEXT_STATUS_REGISTRY_INVALID",
+            "CORTEXT_STATUS_AGENT_CONFIG_INVALID",
+            "CORTEXT_STATUS_AGENT_ID_INVALID",
+            "CORTEXT_STATUS_LEGACY_AGENT_ID_NONCANONICAL",
+            "CORTEXT_STATUS_LEGACY_AGENT_NAME_COLLISION",
+            "CORTEXT_STATUS_HEARTBEAT_INVALID",
+            "CORTEXT_STATUS_DAEMON_ENDPOINT_STALE",
+            "CORTEXT_STATUS_DAEMON_TIMEOUT",
+            "CORTEXT_STATUS_DAEMON_RESPONSE_INVALID",
+            "CORTEXT_STATUS_DAEMON_STATUS_UNKNOWN",
+            "CORTEXT_STATUS_AGENT_EXPECTED_MISSING",
+            "CORTEXT_STATUS_DISABLED_PROCESS_ACTIVE",
+            "CORTEXT_STATUS_UNREGISTERED_PROCESS_ACTIVE",
+            "CORTEXT_STATUS_AGENT_DEGRADED",
+            "CORTEXT_STATUS_STATE_MISSING",
+            "CORTEXT_STATUS_STATE_UNREADABLE"
+          ],
           "type": "string"
         },
         "domain": {
+          "enum": [
+            "legacy",
+            "application",
+            "runtime",
+            "state"
+          ],
           "type": "string"
         },
         "recommended_operation": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "null"
         },
         "severity": {
-          "$ref": "#/definitions/StatusSeverity"
+          "enum": [
+            "info",
+            "error",
+            "warning",
+            "critical"
+          ],
+          "type": "string"
         },
         "summary": {
+          "maxLength": 512,
           "type": "string"
         }
       },

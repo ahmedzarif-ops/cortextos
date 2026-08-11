@@ -1,3 +1,15 @@
+import type {
+  IsolationEvidenceCode,
+  LegacyStatusObservationCode,
+  LegacyStatusObservationDomain,
+  LegacySupportedCapability,
+  LegacyUnsupportedCapability,
+  StatusCheckPolicy,
+  StatusCheckReasonCode,
+} from './status-contract.js';
+
+export type { StatusCheckPolicy, StatusCheckReasonCode } from './status-contract.js';
+
 export type StatusSeverity = 'info' | 'warning' | 'error' | 'critical';
 export type SnapshotStatus = 'complete' | 'partial';
 export type OverallStatus =
@@ -9,53 +21,30 @@ export type OverallStatus =
   | 'uninitialized'
   | 'unknown';
 
-export type StatusCheckPolicy =
-  | 'usable'
-  | 'healthy'
-  | 'update-safe'
-  | 'sandbox-namespace'
-  | 'security-contained';
+type StatusCheckForPolicy<P extends StatusCheckPolicy> =
+  | {
+    policy: P;
+    policy_version: `cortext.check.${P}/v1`;
+    result: 'pass';
+    reason_codes: [];
+  }
+  | {
+    policy: P;
+    policy_version: `cortext.check.${P}/v1`;
+    result: 'fail';
+    reason_codes: [StatusCheckReasonCode, ...StatusCheckReasonCode[]];
+  };
 
-export type StatusCheckReasonCode =
-  | 'CORTEXT_CHECK_SNAPSHOT_INCOMPLETE'
-  | 'CORTEXT_CHECK_INSTANCE_UNRESOLVED'
-  | 'CORTEXT_CHECK_OVERALL_DISALLOWED'
-  | 'CORTEXT_CHECK_STATE_NOT_READABLE'
-  | 'CORTEXT_CHECK_PROFILE_UNSUPPORTED'
-  | 'CORTEXT_CHECK_MANAGER_INTEGRITY_UNVERIFIED'
-  | 'CORTEXT_CHECK_CONSISTENCY_UNSTABLE'
-  | 'CORTEXT_CHECK_BASIS_INCOMPLETE'
-  | 'CORTEXT_CHECK_WRITER_NOT_ACTIVE'
-  | 'CORTEXT_CHECK_MIGRATION_NOT_IDLE'
-  | 'CORTEXT_CHECK_APPLICATION_UNVERIFIED'
-  | 'CORTEXT_CHECK_COMPATIBILITY_UNSAFE'
-  | 'CORTEXT_CHECK_CHECKPOINT_UNVERIFIED'
-  | 'CORTEXT_CHECK_BACKUP_UNVERIFIED'
-  | 'CORTEXT_CHECK_ROLLBACK_NOT_READY'
-  | 'CORTEXT_CHECK_LIFECYCLE_ERROR_PRESENT'
-  | 'CORTEXT_CHECK_TARGET_NOT_SANDBOX'
-  | 'CORTEXT_CHECK_ROOTS_NOT_ISOLATED'
-  | 'CORTEXT_CHECK_PROCESSES_NOT_ISOLATED'
-  | 'CORTEXT_CHECK_INTEGRATIONS_NOT_ROUTED'
-  | 'CORTEXT_CHECK_BOUNDARY_INSUFFICIENT'
-  | 'CORTEXT_CHECK_CREDENTIALS_EXPOSED'
-  | 'CORTEXT_CHECK_NETWORK_UNCONSTRAINED'
-  | 'CORTEXT_CHECK_HOST_ACCESS_FULL'
-  | 'CORTEXT_CHECK_ISOLATION_EVIDENCE_MISSING';
-
-export interface StatusCheckResult {
-  policy: StatusCheckPolicy;
-  policy_version: `cortext.check.${StatusCheckPolicy}/v1`;
-  result: 'pass' | 'fail';
-  reason_codes: StatusCheckReasonCode[];
-}
+export type StatusCheckResult = {
+  [P in StatusCheckPolicy]: StatusCheckForPolicy<P>;
+}[StatusCheckPolicy];
 
 export interface StatusObservation {
-  code: string;
+  code: LegacyStatusObservationCode;
   severity: StatusSeverity;
-  domain: string;
+  domain: LegacyStatusObservationDomain;
   summary: string;
-  recommended_operation: string | null;
+  recommended_operation: null;
 }
 
 export interface LifecycleStatusSnapshot {
@@ -80,13 +69,9 @@ export interface LifecycleStatusSnapshot {
     recovery_launcher_status: 'verified' | 'unverified' | 'invalid' | 'tampered' | 'unsupported' | 'unknown';
   };
   capabilities: {
-    profile:
-      | 'manager_uninitialized_v1'
-      | 'managed_stopped_v1'
-      | 'managed_running_v1'
-      | 'legacy_bridge_v1';
-    supported: string[];
-    unsupported: string[];
+    profile: 'legacy_bridge_v1';
+    supported: LegacySupportedCapability[];
+    unsupported: LegacyUnsupportedCapability[];
   };
   basis: {
     instance_id: string;
@@ -212,7 +197,7 @@ export interface LifecycleStatusSnapshot {
       network: 'none' | 'restricted' | 'unrestricted' | 'unknown';
       host_access: 'constrained' | 'full' | 'unknown';
       claim: 'none' | 'cortext_namespace' | 'security_contained';
-      evidence_codes: string[];
+      evidence_codes: IsolationEvidenceCode[];
     };
   };
   recovery: {
@@ -354,10 +339,10 @@ export interface RedactedLifecycleStatusSnapshot {
   };
   check: StatusCheckResult | null;
   observations: Array<{
-    code: string;
+    code: LegacyStatusObservationCode;
     severity: StatusSeverity;
-    domain: string;
-    recommended_operation: string | null;
+    domain: LegacyStatusObservationDomain;
+    recommended_operation: null;
   }>;
 }
 

@@ -3,6 +3,15 @@
 These checked-in JSON Schemas are the normative machine-readable contracts for
 `cortextos lifecycle status`.
 
+`cortext.status/v1` and `cortext.status.redacted/v1` describe the legacy bridge
+profile only. Managed lifecycle profiles will use a future discriminated
+contract instead of placing non-null managed evidence into this legacy shape.
+Check results bind each policy to its exact v1 identifier and require empty
+reasons on pass or at least one unique closed reason on failure. Redacted
+capabilities, observations, isolation evidence, and version strings are closed
+public surfaces; the redactor reconstructs their metadata rather than copying
+untrusted strings.
+
 When a status type changes, update its schema and the corresponding TypeScript
 type together. Run the focused lifecycle and schema tests before committing:
 

@@ -4,14 +4,7 @@ import type {
   StatusCheckReasonCode,
   StatusCheckResult,
 } from './status-types.js';
-
-const POLICIES: readonly StatusCheckPolicy[] = [
-  'usable',
-  'healthy',
-  'update-safe',
-  'sandbox-namespace',
-  'security-contained',
-] as const;
+import { STATUS_CHECK_POLICIES } from './status-contract.js';
 
 const NAMESPACE_EVIDENCE = [
   'CORTEXT_ISOLATION_LIVE_ROOT_DISJOINT',
@@ -35,18 +28,14 @@ export class UnsupportedStatusCheckPolicyError extends Error {
 
 export function normalizeStatusCheckPolicy(input: string): StatusCheckPolicy {
   const normalized = input.endsWith('@v1') ? input.slice(0, -3) : input;
-  if (!POLICIES.includes(normalized as StatusCheckPolicy)) {
+  if (!STATUS_CHECK_POLICIES.includes(normalized as StatusCheckPolicy)) {
     throw new UnsupportedStatusCheckPolicyError();
   }
   return normalized as StatusCheckPolicy;
 }
 
-function hasObservation(snapshot: LifecycleStatusSnapshot, code: string): boolean {
-  return snapshot.observations.some(observation => observation.code === code);
-}
-
 function hasEvidence(snapshot: LifecycleStatusSnapshot, required: readonly string[]): boolean {
-  const present = new Set(snapshot.runtime.isolation.evidence_codes);
+  const present = new Set<string>(snapshot.runtime.isolation.evidence_codes);
   return required.every(code => present.has(code));
 }
 
@@ -69,17 +58,14 @@ function evaluateUsable(
     ['blocked', 'migrating', 'unknown', 'uninitialized'].includes(snapshot.overall.status),
     'CORTEXT_CHECK_OVERALL_DISALLOWED',
   );
-  const readable = snapshot.state.status === 'readable'
-    || (snapshot.state.status === 'missing'
-      && hasObservation(snapshot, 'CORTEXT_STATUS_INSTANCE_NEVER_STARTED'));
-  addReason(reasons, !readable, 'CORTEXT_CHECK_STATE_NOT_READABLE');
+  addReason(reasons, snapshot.state.status !== 'readable', 'CORTEXT_CHECK_STATE_NOT_READABLE');
 }
 
 function evaluateHealthy(
   snapshot: LifecycleStatusSnapshot,
   reasons: StatusCheckReasonCode[],
 ): void {
-  addReason(reasons, snapshot.snapshot_status !== 'complete', 'CORTEXT_CHECK_SNAPSHOT_INCOMPLETE');
+  evaluateUsable(snapshot, reasons);
   const stable = snapshot.consistency.status === 'stable'
     || (snapshot.capabilities.profile === 'legacy_bridge_v1'
       && snapshot.consistency.status === 'unsupported');
@@ -114,13 +100,10 @@ function evaluateUpdateSafe(
   snapshot: LifecycleStatusSnapshot,
   reasons: StatusCheckReasonCode[],
 ): void {
-  addReason(reasons, snapshot.snapshot_status !== 'complete', 'CORTEXT_CHECK_SNAPSHOT_INCOMPLETE');
-  addReason(
-    reasons,
-    snapshot.capabilities.profile !== 'managed_stopped_v1'
-      && snapshot.capabilities.profile !== 'managed_running_v1',
-    'CORTEXT_CHECK_PROFILE_UNSUPPORTED',
-  );
+  evaluateUsable(snapshot, reasons);
+  // cortext.status/v1 is explicitly the legacy bridge contract. Managed
+  // update-safety will be evaluated by a future discriminated contract.
+  addReason(reasons, true, 'CORTEXT_CHECK_PROFILE_UNSUPPORTED');
   addReason(
     reasons,
     snapshot.manager.integrity !== 'verified'
@@ -247,10 +230,18 @@ export function evaluateStatusCheck(
   else if (policy === 'sandbox-namespace') evaluateSandboxNamespace(snapshot, reasonCodes);
   else evaluateSecurityContained(snapshot, reasonCodes);
 
+  if (reasonCodes.length === 0) {
+    return {
+      policy,
+      policy_version: `cortext.check.${policy}/v1`,
+      result: 'pass',
+      reason_codes: [],
+    } as StatusCheckResult;
+  }
   return {
     policy,
     policy_version: `cortext.check.${policy}/v1`,
-    result: reasonCodes.length === 0 ? 'pass' : 'fail',
-    reason_codes: reasonCodes,
-  };
+    result: 'fail',
+    reason_codes: reasonCodes as [StatusCheckReasonCode, ...StatusCheckReasonCode[]],
+  } as StatusCheckResult;
 }

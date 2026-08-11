@@ -1,5 +1,17 @@
 import { spawnSync } from 'child_process';
-import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync } from 'fs';
+import type { Dirent } from 'fs';
+import {
+  accessSync,
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  openSync,
+  opendirSync,
+  realpathSync,
+  readSync,
+  statSync,
+} from 'fs';
 import { createConnection } from 'net';
 import { homedir } from 'os';
 import { basename, join, resolve } from 'path';
@@ -7,6 +19,13 @@ import type { AgentStatus } from '../types/index.js';
 import { getIpcPath } from '../utils/paths.js';
 import { stripBom } from '../utils/strip-bom.js';
 import { CORTEXTOS_VERSION } from '../version.js';
+import {
+  LEGACY_STATUS_OBSERVATIONS,
+  LEGACY_SUPPORTED_CAPABILITIES,
+  LEGACY_UNSUPPORTED_CAPABILITIES,
+  PUBLIC_VERSION_RE,
+  type LegacyStatusObservationCode,
+} from './status-contract.js';
 import type {
   LifecycleStatusSnapshot,
   OverallStatus,
@@ -28,123 +47,12 @@ const HEARTBEAT_FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
 const MAX_JSON_BYTES = 1024 * 1024;
 const MAX_IPC_RESPONSE_BYTES = 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES = 256 * 1024;
+const MAX_DIRECTORY_ENTRIES = 4096;
 const SAFE_GIT_CONFIG_ARGS = [
+  '--no-optional-locks',
   '-c', 'core.fsmonitor=false',
   '-c', 'core.untrackedCache=false',
 ] as const;
-
-const OBSERVATIONS: Record<string, Omit<StatusObservation, 'code'>> = {
-  CORTEXT_STATUS_LEGACY_LAYOUT: {
-    severity: 'info', domain: 'legacy',
-    summary: 'An existing combined Cortext layout was detected.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_LEGACY_CAPABILITIES_LIMITED: {
-    severity: 'info', domain: 'legacy',
-    summary: 'Managed lifecycle authority is unavailable in the legacy bridge profile.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_LEGACY_ROOT_AUTHORITY_UNPROVEN: {
-    severity: 'error', domain: 'legacy',
-    summary: 'The selected custom state root cannot be bound to the legacy daemon identity.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_FRAMEWORK_NOT_FOUND: {
-    severity: 'warning', domain: 'application',
-    summary: 'The legacy application checkout could not be resolved.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_APPLICATION_VERSION_UNKNOWN: {
-    severity: 'warning', domain: 'application',
-    summary: 'The legacy application version could not be established.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_FRAMEWORK_MODIFIED: {
-    severity: 'warning', domain: 'application',
-    summary: 'The legacy framework checkout contains local modifications.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_VERSION_CONFLICT: {
-    severity: 'warning', domain: 'application',
-    summary: 'Legacy application version sources disagree.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_REGISTRY_INVALID: {
-    severity: 'error', domain: 'runtime',
-    summary: 'The enabled-agent registry is invalid or unreadable.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_AGENT_CONFIG_INVALID: {
-    severity: 'error', domain: 'runtime',
-    summary: 'At least one agent configuration is invalid or unreadable.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_AGENT_ID_INVALID: {
-    severity: 'error', domain: 'runtime',
-    summary: 'At least one legacy agent or organization identifier is invalid.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_LEGACY_AGENT_ID_NONCANONICAL: {
-    severity: 'warning', domain: 'runtime',
-    summary: 'At least one observable legacy agent or organization identifier requires canonicalization.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_LEGACY_AGENT_NAME_COLLISION: {
-    severity: 'error', domain: 'runtime',
-    summary: 'Multiple configured agents cannot be distinguished safely by legacy or canonical identity mapping.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_HEARTBEAT_INVALID: {
-    severity: 'warning', domain: 'runtime',
-    summary: 'At least one existing heartbeat is invalid or unreadable.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_DAEMON_ENDPOINT_STALE: {
-    severity: 'warning', domain: 'runtime',
-    summary: 'The daemon endpoint refused a local connection.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_DAEMON_TIMEOUT: {
-    severity: 'error', domain: 'runtime',
-    summary: 'The daemon status request timed out.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_DAEMON_RESPONSE_INVALID: {
-    severity: 'error', domain: 'runtime',
-    summary: 'The daemon returned an invalid status response.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_DAEMON_STATUS_UNKNOWN: {
-    severity: 'error', domain: 'runtime',
-    summary: 'The daemon status could not be determined.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_AGENT_EXPECTED_MISSING: {
-    severity: 'warning', domain: 'runtime',
-    summary: 'At least one enabled agent is absent from responsive daemon status.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_DISABLED_PROCESS_ACTIVE: {
-    severity: 'error', domain: 'runtime',
-    summary: 'At least one disabled agent process is active.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_UNREGISTERED_PROCESS_ACTIVE: {
-    severity: 'error', domain: 'runtime',
-    summary: 'At least one unregistered agent process is active.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_AGENT_DEGRADED: {
-    severity: 'warning', domain: 'runtime',
-    summary: 'At least one observed agent process is degraded.',
-    recommended_operation: null,
-  },
-  CORTEXT_STATUS_STATE_UNREADABLE: {
-    severity: 'critical', domain: 'state',
-    summary: 'The selected legacy state root is unreadable or invalid.',
-    recommended_operation: null,
-  },
-};
 
 const SEVERITY_ORDER: Record<StatusSeverity, number> = {
   critical: 0,
@@ -207,13 +115,42 @@ interface AgentInventory {
 }
 
 function readJson(path: string): JsonReadResult {
-  if (!existsSync(path)) return { kind: 'missing' };
+  let descriptor: number | null = null;
   try {
-    const metadata = statSync(path);
+    descriptor = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+    const metadata = fstatSync(descriptor);
     if (!metadata.isFile() || metadata.size > MAX_JSON_BYTES) return { kind: 'invalid' };
-    return { kind: 'ok', value: JSON.parse(stripBom(readFileSync(path, 'utf-8'))) };
-  } catch {
+    const bytes = Buffer.alloc(MAX_JSON_BYTES + 1);
+    let offset = 0;
+    while (offset <= MAX_JSON_BYTES) {
+      const read = readSync(descriptor, bytes, offset, bytes.length - offset, null);
+      if (read === 0) break;
+      offset += read;
+    }
+    if (offset > MAX_JSON_BYTES) return { kind: 'invalid' };
+    return { kind: 'ok', value: JSON.parse(stripBom(bytes.subarray(0, offset).toString('utf-8'))) };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'missing' };
     return { kind: 'invalid' };
+  } finally {
+    if (descriptor !== null) closeSync(descriptor);
+  }
+}
+
+function readDirectoryEntries(path: string): Dirent[] {
+  const directory = opendirSync(path);
+  const entries: Dirent[] = [];
+  try {
+    for (;;) {
+      const entry = directory.readSync();
+      if (!entry) return entries;
+      if (entries.length >= MAX_DIRECTORY_ENTRIES) {
+        throw new Error('CORTEXT_STATUS_DIRECTORY_ENTRY_LIMIT');
+      }
+      entries.push(entry);
+    }
+  } finally {
+    directory.closeSync();
   }
 }
 
@@ -237,7 +174,8 @@ function packageVersion(path: string): { kind: 'missing' | 'invalid' | 'ok'; ver
   if (
     !isRecord(result.value)
     || typeof result.value.version !== 'string'
-    || !/^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/.test(result.value.version)
+    || result.value.version.length > 64
+    || !PUBLIC_VERSION_RE.test(result.value.version)
   ) return { kind: 'invalid' };
   return { kind: 'ok', version: result.value.version };
 }
@@ -258,7 +196,7 @@ function isLegacyInstanceRoot(path: string): boolean {
 function discoverLegacyInstances(home: string): string[] {
   const instancesRoot = join(home, '.cortextos');
   if (!existsSync(instancesRoot)) return [];
-  const entries = readdirSync(instancesRoot, { withFileTypes: true });
+  const entries = readDirectoryEntries(instancesRoot);
   return entries
     .filter(entry => entry.isDirectory() && INSTANCE_ID_RE.test(entry.name))
     .filter(entry => isLegacyInstanceRoot(join(instancesRoot, entry.name)))
@@ -266,11 +204,24 @@ function discoverLegacyInstances(home: string): string[] {
     .sort();
 }
 
+function gitEnvironment(): NodeJS.ProcessEnv {
+  const environment = { ...process.env };
+  for (const key of Object.keys(environment)) {
+    if (key.toUpperCase().startsWith('GIT_')) delete environment[key];
+  }
+  return {
+    ...environment,
+    GIT_NO_LAZY_FETCH: '1',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_TERMINAL_PROMPT: '0',
+  };
+}
+
 function gitOutput(frameworkRoot: string, args: string[]): string | null {
   const result = spawnSync('git', [...SAFE_GIT_CONFIG_ARGS, ...args], {
     cwd: frameworkRoot,
     encoding: 'utf-8',
-    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+    env: gitEnvironment(),
     timeout: 3000,
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
   });
@@ -285,13 +236,21 @@ function gitModificationStatus(frameworkRoot: string): 'clean' | 'modified' | 'u
   ], {
     cwd: frameworkRoot,
     encoding: 'utf-8',
-    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+    env: gitEnvironment(),
     timeout: 3000,
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
   });
   if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOBUFS') return 'modified';
   if (result.status !== 0 || typeof result.stdout !== 'string') return 'unknown';
   return result.stdout.length === 0 ? 'clean' : 'modified';
+}
+
+function sameRealPath(first: string, second: string): boolean {
+  try {
+    return realpathSync(first) === realpathSync(second);
+  } catch {
+    return false;
+  }
 }
 
 function resolveFrameworkRoot(options: CollectLegacyStatusOptions): string | null {
@@ -345,7 +304,7 @@ function listAgentDirectories(
   const flatRoot = join(frameworkRoot, 'agents');
   if (existsSync(flatRoot)) {
     try {
-      for (const entry of readdirSync(flatRoot, { withFileTypes: true })) {
+      for (const entry of readDirectoryEntries(flatRoot)) {
         if (entry.isDirectory()) addAgentDir('@root', entry.name, join(flatRoot, entry.name));
       }
     } catch {
@@ -357,12 +316,12 @@ function listAgentDirectories(
   const orgsRoot = join(frameworkRoot, 'orgs');
   if (existsSync(orgsRoot)) {
     try {
-      for (const orgEntry of readdirSync(orgsRoot, { withFileTypes: true })) {
+      for (const orgEntry of readDirectoryEntries(orgsRoot)) {
         if (!orgEntry.isDirectory()) continue;
         const agentsRoot = join(orgsRoot, orgEntry.name, 'agents');
         if (!existsSync(agentsRoot)) continue;
         try {
-          for (const agentEntry of readdirSync(agentsRoot, { withFileTypes: true })) {
+          for (const agentEntry of readDirectoryEntries(agentsRoot)) {
             if (agentEntry.isDirectory()) {
               addAgentDir(orgEntry.name, agentEntry.name, join(agentsRoot, agentEntry.name));
             }
@@ -624,8 +583,9 @@ function defaultPidAlive(pid: number): boolean {
 
 function observationList(codes: Set<string>): StatusObservation[] {
   return [...codes]
-    .map(code => ({ code, ...OBSERVATIONS[code] }))
-    .filter((item): item is StatusObservation => !!item.summary)
+    .filter((code): code is LegacyStatusObservationCode =>
+      Object.prototype.hasOwnProperty.call(LEGACY_STATUS_OBSERVATIONS, code))
+    .map(code => ({ code, ...LEGACY_STATUS_OBSERVATIONS[code] }))
     .sort((a, b) => {
       const severity = SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity];
       if (severity !== 0) return severity;
@@ -692,7 +652,7 @@ export async function collectLegacyStatus(
     throw new LegacyStatusCollectionError('CORTEXT_STATUS_INVALID_INSTANCE');
   }
 
-  const selectedRootInput = options.ctxRoot ?? process.env.CTX_ROOT;
+  const selectedRootInput = options.ctxRoot ?? (explicitInstance ? undefined : process.env.CTX_ROOT);
   const canonicalCtxRoot = resolve(join(home, '.cortextos', instanceId));
   const ctxRoot = resolve(selectedRootInput ?? canonicalCtxRoot);
   if (!existsSync(ctxRoot)) {
@@ -717,7 +677,7 @@ export async function collectLegacyStatus(
   const ctxRootReadable = readableDirectory(ctxRoot);
   const legacyStateDir = join(ctxRoot, 'state');
   const stateDirExists = existsSync(legacyStateDir);
-  const stateReadable = ctxRootReadable && (!stateDirExists || readableDirectory(legacyStateDir));
+  const stateReadable = ctxRootReadable && stateDirExists && readableDirectory(legacyStateDir);
   const stateStatus: LifecycleStatusSnapshot['state']['status'] = !ctxRootReadable
     ? 'unreadable'
     : !stateDirExists
@@ -725,7 +685,8 @@ export async function collectLegacyStatus(
       : stateReadable
         ? 'readable'
         : 'unreadable';
-  if (!stateReadable) addObservation('CORTEXT_STATUS_STATE_UNREADABLE', true);
+  if (!stateDirExists) addObservation('CORTEXT_STATUS_STATE_MISSING', true);
+  else if (!stateReadable) addObservation('CORTEXT_STATUS_STATE_UNREADABLE', true);
 
   const frameworkRoot = resolveFrameworkRoot(options);
   if (frameworkRoot) addObservation('CORTEXT_STATUS_LEGACY_LAYOUT');
@@ -757,8 +718,11 @@ export async function collectLegacyStatus(
       });
     }
 
-    sourceCommit = gitOutput(frameworkRoot, ['rev-parse', 'HEAD']);
-    if (sourceCommit && /^[a-f0-9]{40,64}$/i.test(sourceCommit)) {
+    const repositoryRoot = gitOutput(frameworkRoot, ['rev-parse', '--show-toplevel']);
+    const repositoryBound = repositoryRoot !== null
+      && sameRealPath(repositoryRoot, frameworkRoot);
+    sourceCommit = repositoryBound ? gitOutput(frameworkRoot, ['rev-parse', 'HEAD']) : null;
+    if (repositoryBound && sourceCommit && /^[a-f0-9]{40,64}$/i.test(sourceCommit)) {
       gitBacked = true;
       versionEvidence.push({
         domain: 'source_provenance', source: 'git_commit', authority: 'provenance', value: sourceCommit,
@@ -766,7 +730,7 @@ export async function collectLegacyStatus(
     } else {
       sourceCommit = null;
     }
-    const remotes = gitOutput(frameworkRoot, ['remote']);
+    const remotes = repositoryBound ? gitOutput(frameworkRoot, ['remote']) : null;
     remoteStatus = remotes === null ? 'unknown' : remotes.length > 0 ? 'configured_unverified' : 'none';
     if (gitBacked && gitModificationStatus(frameworkRoot) === 'modified') {
       addObservation('CORTEXT_STATUS_FRAMEWORK_MODIFIED');
@@ -868,7 +832,9 @@ export async function collectLegacyStatus(
   }
 
   const materialObservation = [...observationCodes].some(code => {
-    const severity = OBSERVATIONS[code]?.severity;
+    const severity = code in LEGACY_STATUS_OBSERVATIONS
+      ? LEGACY_STATUS_OBSERVATIONS[code as LegacyStatusObservationCode].severity
+      : undefined;
     return severity === 'warning' || severity === 'error' || severity === 'critical';
   });
   let overallStatus: OverallStatus;
@@ -904,25 +870,8 @@ export async function collectLegacyStatus(
     },
     capabilities: {
       profile: 'legacy_bridge_v1',
-      supported: [
-        'legacy_layout',
-        'legacy_application_evidence',
-        'legacy_state_readability',
-        'legacy_agent_inventory',
-        'legacy_daemon_ipc',
-        'redacted_projection',
-        'check_policies_v1',
-      ],
-      unsupported: [
-        'transaction_basis',
-        'device_identity',
-        'writer_lease',
-        'release_integrity',
-        'component_lock',
-        'recovery_index',
-        'update_metadata',
-        'compatibility_matrix',
-      ],
+      supported: [...LEGACY_SUPPORTED_CAPABILITIES],
+      unsupported: [...LEGACY_UNSUPPORTED_CAPABILITIES],
     },
     basis: {
       instance_id: instanceId,
