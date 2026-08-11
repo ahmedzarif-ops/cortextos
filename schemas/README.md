@@ -10,12 +10,15 @@ Check results bind each policy to its exact v1 identifier and require empty
 reasons on pass or at least one unique policy-specific reason on failure.
 Passing results are additionally bound to the snapshot facts required by the
 policy evaluator; the legacy `update-safe` policy has no passing schema branch.
+Healthy summaries and checks require a running, responsive daemon and canonical
+info-only observations; usable checks reject canonical blocking observations.
 Observation codes are bound to their fixed severity and domain. Redacted error
 codes are likewise bound to one static message and detail code. Redacted
 capabilities, observations, isolation evidence, and version strings are closed
 public surfaces, and report identifiers and observation days use their exact
-emitted formats. The redactor reconstructs metadata and recomputes checks rather
-than copying untrusted assertions or strings.
+emitted formats. The redactor reconstructs observation metadata and derived
+overall fields before recomputing checks rather than copying untrusted
+assertions or strings.
 
 When a status type changes, update its schema and the corresponding TypeScript
 type together. Run the focused lifecycle and schema tests before committing:

@@ -12,11 +12,21 @@ import {
 import type {
   CountBucket,
   LifecycleStatusSnapshot,
+  OverallStatus,
   RedactedLifecycleStatusSnapshot,
+  StatusObservation,
   StatusCheckPolicy,
   StatusCheckResult,
   StatusSeverity,
 } from './status-types.js';
+
+const SEVERITY_ORDER: readonly StatusSeverity[] = ['critical', 'error', 'warning', 'info'];
+const BLOCKING_OBSERVATIONS = new Set<LegacyStatusObservationCode>([
+  'CORTEXT_STATUS_LEGACY_ROOT_AUTHORITY_UNPROVEN',
+  'CORTEXT_STATUS_LEGACY_AGENT_NAME_COLLISION',
+  'CORTEXT_STATUS_STATE_MISSING',
+  'CORTEXT_STATUS_STATE_UNREADABLE',
+]);
 
 export function countBucket(value: number | null): CountBucket | null {
   if (value === null || !Number.isSafeInteger(value) || value < 0) return null;
@@ -42,6 +52,33 @@ function projectCheck(snapshot: LifecycleStatusSnapshot): StatusCheckResult | nu
   return evaluateStatusCheck(snapshot, policy);
 }
 
+function deriveOverall(
+  snapshotStatus: LifecycleStatusSnapshot['snapshot_status'],
+  stateStatus: LifecycleStatusSnapshot['state']['status'],
+  daemonStatus: LifecycleStatusSnapshot['runtime']['daemon']['status'],
+  ipcStatus: LifecycleStatusSnapshot['runtime']['daemon']['ipc_status'],
+  observations: StatusObservation[],
+): LifecycleStatusSnapshot['overall'] {
+  const highestSeverity = SEVERITY_ORDER.find(severity =>
+    observations.some(observation => observation.severity === severity)) ?? null;
+  const materialObservation = observations.some(observation => observation.severity !== 'info');
+  let status: OverallStatus;
+  if (
+    stateStatus !== 'readable'
+    || observations.some(observation => BLOCKING_OBSERVATIONS.has(observation.code))
+  ) status = 'blocked';
+  else if (daemonStatus === 'unknown') status = 'unknown';
+  else if (daemonStatus === 'stopped') status = 'stopped';
+  else if (
+    daemonStatus === 'unresponsive'
+    || ipcStatus !== 'responsive'
+    || snapshotStatus !== 'complete'
+    || materialObservation
+  ) status = 'degraded';
+  else status = 'healthy';
+  return { status, summary: '', highest_severity: highestSeverity };
+}
+
 export function redactLifecycleStatus(
   snapshot: LifecycleStatusSnapshot,
   reportId: string = randomUUID(),
@@ -53,23 +90,58 @@ export function redactLifecycleStatus(
     || !Number.isFinite(Date.parse(snapshot.observed_at))) {
     throw new Error('Invalid lifecycle observation timestamp');
   }
-  const observations = snapshot.observations.flatMap(observation => {
+  const canonicalObservations: StatusObservation[] = snapshot.observations.flatMap(observation => {
     if (!Object.prototype.hasOwnProperty.call(LEGACY_STATUS_OBSERVATIONS, observation.code)) return [];
     const code = observation.code as LegacyStatusObservationCode;
     const metadata = LEGACY_STATUS_OBSERVATIONS[code];
-    return [{
-      code,
-      severity: metadata.severity,
-      domain: metadata.domain,
-      recommended_operation: metadata.recommended_operation,
-    }];
+    return [{ code, ...metadata }];
   });
+  const snapshotStatus = closedValue(snapshot.snapshot_status, ['complete', 'partial'], 'partial');
+  const stateStatus = closedValue(
+    snapshot.state.status,
+    ['readable', 'missing', 'unreadable', 'unknown'],
+    'unknown',
+  );
+  const daemonStatus = closedValue(
+    snapshot.runtime.daemon.status,
+    ['running', 'stopped', 'unresponsive', 'unknown'],
+    'unknown',
+  );
+  const ipcStatus = closedValue(
+    snapshot.runtime.daemon.ipc_status,
+    ['responsive', 'absent', 'refused', 'timeout', 'invalid', 'unknown'],
+    'unknown',
+  );
+  const overall = deriveOverall(
+    snapshotStatus,
+    stateStatus,
+    daemonStatus,
+    ipcStatus,
+    canonicalObservations,
+  );
+  const snapshotForCheck: LifecycleStatusSnapshot = {
+    ...snapshot,
+    snapshot_status: snapshotStatus,
+    state: { ...snapshot.state, status: stateStatus },
+    runtime: {
+      ...snapshot.runtime,
+      daemon: { ...snapshot.runtime.daemon, status: daemonStatus, ipc_status: ipcStatus },
+    },
+    overall,
+    observations: canonicalObservations,
+  };
+  const observations = canonicalObservations.map(observation => ({
+    code: observation.code,
+    severity: observation.severity,
+    domain: observation.domain,
+    recommended_operation: observation.recommended_operation,
+  }));
   return {
     schema_version: 'cortext.status.redacted/v1',
     ok: true,
     report_id: reportId,
     observed_day: `${snapshot.observed_at.slice(0, 10)}Z`,
-    snapshot_status: closedValue(snapshot.snapshot_status, ['complete', 'partial'], 'partial'),
+    snapshot_status: snapshotStatus,
     scope: {
       instance_alias: 'instance_1',
       target_kind: closedValue(snapshot.scope.target_kind, ['live', 'sandbox', 'unknown'], 'unknown'),
@@ -128,7 +200,7 @@ export function redactLifecycleStatus(
     },
     state: {
       schema_version: null,
-      status: closedValue(snapshot.state.status, ['readable', 'missing', 'unreadable', 'unknown'], 'unknown'),
+      status: stateStatus,
       migration_status: 'unknown',
     },
     components: {
@@ -138,11 +210,7 @@ export function redactLifecycleStatus(
       drift: 'unknown',
     },
     runtime: {
-      daemon_status: closedValue(
-        snapshot.runtime.daemon.status,
-        ['running', 'stopped', 'unresponsive', 'unknown'],
-        'unknown',
-      ),
+      daemon_status: daemonStatus,
       dashboard_status: 'unknown',
       agent_count_bucket: countBucket(snapshot.runtime.agents.configured),
       observed_process_count_bucket: countBucket(snapshot.runtime.agents.observed_processes),
@@ -217,20 +285,10 @@ export function redactLifecycleStatus(
     },
     compatibility: { status: 'unknown', reason_codes: [] },
     overall: {
-      status: closedValue(
-        snapshot.overall.status,
-        ['healthy', 'degraded', 'stopped', 'migrating', 'blocked', 'uninitialized', 'unknown'],
-        'unknown',
-      ),
-      highest_severity: snapshot.overall.highest_severity === null
-        ? null
-        : closedValue<StatusSeverity>(
-          snapshot.overall.highest_severity,
-          ['info', 'warning', 'error', 'critical'],
-          'critical',
-        ),
+      status: overall.status,
+      highest_severity: overall.highest_severity,
     },
-    check: projectCheck(snapshot),
+    check: projectCheck(snapshotForCheck),
     observations,
   };
 }

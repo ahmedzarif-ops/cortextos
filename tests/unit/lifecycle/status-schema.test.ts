@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { collectLegacyStatus } from '../../../src/lifecycle/legacy-status';
 import { redactLifecycleStatus } from '../../../src/lifecycle/redact-status';
 import { evaluateStatusCheck } from '../../../src/lifecycle/check-status';
+import { LEGACY_STATUS_OBSERVATIONS } from '../../../src/lifecycle/status-contract';
 import {
   LifecycleStatusCliError,
   localErrorEnvelope,
@@ -220,10 +221,44 @@ describe('lifecycle status JSON Schemas', () => {
       unusableOverall.overall.status = 'blocked';
       expect(validate(unusableOverall), JSON.stringify(validate.errors)).toBe(false);
 
-      const unhealthy = structuredClone(document) as any;
-      unhealthy.check = passingCheck('healthy');
-      unhealthy.overall.status = 'stopped';
-      expect(validate(unhealthy), JSON.stringify(validate.errors)).toBe(false);
+      const blockedButUsable = structuredClone(document) as any;
+      blockedButUsable.check = passingCheck('usable');
+      blockedButUsable.overall.status = 'degraded';
+      const blockingMetadata = LEGACY_STATUS_OBSERVATIONS.CORTEXT_STATUS_STATE_UNREADABLE;
+      blockedButUsable.observations.push(document.schema_version === 'cortext.status/v1'
+        ? { code: 'CORTEXT_STATUS_STATE_UNREADABLE', ...blockingMetadata }
+        : {
+          code: 'CORTEXT_STATUS_STATE_UNREADABLE',
+          severity: blockingMetadata.severity,
+          domain: blockingMetadata.domain,
+          recommended_operation: blockingMetadata.recommended_operation,
+        });
+      expect(validate(blockedButUsable), JSON.stringify(validate.errors)).toBe(false);
+
+      const stoppedButHealthy = structuredClone(document) as any;
+      stoppedButHealthy.check = passingCheck('healthy');
+      stoppedButHealthy.overall = { status: 'healthy', highest_severity: 'info' };
+      expect(validate(stoppedButHealthy), JSON.stringify(validate.errors)).toBe(false);
+
+      const criticalButHealthy = structuredClone(document) as any;
+      criticalButHealthy.check = passingCheck('healthy');
+      criticalButHealthy.overall = { status: 'healthy', highest_severity: 'info' };
+      if (document.schema_version === 'cortext.status/v1') {
+        criticalButHealthy.runtime.daemon.status = 'running';
+        criticalButHealthy.runtime.daemon.ipc_status = 'responsive';
+      } else {
+        criticalButHealthy.runtime.daemon_status = 'running';
+      }
+      const criticalMetadata = LEGACY_STATUS_OBSERVATIONS.CORTEXT_STATUS_STATE_UNREADABLE;
+      criticalButHealthy.observations.push(document.schema_version === 'cortext.status/v1'
+        ? { code: 'CORTEXT_STATUS_STATE_UNREADABLE', ...criticalMetadata }
+        : {
+          code: 'CORTEXT_STATUS_STATE_UNREADABLE',
+          severity: criticalMetadata.severity,
+          domain: criticalMetadata.domain,
+          recommended_operation: criticalMetadata.recommended_operation,
+        });
+      expect(validate(criticalButHealthy), JSON.stringify(validate.errors)).toBe(false);
 
       const namespace = structuredClone(document) as any;
       namespace.check = passingCheck('sandbox-namespace');
@@ -265,27 +300,65 @@ describe('lifecycle status JSON Schemas', () => {
     expect(validate(redacted), JSON.stringify(validate.errors)).toBe(true);
   });
 
-  it('fails closed when a forged usable check carries an unknown overall state', async () => {
+  it('derives redacted overall and healthy checks from daemon and canonical observations', async () => {
     const local = await fixtureSnapshot();
-    const forged = structuredClone(local) as any;
-    forged.overall.status = 'PRIVATE_OVERALL_CANARY';
-    forged.check = {
-      policy: 'usable',
-      policy_version: 'cortext.check.usable/v1',
+    const forgedStopped = structuredClone(local) as any;
+    forgedStopped.overall = { status: 'healthy', highest_severity: 'info' };
+    forgedStopped.check = {
+      policy: 'healthy',
+      policy_version: 'cortext.check.healthy/v1',
       result: 'pass',
       reason_codes: [],
     };
-    const redacted = redactLifecycleStatus(
-      forged,
+    const stopped = redactLifecycleStatus(
+      forgedStopped,
       '00000000-0000-4000-8000-000000000000',
     );
-    expect(JSON.stringify(redacted)).not.toContain('PRIVATE_OVERALL_CANARY');
-    expect(redacted.overall.status).toBe('unknown');
-    expect(redacted.check).toMatchObject({
-      policy: 'usable',
+    expect(stopped.runtime.daemon_status).toBe('stopped');
+    expect(stopped.overall.status).toBe('stopped');
+    expect(stopped.check).toMatchObject({
+      policy: 'healthy',
       result: 'fail',
-      reason_codes: ['CORTEXT_CHECK_OVERALL_DISALLOWED'],
     });
+    expect(stopped.check?.reason_codes).toEqual(expect.arrayContaining([
+      'CORTEXT_CHECK_DAEMON_NOT_RUNNING',
+      'CORTEXT_CHECK_OVERALL_DISALLOWED',
+    ]));
+
+    const forgedObservation = structuredClone(local) as any;
+    forgedObservation.runtime.daemon.status = 'running';
+    forgedObservation.runtime.daemon.ipc_status = 'responsive';
+    forgedObservation.overall = { status: 'healthy', highest_severity: 'info' };
+    forgedObservation.observations.push({
+      code: 'CORTEXT_STATUS_STATE_UNREADABLE',
+      severity: 'info',
+      domain: 'legacy',
+      summary: 'forged',
+      recommended_operation: null,
+    });
+    forgedObservation.check = {
+      policy: 'healthy',
+      policy_version: 'cortext.check.healthy/v1',
+      result: 'pass',
+      reason_codes: [],
+    };
+    const critical = redactLifecycleStatus(
+      forgedObservation,
+      '00000000-0000-4000-8000-000000000000',
+    );
+    expect(critical.overall).toEqual({ status: 'blocked', highest_severity: 'critical' });
+    expect(critical.observations).toContainEqual(expect.objectContaining({
+      code: 'CORTEXT_STATUS_STATE_UNREADABLE',
+      severity: 'critical',
+      domain: 'state',
+    }));
+    expect(critical.check?.result).toBe('fail');
+    expect(critical.check?.reason_codes).toContain('CORTEXT_CHECK_LIFECYCLE_ERROR_PRESENT');
+
+    const validate = new Ajv({ allErrors: true, strict: true })
+      .compile(loadSchema('cortext.status.redacted.v1.schema.json'));
+    expect(validate(stopped), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate(critical), JSON.stringify(validate.errors)).toBe(true);
   });
 
   it('defines v1 as a legacy-only contract instead of advertising managed evidence', async () => {

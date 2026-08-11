@@ -49,6 +49,7 @@ const MAX_IPC_RESPONSE_BYTES = 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES = 256 * 1024;
 const MAX_DIRECTORY_ENTRIES = 4096;
 const SAFE_GIT_CONFIG_ARGS = [
+  '--no-pager',
   '--no-optional-locks',
   '-c', 'core.fsmonitor=false',
   '-c', 'core.untrackedCache=false',
@@ -248,24 +249,6 @@ function gitOutput(frameworkRoot: string, args: string[]): string | null {
   });
   if (result.status !== 0 || typeof result.stdout !== 'string') return null;
   return result.stdout.trim();
-}
-
-function gitModificationStatus(frameworkRoot: string): 'clean' | 'modified' | 'unknown' {
-  const executable = trustedGitExecutable();
-  if (!executable) return 'unknown';
-  const result = spawnSync(executable, [
-    ...SAFE_GIT_CONFIG_ARGS,
-    'status', '--porcelain=v1', '--untracked-files=normal',
-  ], {
-    cwd: frameworkRoot,
-    encoding: 'utf-8',
-    env: gitEnvironment(),
-    timeout: 3000,
-    maxBuffer: MAX_GIT_OUTPUT_BYTES,
-  });
-  if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOBUFS') return 'modified';
-  if (result.status !== 0 || typeof result.stdout !== 'string') return 'unknown';
-  return result.stdout.length === 0 ? 'clean' : 'modified';
 }
 
 function sameRealPath(first: string, second: string): boolean {
@@ -775,9 +758,6 @@ export async function collectLegacyStatus(
     }
     const remotes = repositoryBound ? gitOutput(frameworkRoot, ['remote']) : null;
     remoteStatus = remotes === null ? 'unknown' : remotes.length > 0 ? 'configured_unverified' : 'none';
-    if (gitBacked && gitModificationStatus(frameworkRoot) === 'modified') {
-      addObservation('CORTEXT_STATUS_FRAMEWORK_MODIFIED');
-    }
   }
 
   versionEvidence.push({

@@ -4,7 +4,11 @@ import type {
   StatusCheckReasonCode,
   StatusCheckResult,
 } from './status-types.js';
-import { STATUS_CHECK_POLICIES } from './status-contract.js';
+import {
+  LEGACY_STATUS_OBSERVATIONS,
+  STATUS_CHECK_POLICIES,
+  type LegacyStatusObservationCode,
+} from './status-contract.js';
 
 const NAMESPACE_EVIDENCE = [
   'CORTEXT_ISOLATION_LIVE_ROOT_DISJOINT',
@@ -19,6 +23,13 @@ const CONTAINMENT_EVIDENCE = [
   'CORTEXT_ISOLATION_EGRESS_POLICY_ENFORCED',
   'CORTEXT_ISOLATION_HOST_ACCESS_CONSTRAINED',
 ] as const;
+
+const BLOCKING_OBSERVATION_CODES = new Set<LegacyStatusObservationCode>([
+  'CORTEXT_STATUS_LEGACY_ROOT_AUTHORITY_UNPROVEN',
+  'CORTEXT_STATUS_LEGACY_AGENT_NAME_COLLISION',
+  'CORTEXT_STATUS_STATE_MISSING',
+  'CORTEXT_STATUS_STATE_UNREADABLE',
+]);
 
 export class UnsupportedStatusCheckPolicyError extends Error {
   constructor() {
@@ -55,7 +66,10 @@ function evaluateUsable(
   addReason(reasons, !snapshot.scope.resolved_instance_id, 'CORTEXT_CHECK_INSTANCE_UNRESOLVED');
   addReason(
     reasons,
-    !['healthy', 'degraded', 'stopped'].includes(snapshot.overall.status),
+    !['healthy', 'degraded', 'stopped'].includes(snapshot.overall.status)
+      || snapshot.runtime.daemon.status === 'unknown'
+      || snapshot.observations.some(observation =>
+        BLOCKING_OBSERVATION_CODES.has(observation.code as LegacyStatusObservationCode)),
     'CORTEXT_CHECK_OVERALL_DISALLOWED',
   );
   addReason(reasons, snapshot.state.status !== 'readable', 'CORTEXT_CHECK_STATE_NOT_READABLE');
@@ -70,10 +84,22 @@ function evaluateHealthy(
     || (snapshot.capabilities.profile === 'legacy_bridge_v1'
       && snapshot.consistency.status === 'unsupported');
   addReason(reasons, !stable, 'CORTEXT_CHECK_CONSISTENCY_UNSTABLE');
+  addReason(
+    reasons,
+    snapshot.runtime.daemon.status !== 'running'
+      || snapshot.runtime.daemon.ipc_status !== 'responsive',
+    'CORTEXT_CHECK_DAEMON_NOT_RUNNING',
+  );
   addReason(reasons, snapshot.overall.status !== 'healthy', 'CORTEXT_CHECK_OVERALL_DISALLOWED');
   addReason(
     reasons,
-    snapshot.overall.highest_severity !== null && snapshot.overall.highest_severity !== 'info',
+    snapshot.observations.some(observation => {
+      if (!Object.prototype.hasOwnProperty.call(LEGACY_STATUS_OBSERVATIONS, observation.code)) {
+        return false;
+      }
+      return LEGACY_STATUS_OBSERVATIONS[observation.code as LegacyStatusObservationCode].severity
+        !== 'info';
+    }),
     'CORTEXT_CHECK_LIFECYCLE_ERROR_PRESENT',
   );
 }

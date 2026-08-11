@@ -1,8 +1,10 @@
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -62,9 +64,16 @@ function expectJsonRun(result, exitCode, schemaName, expectedCode) {
 
 const root = mkdtempSync(join(process.platform === 'win32' ? tmpdir() : '/tmp', 'cx-ls-'));
 try {
+  const instanceId = `verify_${randomUUID().replaceAll('-', '')}`;
+  if (process.platform === 'win32') {
+    const pipeName = `cortextos-${instanceId}`;
+    if (readdirSync('\\\\.\\pipe\\').includes(pipeName)) {
+      throw new Error('random verifier pipe unexpectedly exists');
+    }
+  }
   const home = join(root, 'home');
   const frameworkRoot = join(root, 'framework');
-  mkdirSync(join(home, '.cortextos', 'default', 'state'), { recursive: true });
+  mkdirSync(join(home, '.cortextos', instanceId, 'state'), { recursive: true });
   mkdirSync(frameworkRoot, { recursive: true });
   writeFileSync(
     join(frameworkRoot, 'package.json'),
@@ -73,7 +82,7 @@ try {
   );
 
   const local = expectJsonRun(
-    run(['--instance', 'default', '--json', '--contract', 'cortext.status/v1'], home, frameworkRoot),
+    run(['--instance', instanceId, '--json', '--contract', 'cortext.status/v1'], home, frameworkRoot),
     0,
     'cortext.status.v1.schema.json',
   );
@@ -82,26 +91,26 @@ try {
   }
   expectJsonRun(
     run([
-      '--instance', 'default', '--json', '--redact',
+      '--instance', instanceId, '--json', '--redact',
       '--contract', 'cortext.status.redacted/v1',
     ], home, frameworkRoot),
     0,
     'cortext.status.redacted.v1.schema.json',
   );
   const usable = expectJsonRun(
-    run(['--instance', 'default', '--json', '--check', 'usable@v1'], home, frameworkRoot),
+    run(['--instance', instanceId, '--json', '--check', 'usable@v1'], home, frameworkRoot),
     0,
     'cortext.status.v1.schema.json',
   );
   if (usable.check?.result !== 'pass') throw new Error('usable@v1 did not pass');
   const healthy = expectJsonRun(
-    run(['--instance', 'default', '--json', '--check', 'healthy@v1'], home, frameworkRoot),
+    run(['--instance', instanceId, '--json', '--check', 'healthy@v1'], home, frameworkRoot),
     1,
     'cortext.status.v1.schema.json',
   );
   if (healthy.check?.result !== 'fail') throw new Error('healthy@v1 did not fail');
   expectJsonRun(
-    run(['--instance', 'default', '--json', '--redact', '--paths'], home, frameworkRoot),
+    run(['--instance', instanceId, '--json', '--redact', '--paths'], home, frameworkRoot),
     2,
     'cortext.status.redacted.error.v1.schema.json',
     'CORTEXT_STATUS_INVALID_OPTION_COMBINATION',
@@ -117,7 +126,7 @@ try {
     'CORTEXT_STATUS_COLLECTION_FAILED',
   );
   expectJsonRun(
-    run(['--instance', 'default', '--json', '--redact', '--check', 'unknown@v1'], home, frameworkRoot),
+    run(['--instance', instanceId, '--json', '--redact', '--check', 'unknown@v1'], home, frameworkRoot),
     4,
     'cortext.status.redacted.error.v1.schema.json',
     'CORTEXT_STATUS_UNSUPPORTED_CHECK_POLICY',

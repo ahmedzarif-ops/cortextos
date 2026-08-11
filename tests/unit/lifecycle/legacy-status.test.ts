@@ -253,7 +253,7 @@ describe('legacy lifecycle status collector', () => {
     expect(snapshot.observations.map(item => item.code)).toContain('CORTEXT_STATUS_VERSION_CONFLICT');
   });
 
-  it('reports framework modifications without exposing changed paths', async () => {
+  it('does not claim framework modification state without a non-executing proof', async () => {
     const { frameworkRoot, ctxRoot } = makeFixture();
     execFileSync('git', ['init'], { cwd: frameworkRoot, stdio: 'ignore' });
     execFileSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: frameworkRoot });
@@ -269,10 +269,40 @@ describe('legacy lifecycle status collector', () => {
       probeDaemon: async () => ({ kind: 'absent' }),
     });
 
-    expect(snapshot.observations.map(item => item.code)).toContain(
+    expect(snapshot.observations.map(item => item.code)).not.toContain(
       'CORTEXT_STATUS_FRAMEWORK_MODIFIED',
     );
     expect(JSON.stringify(snapshot)).not.toContain('PRIVATE_CHANGED_PATH_CANARY');
+  });
+
+  it('does not execute repository-configured clean filters during Git inspection', async () => {
+    const { root, frameworkRoot, ctxRoot } = makeFixture();
+    execFileSync('git', ['init'], { cwd: frameworkRoot, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: frameworkRoot });
+    execFileSync('git', ['config', 'user.name', 'Lifecycle Test'], { cwd: frameworkRoot });
+    writeFileSync(join(frameworkRoot, '.gitattributes'), '* filter=evil\n', 'utf-8');
+    execFileSync('git', ['add', '.'], { cwd: frameworkRoot });
+    execFileSync('git', ['commit', '-m', 'fixture'], { cwd: frameworkRoot, stdio: 'ignore' });
+
+    const marker = join(root, 'CLEAN_FILTER_EXECUTED_CANARY');
+    const filter = join(root, 'malicious-clean-filter');
+    writeFileSync(filter, `#!/bin/sh\nprintf executed > "${marker}"\ncat\n`, 'utf-8');
+    chmodSync(filter, 0o700);
+    execFileSync('git', ['config', 'filter.evil.clean', filter], { cwd: frameworkRoot });
+    writeJson(join(frameworkRoot, 'package.json'), { name: 'cortextos', version: '0.1.1' });
+
+    const snapshot = await collectLegacyStatus({
+      instanceId: 'default',
+      ctxRoot,
+      frameworkRoot,
+      probeDaemon: async () => ({ kind: 'absent' }),
+    });
+
+    expect(snapshot.application.source_commit).toMatch(/^[a-f0-9]{40,64}$/);
+    expect(existsSync(marker)).toBe(false);
+    expect(snapshot.observations.map(item => item.code)).not.toContain(
+      'CORTEXT_STATUS_FRAMEWORK_MODIFIED',
+    );
   });
 
   it('does not execute a repository-configured fsmonitor command during Git inspection', async () => {
@@ -1062,6 +1092,28 @@ describe('lifecycle status check policies', () => {
     const updateSafe = evaluateStatusCheck(blocked, 'update-safe@v1');
     expect(updateSafe.result).toBe('fail');
     expect(updateSafe.reason_codes).toContain('CORTEXT_CHECK_OVERALL_DISALLOWED');
+  });
+
+  it('does not let a forged derived overall hide a canonical blocking observation', async () => {
+    const healthy = await healthyLegacySnapshot();
+    const forged = structuredClone(healthy) as any;
+    forged.overall.status = 'degraded';
+    forged.observations.push({
+      code: 'CORTEXT_STATUS_LEGACY_AGENT_NAME_COLLISION',
+      severity: 'info',
+      domain: 'legacy',
+      summary: 'forged',
+      recommended_operation: null,
+    });
+
+    expect(evaluateStatusCheck(forged, 'usable@v1')).toMatchObject({
+      result: 'fail',
+      reason_codes: expect.arrayContaining(['CORTEXT_CHECK_OVERALL_DISALLOWED']),
+    });
+    expect(evaluateStatusCheck(forged, 'healthy@v1')).toMatchObject({
+      result: 'fail',
+      reason_codes: expect.arrayContaining(['CORTEXT_CHECK_LIFECYCLE_ERROR_PRESENT']),
+    });
   });
 
   it('orders namespace and containment failures by the pinned v1 sequence', async () => {

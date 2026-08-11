@@ -1154,6 +1154,44 @@
                     "type": "string"
                   }
                 }
+              },
+              "runtime": {
+                "type": "object",
+                "properties": {
+                  "daemon": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "enum": [
+                          "running",
+                          "stopped",
+                          "unresponsive"
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              "observations": {
+                "type": "array",
+                "not": {
+                  "contains": {
+                    "type": "object",
+                    "properties": {
+                      "code": {
+                        "enum": [
+                          "CORTEXT_STATUS_LEGACY_ROOT_AUTHORITY_UNPROVEN",
+                          "CORTEXT_STATUS_LEGACY_AGENT_NAME_COLLISION",
+                          "CORTEXT_STATUS_STATE_MISSING",
+                          "CORTEXT_STATUS_STATE_UNREADABLE"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "code"
+                    ]
+                  }
+                }
               }
             }
           }
@@ -1225,6 +1263,33 @@
                   "resolved_instance_id": {
                     "pattern": "^[a-z0-9_-]+$",
                     "type": "string"
+                  }
+                }
+              },
+              "observations": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "severity": {
+                      "const": "info"
+                    }
+                  }
+                }
+              },
+              "runtime": {
+                "type": "object",
+                "properties": {
+                  "daemon": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "const": "running"
+                      },
+                      "ipc_status": {
+                        "const": "responsive"
+                      }
+                    }
                   }
                 }
               }
@@ -1442,6 +1507,102 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "overall": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "healthy"
+                  }
+                },
+                "required": [
+                  "status"
+                ]
+              }
+            },
+            "required": [
+              "overall"
+            ]
+          },
+          "then": {
+            "properties": {
+              "snapshot_status": {
+                "const": "complete"
+              },
+              "state": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "readable"
+                  }
+                }
+              },
+              "consistency": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "stable",
+                      "unsupported"
+                    ]
+                  }
+                }
+              },
+              "overall": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "healthy"
+                  },
+                  "highest_severity": {
+                    "enum": [
+                      null,
+                      "info"
+                    ]
+                  }
+                }
+              },
+              "scope": {
+                "type": "object",
+                "properties": {
+                  "resolved_instance_id": {
+                    "pattern": "^[a-z0-9_-]+$",
+                    "type": "string"
+                  }
+                }
+              },
+              "observations": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "severity": {
+                      "const": "info"
+                    }
+                  }
+                }
+              },
+              "runtime": {
+                "type": "object",
+                "properties": {
+                  "daemon": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "const": "running"
+                      },
+                      "ipc_status": {
+                        "const": "responsive"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       ]
     },
@@ -1483,6 +1644,7 @@
         "CORTEXT_CHECK_PROFILE_UNSUPPORTED",
         "CORTEXT_CHECK_MANAGER_INTEGRITY_UNVERIFIED",
         "CORTEXT_CHECK_CONSISTENCY_UNSTABLE",
+        "CORTEXT_CHECK_DAEMON_NOT_RUNNING",
         "CORTEXT_CHECK_BASIS_INCOMPLETE",
         "CORTEXT_CHECK_WRITER_NOT_ACTIVE",
         "CORTEXT_CHECK_MIGRATION_NOT_IDLE",
@@ -1621,6 +1783,7 @@
                   "CORTEXT_CHECK_OVERALL_DISALLOWED",
                   "CORTEXT_CHECK_STATE_NOT_READABLE",
                   "CORTEXT_CHECK_CONSISTENCY_UNSTABLE",
+                  "CORTEXT_CHECK_DAEMON_NOT_RUNNING",
                   "CORTEXT_CHECK_LIFECYCLE_ERROR_PRESENT"
                 ],
                 "type": "string"
