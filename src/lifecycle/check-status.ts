@@ -62,15 +62,19 @@ function addReason(
   if (failed && !reasons.includes(code)) reasons.push(code);
 }
 
+function snapshotIncomplete(snapshot: LifecycleStatusSnapshot): boolean {
+  return snapshot.snapshot_status !== 'complete'
+    || snapshot.observations.some(observation =>
+      PARTIAL_OBSERVATION_CODES.has(observation.code as LegacyStatusObservationCode));
+}
+
 function evaluateUsable(
   snapshot: LifecycleStatusSnapshot,
   reasons: StatusCheckReasonCode[],
 ): void {
   addReason(
     reasons,
-    snapshot.snapshot_status !== 'complete'
-      || snapshot.observations.some(observation =>
-        PARTIAL_OBSERVATION_CODES.has(observation.code as LegacyStatusObservationCode)),
+    snapshotIncomplete(snapshot),
     'CORTEXT_CHECK_SNAPSHOT_INCOMPLETE',
   );
   addReason(reasons, !snapshot.scope.resolved_instance_id, 'CORTEXT_CHECK_INSTANCE_UNRESOLVED');
@@ -188,7 +192,7 @@ function evaluateSandboxNamespace(
   reasons: StatusCheckReasonCode[],
   includeEvidence = true,
 ): void {
-  addReason(reasons, snapshot.snapshot_status !== 'complete', 'CORTEXT_CHECK_SNAPSHOT_INCOMPLETE');
+  addReason(reasons, snapshotIncomplete(snapshot), 'CORTEXT_CHECK_SNAPSHOT_INCOMPLETE');
   addReason(reasons, snapshot.scope.target_kind !== 'sandbox', 'CORTEXT_CHECK_TARGET_NOT_SANDBOX');
   addReason(reasons, snapshot.runtime.isolation.data_roots !== 'isolated', 'CORTEXT_CHECK_ROOTS_NOT_ISOLATED');
   addReason(

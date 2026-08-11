@@ -355,6 +355,14 @@ function listAgentDirectories(
       invalid = true;
       continue;
     }
+    if (
+      Object.prototype.hasOwnProperty.call(config.value, 'enabled')
+      && typeof config.value.enabled !== 'boolean'
+    ) {
+      addObservation('CORTEXT_STATUS_AGENT_CONFIG_INVALID');
+      invalid = true;
+      continue;
+    }
     definition.enabledFromConfig = config.value.enabled === false ? false : true;
   }
 
@@ -410,13 +418,23 @@ function collectAgentInventory(
     if (!CANONICAL_AGENT_ID_RE.test(name)) {
       addObservation('CORTEXT_STATUS_LEGACY_AGENT_ID_NONCANONICAL');
     }
-    const org = typeof rawEntry.org === 'string' ? rawEntry.org : null;
-    if (org && !LEGACY_SAFE_AGENT_ID_RE.test(org)) {
+    const hasOrg = Object.prototype.hasOwnProperty.call(rawEntry, 'org');
+    const hasEnabled = Object.prototype.hasOwnProperty.call(rawEntry, 'enabled');
+    if (
+      (hasOrg && typeof rawEntry.org !== 'string')
+      || (hasEnabled && typeof rawEntry.enabled !== 'boolean')
+    ) {
       addObservation('CORTEXT_STATUS_REGISTRY_INVALID');
       sourceInvalid = true;
       continue;
     }
-    if (org && !CANONICAL_AGENT_ID_RE.test(org)) {
+    const org = hasOrg ? rawEntry.org as string : null;
+    if (org !== null && !LEGACY_SAFE_AGENT_ID_RE.test(org)) {
+      addObservation('CORTEXT_STATUS_REGISTRY_INVALID');
+      sourceInvalid = true;
+      continue;
+    }
+    if (org !== null && !CANONICAL_AGENT_ID_RE.test(org)) {
       addObservation('CORTEXT_STATUS_LEGACY_AGENT_ID_NONCANONICAL');
     }
 

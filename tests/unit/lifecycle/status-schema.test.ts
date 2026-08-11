@@ -294,6 +294,36 @@ describe('lifecycle status JSON Schemas', () => {
       expect(evaluateStatusCheck(forged, 'usable@v1').reason_codes, code).toContain(
         'CORTEXT_CHECK_SNAPSHOT_INCOMPLETE',
       );
+      const isolated = structuredClone(forged) as any;
+      isolated.scope.target_kind = 'sandbox';
+      isolated.runtime.isolation = {
+        boundary: 'vm',
+        data_roots: 'isolated',
+        process_namespace: 'isolated',
+        managed_integrations: 'intercepted',
+        credentials: 'removed',
+        network: 'none',
+        host_access: 'constrained',
+        claim: 'security_contained',
+        evidence_codes: [
+          'CORTEXT_ISOLATION_LIVE_ROOT_DISJOINT',
+          'CORTEXT_ISOLATION_PROCESS_NAMESPACE_DISJOINT',
+          'CORTEXT_ISOLATION_MANAGED_INTEGRATIONS_ROUTED',
+          'CORTEXT_ISOLATION_BOUNDARY_ENFORCED',
+          'CORTEXT_ISOLATION_HOST_CREDENTIALS_UNAVAILABLE',
+          'CORTEXT_ISOLATION_EGRESS_POLICY_ENFORCED',
+          'CORTEXT_ISOLATION_HOST_ACCESS_CONSTRAINED',
+        ],
+      };
+      for (const policy of ['sandbox-namespace@v1', 'security-contained@v1']) {
+        const normalizedPolicy = policy.slice(0, -3);
+        expect(evaluateStatusCheck(isolated, policy), `${code}: ${policy}`).toEqual({
+          policy: normalizedPolicy,
+          policy_version: `cortext.check.${normalizedPolicy}/v1`,
+          result: 'fail',
+          reason_codes: ['CORTEXT_CHECK_SNAPSHOT_INCOMPLETE'],
+        });
+      }
       expect(validateLocal(forged), `${code}: ${JSON.stringify(validateLocal.errors)}`)
         .toBe(false);
 

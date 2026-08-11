@@ -735,6 +735,52 @@ describe('legacy lifecycle status collector', () => {
     expect(after).toEqual(['enabled-agents.json']);
   });
 
+  it('fails closed on non-boolean agent config enabled state', async () => {
+    const { frameworkRoot, ctxRoot } = makeFixture();
+    addAgent(frameworkRoot, 'team', 'observer', { enabled: 'false' });
+
+    const snapshot = await collectLegacyStatus({
+      instanceId: 'default',
+      ctxRoot,
+      frameworkRoot,
+      probeDaemon: async () => ({ kind: 'absent' }),
+    });
+
+    expect(snapshot.snapshot_status).toBe('partial');
+    expect(snapshot.runtime.agents.enabled).toBeNull();
+    expect(snapshot.observations.map(item => item.code)).toContain(
+      'CORTEXT_STATUS_AGENT_CONFIG_INVALID',
+    );
+    expect(evaluateStatusCheck(snapshot, 'usable@v1').reason_codes).toContain(
+      'CORTEXT_CHECK_SNAPSHOT_INCOMPLETE',
+    );
+  });
+
+  it.each([
+    ['non-string org', { org: 7, enabled: true }],
+    ['non-boolean enabled state', { org: 'team', enabled: 'false' }],
+  ])('fails closed on registry entries with %s', async (_label, registryEntry) => {
+    const { frameworkRoot, ctxRoot } = makeFixture();
+    addAgent(frameworkRoot, 'team', 'observer', { enabled: true });
+    writeJson(join(ctxRoot, 'config', 'enabled-agents.json'), { observer: registryEntry });
+
+    const snapshot = await collectLegacyStatus({
+      instanceId: 'default',
+      ctxRoot,
+      frameworkRoot,
+      probeDaemon: async () => ({ kind: 'absent' }),
+    });
+
+    expect(snapshot.snapshot_status).toBe('partial');
+    expect(snapshot.runtime.agents.enabled).toBeNull();
+    expect(snapshot.observations.map(item => item.code)).toContain(
+      'CORTEXT_STATUS_REGISTRY_INVALID',
+    );
+    expect(evaluateStatusCheck(snapshot, 'usable@v1').reason_codes).toContain(
+      'CORTEXT_CHECK_SNAPSHOT_INCOMPLETE',
+    );
+  });
+
   it('bounds oversized JSON sources instead of parsing unbounded registry input', async () => {
     const { frameworkRoot, ctxRoot } = makeFixture();
     const configDir = join(ctxRoot, 'config');
