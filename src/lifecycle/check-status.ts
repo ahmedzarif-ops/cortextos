@@ -55,7 +55,7 @@ function evaluateUsable(
   addReason(reasons, !snapshot.scope.resolved_instance_id, 'CORTEXT_CHECK_INSTANCE_UNRESOLVED');
   addReason(
     reasons,
-    ['blocked', 'migrating', 'unknown', 'uninitialized'].includes(snapshot.overall.status),
+    !['healthy', 'degraded', 'stopped'].includes(snapshot.overall.status),
     'CORTEXT_CHECK_OVERALL_DISALLOWED',
   );
   addReason(reasons, snapshot.state.status !== 'readable', 'CORTEXT_CHECK_STATE_NOT_READABLE');

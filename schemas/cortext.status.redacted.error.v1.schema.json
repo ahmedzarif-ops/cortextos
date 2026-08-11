@@ -35,24 +35,215 @@
       "additionalProperties": false,
       "properties": {
         "error": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "$ref": "#/definitions/LifecycleStatusErrorCode"
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "const": "CORTEXT_STATUS_INVALID_INSTANCE",
+                  "type": "string"
+                },
+                "detail_code": {
+                  "const": "INVALID_INSTANCE",
+                  "type": "string"
+                },
+                "message": {
+                  "const": "The selected Cortext instance identifier is invalid.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "detail_code"
+              ],
+              "type": "object"
             },
-            "detail_code": {
-              "$ref": "#/definitions/LifecycleStatusErrorDetailCode"
+            {
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "const": "CORTEXT_STATUS_INSTANCE_NOT_FOUND",
+                  "type": "string"
+                },
+                "detail_code": {
+                  "const": "INSTANCE_NOT_FOUND",
+                  "type": "string"
+                },
+                "message": {
+                  "const": "No legacy Cortext instance was found for the selected identifier.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "detail_code"
+              ],
+              "type": "object"
             },
-            "message": {
-              "type": "string"
+            {
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "const": "CORTEXT_STATUS_INSTANCE_AMBIGUOUS",
+                  "type": "string"
+                },
+                "detail_code": {
+                  "const": "INSTANCE_AMBIGUOUS",
+                  "type": "string"
+                },
+                "message": {
+                  "const": "Select exactly one Cortext instance.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "detail_code"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "const": "CORTEXT_STATUS_INVALID_OPTION_COMBINATION",
+                  "type": "string"
+                },
+                "detail_code": {
+                  "const": "REDACT_WITH_PATHS",
+                  "type": "string"
+                },
+                "message": {
+                  "const": "The selected redacted-output options cannot be combined.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "detail_code"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "const": "CORTEXT_STATUS_CONTRACT_REQUIRES_JSON",
+                  "type": "string"
+                },
+                "detail_code": {
+                  "const": "CONTRACT_WITHOUT_JSON",
+                  "type": "string"
+                },
+                "message": {
+                  "const": "Contract negotiation requires JSON output.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "detail_code"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "const": "CORTEXT_STATUS_CONTRACT_MODE_MISMATCH",
+                  "type": "string"
+                },
+                "detail_code": {
+                  "const": "CONTRACT_MODE_MISMATCH",
+                  "type": "string"
+                },
+                "message": {
+                  "const": "The requested status contract does not match the output mode.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "detail_code"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "const": "CORTEXT_STATUS_UNSUPPORTED_CONTRACT",
+                  "type": "string"
+                },
+                "detail_code": {
+                  "const": "UNSUPPORTED_CONTRACT",
+                  "type": "string"
+                },
+                "message": {
+                  "const": "The requested status contract is unsupported.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "detail_code"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "const": "CORTEXT_STATUS_UNSUPPORTED_CHECK_POLICY",
+                  "type": "string"
+                },
+                "detail_code": {
+                  "const": "UNSUPPORTED_CHECK_POLICY",
+                  "type": "string"
+                },
+                "message": {
+                  "const": "The requested status check policy is unsupported.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "detail_code"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "const": "CORTEXT_STATUS_COLLECTION_FAILED",
+                  "type": "string"
+                },
+                "detail_code": {
+                  "const": "COLLECTION_FAILED",
+                  "type": "string"
+                },
+                "message": {
+                  "const": "A trustworthy lifecycle status snapshot could not be assembled.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "detail_code"
+              ],
+              "type": "object"
             }
-          },
-          "required": [
-            "code",
-            "message",
-            "detail_code"
-          ],
-          "type": "object"
+          ]
         },
         "ok": {
           "const": false,

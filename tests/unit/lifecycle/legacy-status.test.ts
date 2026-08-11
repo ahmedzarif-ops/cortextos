@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from 'fs';
 import { execFileSync } from 'child_process';
+import { createServer, type Socket } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -18,6 +19,7 @@ import {
   collectLegacyStatus,
   isLegacyAgentStatus,
   LegacyStatusCollectionError,
+  probeLegacyDaemon,
   type LegacyDaemonProbe,
 } from '../../../src/lifecycle/legacy-status';
 import { redactLifecycleStatus } from '../../../src/lifecycle/redact-status';
@@ -72,6 +74,27 @@ function addAgent(frameworkRoot: string, org: string, name: string, config: unkn
 
 function responsive(statuses: LegacyDaemonProbe & { kind: 'responsive' }): () => Promise<LegacyDaemonProbe> {
   return async () => statuses;
+}
+
+async function probeFromTemporaryServer(
+  respond: (socket: Socket) => void,
+  timeoutMs = 250,
+): Promise<LegacyDaemonProbe> {
+  const root = tempRoot('ipc');
+  const socketPath = join(root, 'daemon.sock');
+  const server = createServer(socket => {
+    socket.on('error', () => {});
+    socket.once('data', () => respond(socket));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(socketPath, resolve);
+  });
+  try {
+    return await probeLegacyDaemon('default', socketPath, timeoutMs);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 }
 
 function treeMetadata(root: string, relative = ''): string[] {
@@ -343,6 +366,53 @@ describe('legacy lifecycle status collector', () => {
     })).toBe(false);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'bounds and validates production daemon IPC responses and teardown',
+    async () => {
+      const valid = await probeFromTemporaryServer(socket => socket.end(JSON.stringify({
+        success: true,
+        data: [{ name: 'agent', status: 'running', pid: 42 }],
+      })));
+      expect(valid).toEqual({
+        kind: 'responsive',
+        statuses: [{ name: 'agent', status: 'running', pid: 42 }],
+      });
+
+      const duplicate = await probeFromTemporaryServer(socket => socket.end(JSON.stringify({
+        success: true,
+        data: [
+          { name: 'agent', status: 'running' },
+          { name: 'agent', status: 'stopped' },
+        ],
+      })));
+      expect(duplicate).toEqual({ kind: 'invalid' });
+
+      const oversized = await probeFromTemporaryServer(socket => {
+        socket.end(Buffer.alloc((1024 * 1024) + 1, 0x20));
+      });
+      expect(oversized).toEqual({ kind: 'invalid' });
+
+      const tooManyEntries = await probeFromTemporaryServer(socket => socket.end(JSON.stringify({
+        success: true,
+        data: Array.from({ length: 4097 }, (_, index) => ({
+          name: `agent${index}`,
+          status: 'stopped',
+        })),
+      })));
+      expect(tooManyEntries).toEqual({ kind: 'invalid' });
+
+      const empty = await probeFromTemporaryServer(socket => socket.end());
+      expect(empty).toEqual({ kind: 'invalid' });
+
+      const timeout = await probeFromTemporaryServer(() => {}, 20);
+      expect(timeout).toEqual({ kind: 'timeout' });
+
+      const absentRoot = tempRoot('ipc-absent');
+      expect(await probeLegacyDaemon('default', join(absentRoot, 'missing.sock'), 20))
+        .toEqual({ kind: 'absent' });
+    },
+  );
+
   it('counts every IPC process, including disabled and unregistered processes', async () => {
     const { frameworkRoot, ctxRoot } = makeFixture();
     addAgent(frameworkRoot, 'team', 'alice', { enabled: false });
@@ -448,6 +518,31 @@ describe('legacy lifecycle status collector', () => {
       'CORTEXT_STATUS_LEGACY_AGENT_ID_NONCANONICAL',
       'CORTEXT_STATUS_LEGACY_AGENT_NAME_COLLISION',
     ]));
+  });
+
+  it('blocks case-folding collisions visible only in responsive daemon status', async () => {
+    const { frameworkRoot, ctxRoot } = makeFixture();
+    const snapshot = await collectLegacyStatus({
+      instanceId: 'default',
+      ctxRoot,
+      frameworkRoot,
+      probeDaemon: responsive({
+        kind: 'responsive',
+        statuses: [
+          { name: 'LegacyAgent', status: 'running' },
+          { name: 'legacyagent', status: 'running' },
+        ],
+      }),
+    });
+
+    expect(snapshot.snapshot_status).toBe('partial');
+    expect(snapshot.overall.status).toBe('blocked');
+    expect(snapshot.runtime.agents.observed_processes).toBe(2);
+    expect(snapshot.runtime.agents.unregistered_active).toBeNull();
+    expect(snapshot.observations.map(item => item.code)).toContain(
+      'CORTEXT_STATUS_LEGACY_AGENT_NAME_COLLISION',
+    );
+    expect(evaluateStatusCheck(snapshot, 'usable@v1').result).toBe('fail');
   });
 
   it('keeps identifiers outside the bounded ASCII-case compatibility class invalid', async () => {
@@ -598,12 +693,14 @@ describe('legacy lifecycle status collector', () => {
     );
   });
 
-  it('fails closed when agent discovery exceeds its directory-entry bound', async () => {
+  it('fails closed when nested agent discovery exhausts its global entry budget', async () => {
     const { frameworkRoot, ctxRoot } = makeFixture();
-    const agentsRoot = join(frameworkRoot, 'agents');
-    mkdirSync(agentsRoot, { recursive: true });
-    for (let index = 0; index <= 4096; index += 1) {
-      writeFileSync(join(agentsRoot, `entry-${index}`), '', 'utf-8');
+    for (const org of ['first', 'second']) {
+      const agentsRoot = join(frameworkRoot, 'orgs', org, 'agents');
+      mkdirSync(agentsRoot, { recursive: true });
+      for (let index = 0; index < 2048; index += 1) {
+        writeFileSync(join(agentsRoot, `entry-${index}`), '', 'utf-8');
+      }
     }
 
     const snapshot = await collectLegacyStatus({

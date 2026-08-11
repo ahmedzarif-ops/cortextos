@@ -121,7 +121,12 @@ describe('lifecycle status JSON Schemas', () => {
       'PRIVATE_NETWORK_CANARY',
       'PRIVATE_OBSERVATION_CANARY',
     ]) expect(serialized).not.toContain(canary);
-    expect(redacted.check).toBeNull();
+    expect(redacted.check).toEqual({
+      policy: 'usable',
+      policy_version: 'cortext.check.usable/v1',
+      result: 'pass',
+      reason_codes: [],
+    });
     expect(redacted.observations).toEqual([]);
 
     const validate = new Ajv({ allErrors: true, strict: true })
@@ -141,6 +146,7 @@ describe('lifecycle status JSON Schemas', () => {
       candidate => { candidate.capabilities.unsupported[0] = 'TOKEN_SECRET_CANARY'; },
       candidate => { candidate.runtime.isolation.evidence_codes = ['PRIVATE_EVIDENCE_CANARY']; },
       candidate => { candidate.observations[0].code = 'PRIVATE_OBSERVATION_CANARY'; },
+      candidate => { candidate.observations[0].severity = 'critical'; },
       candidate => { candidate.observations[0].domain = 'private@example.com'; },
       candidate => { candidate.observations[0].recommended_operation = '/Users/private/action'; },
     ];
@@ -165,6 +171,70 @@ describe('lifecycle status JSON Schemas', () => {
     const validate = new Ajv({ allErrors: true, strict: true })
       .compile(loadSchema('cortext.status.v1.schema.json'));
     expect(validate(contradictory)).toBe(false);
+
+    const wrongPolicyReason = {
+      ...local,
+      check: {
+        policy: 'usable',
+        policy_version: 'cortext.check.usable/v1',
+        result: 'fail',
+        reason_codes: ['CORTEXT_CHECK_CREDENTIALS_EXPOSED'],
+      },
+    };
+    expect(validate(wrongPolicyReason)).toBe(false);
+  });
+
+  it('recomputes forged passing checks before redacted projection', async () => {
+    const local = await fixtureSnapshot();
+    const forged = structuredClone(local) as any;
+    forged.check = {
+      policy: 'security-contained',
+      policy_version: 'cortext.check.security-contained/v1',
+      result: 'pass',
+      reason_codes: [],
+    };
+    const redacted = redactLifecycleStatus(
+      forged,
+      '00000000-0000-4000-8000-000000000000',
+    );
+    expect(redacted.check?.result).toBe('fail');
+    expect(redacted.check?.reason_codes).toEqual(expect.arrayContaining([
+      'CORTEXT_CHECK_TARGET_NOT_SANDBOX',
+      'CORTEXT_CHECK_NETWORK_UNCONSTRAINED',
+      'CORTEXT_CHECK_HOST_ACCESS_FULL',
+    ]));
+    expect(redacted.runtime.isolation).toMatchObject({
+      boundary: 'none',
+      data_roots: 'live',
+      network: 'unrestricted',
+      host_access: 'full',
+    });
+    const validate = new Ajv({ allErrors: true, strict: true })
+      .compile(loadSchema('cortext.status.redacted.v1.schema.json'));
+    expect(validate(redacted), JSON.stringify(validate.errors)).toBe(true);
+  });
+
+  it('fails closed when a forged usable check carries an unknown overall state', async () => {
+    const local = await fixtureSnapshot();
+    const forged = structuredClone(local) as any;
+    forged.overall.status = 'PRIVATE_OVERALL_CANARY';
+    forged.check = {
+      policy: 'usable',
+      policy_version: 'cortext.check.usable/v1',
+      result: 'pass',
+      reason_codes: [],
+    };
+    const redacted = redactLifecycleStatus(
+      forged,
+      '00000000-0000-4000-8000-000000000000',
+    );
+    expect(JSON.stringify(redacted)).not.toContain('PRIVATE_OVERALL_CANARY');
+    expect(redacted.overall.status).toBe('unknown');
+    expect(redacted.check).toMatchObject({
+      policy: 'usable',
+      result: 'fail',
+      reason_codes: ['CORTEXT_CHECK_OVERALL_DISALLOWED'],
+    });
   });
 
   it('defines v1 as a legacy-only contract instead of advertising managed evidence', async () => {
@@ -190,5 +260,25 @@ describe('lifecycle status JSON Schemas', () => {
       validateRedacted(redactedErrorEnvelope(error)),
       JSON.stringify(validateRedacted.errors),
     ).toBe(true);
+  });
+
+  it('reconstructs redacted error metadata and rejects private or contradictory errors', () => {
+    const forged = new LifecycleStatusCliError(
+      'CORTEXT_STATUS_INVALID_INSTANCE', 2, 'COLLECTION_FAILED',
+    );
+    const emitted = redactedErrorEnvelope(forged);
+    expect(emitted.error).toEqual({
+      code: 'CORTEXT_STATUS_INVALID_INSTANCE',
+      message: 'The selected Cortext instance identifier is invalid.',
+      detail_code: 'INVALID_INSTANCE',
+    });
+    const validate = new Ajv({ allErrors: true, strict: true })
+      .compile(loadSchema('cortext.status.redacted.error.v1.schema.json'));
+    expect(validate(emitted), JSON.stringify(validate.errors)).toBe(true);
+
+    const malicious = structuredClone(emitted) as any;
+    malicious.error.message = '/Users/private/TOKEN_SECRET_CANARY';
+    malicious.error.detail_code = 'COLLECTION_FAILED';
+    expect(validate(malicious)).toBe(false);
   });
 });

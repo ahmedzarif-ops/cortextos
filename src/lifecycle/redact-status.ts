@@ -1,11 +1,12 @@
 import { randomUUID } from 'crypto';
 import { CORTEXTOS_VERSION } from '../version.js';
+import { evaluateStatusCheck } from './check-status.js';
 import {
+  ISOLATION_EVIDENCE_CODES,
   LEGACY_STATUS_OBSERVATIONS,
   LEGACY_SUPPORTED_CAPABILITIES,
   LEGACY_UNSUPPORTED_CAPABILITIES,
   STATUS_CHECK_POLICIES,
-  STATUS_CHECK_REASON_CODES,
   type LegacyStatusObservationCode,
 } from './status-contract.js';
 import type {
@@ -13,7 +14,6 @@ import type {
   LifecycleStatusSnapshot,
   RedactedLifecycleStatusSnapshot,
   StatusCheckPolicy,
-  StatusCheckReasonCode,
   StatusCheckResult,
   StatusSeverity,
 } from './status-types.js';
@@ -36,30 +36,10 @@ function closedValue<T extends string>(
   return typeof value === 'string' && allowed.includes(value as T) ? value as T : fallback;
 }
 
-function redactCheck(check: LifecycleStatusSnapshot['check']): StatusCheckResult | null {
-  if (!check || !STATUS_CHECK_POLICIES.includes(check.policy as StatusCheckPolicy)) return null;
-  const policy = check.policy as StatusCheckPolicy;
-  if (check.policy_version !== `cortext.check.${policy}/v1`) return null;
-  if (!Array.isArray(check.reason_codes)
-    || check.reason_codes.some(code => !STATUS_CHECK_REASON_CODES.includes(code as StatusCheckReasonCode))
-    || new Set(check.reason_codes).size !== check.reason_codes.length) return null;
-  if (check.result === 'pass' && check.reason_codes.length === 0) {
-    return {
-      policy,
-      policy_version: `cortext.check.${policy}/v1`,
-      result: 'pass',
-      reason_codes: [],
-    } as StatusCheckResult;
-  }
-  if (check.result === 'fail' && check.reason_codes.length > 0) {
-    return {
-      policy,
-      policy_version: `cortext.check.${policy}/v1`,
-      result: 'fail',
-      reason_codes: [...check.reason_codes] as [StatusCheckReasonCode, ...StatusCheckReasonCode[]],
-    } as StatusCheckResult;
-  }
-  return null;
+function projectCheck(snapshot: LifecycleStatusSnapshot): StatusCheckResult | null {
+  const policy = snapshot.check?.policy;
+  if (!policy || !STATUS_CHECK_POLICIES.includes(policy as StatusCheckPolicy)) return null;
+  return evaluateStatusCheck(snapshot, policy);
 }
 
 export function redactLifecycleStatus(
@@ -175,15 +155,50 @@ export function redactLifecycleStatus(
       duplicate_poller_count_bucket: null,
       cron_count_bucket: null,
       isolation: {
-        boundary: 'none',
-        data_roots: 'live',
-        process_namespace: 'live',
-        managed_integrations: 'unknown',
-        credentials: 'unknown',
-        network: 'unrestricted',
-        host_access: 'full',
-        claim: 'none',
-        evidence_codes: [],
+        boundary: closedValue(
+          snapshot.runtime.isolation.boundary,
+          ['none', 'os_process', 'container', 'vm', 'unknown'],
+          'unknown',
+        ),
+        data_roots: closedValue(
+          snapshot.runtime.isolation.data_roots,
+          ['isolated', 'live', 'unknown'],
+          'unknown',
+        ),
+        process_namespace: closedValue(
+          snapshot.runtime.isolation.process_namespace,
+          ['isolated', 'live', 'unknown'],
+          'unknown',
+        ),
+        managed_integrations: closedValue(
+          snapshot.runtime.isolation.managed_integrations,
+          ['intercepted', 'disabled', 'enabled', 'unknown'],
+          'unknown',
+        ),
+        credentials: closedValue(
+          snapshot.runtime.isolation.credentials,
+          ['removed', 'scoped', 'host_available', 'unknown'],
+          'unknown',
+        ),
+        network: closedValue(
+          snapshot.runtime.isolation.network,
+          ['none', 'restricted', 'unrestricted', 'unknown'],
+          'unknown',
+        ),
+        host_access: closedValue(
+          snapshot.runtime.isolation.host_access,
+          ['constrained', 'full', 'unknown'],
+          'unknown',
+        ),
+        claim: closedValue(
+          snapshot.runtime.isolation.claim,
+          ['none', 'cortext_namespace', 'security_contained'],
+          'none',
+        ),
+        evidence_codes: Array.isArray(snapshot.runtime.isolation.evidence_codes)
+          ? [...new Set(snapshot.runtime.isolation.evidence_codes.filter(code =>
+            ISOLATION_EVIDENCE_CODES.includes(code)))]
+          : [],
       },
     },
     recovery: {
@@ -215,7 +230,7 @@ export function redactLifecycleStatus(
           'critical',
         ),
     },
-    check: redactCheck(snapshot.check),
+    check: projectCheck(snapshot),
     observations,
   };
 }

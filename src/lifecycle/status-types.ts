@@ -6,9 +6,14 @@ import type {
   LegacyUnsupportedCapability,
   StatusCheckPolicy,
   StatusCheckReasonCode,
+  StatusCheckReasonFor,
 } from './status-contract.js';
 
-export type { StatusCheckPolicy, StatusCheckReasonCode } from './status-contract.js';
+export type {
+  StatusCheckPolicy,
+  StatusCheckReasonCode,
+  StatusCheckReasonFor,
+} from './status-contract.js';
 
 export type StatusSeverity = 'info' | 'warning' | 'error' | 'critical';
 export type SnapshotStatus = 'complete' | 'partial';
@@ -32,7 +37,7 @@ type StatusCheckForPolicy<P extends StatusCheckPolicy> =
     policy: P;
     policy_version: `cortext.check.${P}/v1`;
     result: 'fail';
-    reason_codes: [StatusCheckReasonCode, ...StatusCheckReasonCode[]];
+    reason_codes: [StatusCheckReasonFor<P>, ...StatusCheckReasonFor<P>[]];
   };
 
 export type StatusCheckResult = {
@@ -382,12 +387,55 @@ export interface LifecycleStatusErrorEnvelope {
   };
 }
 
+export type RedactedLifecycleStatusError =
+  | {
+    code: 'CORTEXT_STATUS_INVALID_INSTANCE';
+    message: 'The selected Cortext instance identifier is invalid.';
+    detail_code: 'INVALID_INSTANCE';
+  }
+  | {
+    code: 'CORTEXT_STATUS_INSTANCE_NOT_FOUND';
+    message: 'No legacy Cortext instance was found for the selected identifier.';
+    detail_code: 'INSTANCE_NOT_FOUND';
+  }
+  | {
+    code: 'CORTEXT_STATUS_INSTANCE_AMBIGUOUS';
+    message: 'Select exactly one Cortext instance.';
+    detail_code: 'INSTANCE_AMBIGUOUS';
+  }
+  | {
+    code: 'CORTEXT_STATUS_INVALID_OPTION_COMBINATION';
+    message: 'The selected redacted-output options cannot be combined.';
+    detail_code: 'REDACT_WITH_PATHS';
+  }
+  | {
+    code: 'CORTEXT_STATUS_CONTRACT_REQUIRES_JSON';
+    message: 'Contract negotiation requires JSON output.';
+    detail_code: 'CONTRACT_WITHOUT_JSON';
+  }
+  | {
+    code: 'CORTEXT_STATUS_CONTRACT_MODE_MISMATCH';
+    message: 'The requested status contract does not match the output mode.';
+    detail_code: 'CONTRACT_MODE_MISMATCH';
+  }
+  | {
+    code: 'CORTEXT_STATUS_UNSUPPORTED_CONTRACT';
+    message: 'The requested status contract is unsupported.';
+    detail_code: 'UNSUPPORTED_CONTRACT';
+  }
+  | {
+    code: 'CORTEXT_STATUS_UNSUPPORTED_CHECK_POLICY';
+    message: 'The requested status check policy is unsupported.';
+    detail_code: 'UNSUPPORTED_CHECK_POLICY';
+  }
+  | {
+    code: 'CORTEXT_STATUS_COLLECTION_FAILED';
+    message: 'A trustworthy lifecycle status snapshot could not be assembled.';
+    detail_code: 'COLLECTION_FAILED';
+  };
+
 export interface RedactedLifecycleStatusErrorEnvelope {
   schema_version: 'cortext.status.redacted.error/v1';
   ok: false;
-  error: {
-    code: LifecycleStatusErrorCode;
-    message: string;
-    detail_code: LifecycleStatusErrorDetailCode;
-  };
+  error: RedactedLifecycleStatusError;
 }

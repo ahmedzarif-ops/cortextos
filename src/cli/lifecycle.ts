@@ -37,6 +37,18 @@ const REDACTED_ERROR_MESSAGES: Record<LifecycleStatusErrorCode, string> = {
     'The selected redacted-output options cannot be combined.',
 };
 
+const REDACTED_ERROR_DETAILS: Record<LifecycleStatusErrorCode, LifecycleStatusErrorDetailCode> = {
+  CORTEXT_STATUS_INVALID_INSTANCE: 'INVALID_INSTANCE',
+  CORTEXT_STATUS_INSTANCE_NOT_FOUND: 'INSTANCE_NOT_FOUND',
+  CORTEXT_STATUS_INSTANCE_AMBIGUOUS: 'INSTANCE_AMBIGUOUS',
+  CORTEXT_STATUS_INVALID_OPTION_COMBINATION: 'REDACT_WITH_PATHS',
+  CORTEXT_STATUS_CONTRACT_REQUIRES_JSON: 'CONTRACT_WITHOUT_JSON',
+  CORTEXT_STATUS_CONTRACT_MODE_MISMATCH: 'CONTRACT_MODE_MISMATCH',
+  CORTEXT_STATUS_UNSUPPORTED_CONTRACT: 'UNSUPPORTED_CONTRACT',
+  CORTEXT_STATUS_UNSUPPORTED_CHECK_POLICY: 'UNSUPPORTED_CHECK_POLICY',
+  CORTEXT_STATUS_COLLECTION_FAILED: 'COLLECTION_FAILED',
+};
+
 export interface LifecycleStatusCliOptions {
   instance?: string;
   json?: boolean;
@@ -106,8 +118,8 @@ export function redactedErrorEnvelope(
     error: {
       code: error.code,
       message: REDACTED_ERROR_MESSAGES[error.code],
-      detail_code: error.detailCode,
-    },
+      detail_code: REDACTED_ERROR_DETAILS[error.code],
+    } as RedactedLifecycleStatusErrorEnvelope['error'],
   };
 }
 

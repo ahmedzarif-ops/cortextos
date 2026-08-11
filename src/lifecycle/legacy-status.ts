@@ -137,16 +137,19 @@ function readJson(path: string): JsonReadResult {
   }
 }
 
-function readDirectoryEntries(path: string): Dirent[] {
+interface DirectoryEntryBudget { remaining: number }
+
+function readDirectoryEntries(path: string, totalBudget?: DirectoryEntryBudget): Dirent[] {
   const directory = opendirSync(path);
   const entries: Dirent[] = [];
   try {
     for (;;) {
       const entry = directory.readSync();
       if (!entry) return entries;
-      if (entries.length >= MAX_DIRECTORY_ENTRIES) {
+      if (entries.length >= MAX_DIRECTORY_ENTRIES || (totalBudget && totalBudget.remaining <= 0)) {
         throw new Error('CORTEXT_STATUS_DIRECTORY_ENTRY_LIMIT');
       }
+      if (totalBudget) totalBudget.remaining -= 1;
       entries.push(entry);
     }
   } finally {
@@ -276,6 +279,7 @@ function listAgentDirectories(
   addObservation: (code: string, partial?: boolean) => void,
 ): { definitions: AgentDefinition[]; invalid: boolean } {
   const definitions: AgentDefinition[] = [];
+  const entryBudget: DirectoryEntryBudget = { remaining: MAX_DIRECTORY_ENTRIES };
   let invalid = false;
 
   const addAgentDir = (org: string, name: string, dir: string) => {
@@ -304,7 +308,7 @@ function listAgentDirectories(
   const flatRoot = join(frameworkRoot, 'agents');
   if (existsSync(flatRoot)) {
     try {
-      for (const entry of readDirectoryEntries(flatRoot)) {
+      for (const entry of readDirectoryEntries(flatRoot, entryBudget)) {
         if (entry.isDirectory()) addAgentDir('@root', entry.name, join(flatRoot, entry.name));
       }
     } catch {
@@ -316,12 +320,12 @@ function listAgentDirectories(
   const orgsRoot = join(frameworkRoot, 'orgs');
   if (existsSync(orgsRoot)) {
     try {
-      for (const orgEntry of readDirectoryEntries(orgsRoot)) {
+      for (const orgEntry of readDirectoryEntries(orgsRoot, entryBudget)) {
         if (!orgEntry.isDirectory()) continue;
         const agentsRoot = join(orgsRoot, orgEntry.name, 'agents');
         if (!existsSync(agentsRoot)) continue;
         try {
-          for (const agentEntry of readDirectoryEntries(agentsRoot)) {
+          for (const agentEntry of readDirectoryEntries(agentsRoot, entryBudget)) {
             if (agentEntry.isDirectory()) {
               addAgentDir(orgEntry.name, agentEntry.name, join(agentsRoot, agentEntry.name));
             }
@@ -391,6 +395,7 @@ function collectAgentInventory(
     byName.set(definition.name, matches);
   }
 
+  let registryIdentityBudget = Math.max(0, MAX_DIRECTORY_ENTRIES - definitions.length);
   for (const [name, rawEntry] of Object.entries(registry)) {
     if (!LEGACY_SAFE_AGENT_ID_RE.test(name) || !isRecord(rawEntry)) {
       addObservation('CORTEXT_STATUS_REGISTRY_INVALID', true);
@@ -419,6 +424,12 @@ function collectAgentInventory(
     }
 
     if (!definition) {
+      if (registryIdentityBudget <= 0) {
+        addObservation('CORTEXT_STATUS_REGISTRY_INVALID', true);
+        sourceInvalid = true;
+        break;
+      }
+      registryIdentityBudget -= 1;
       definition = {
         identity: `${org ?? '@registry'}/${name}`,
         name,
@@ -518,8 +529,12 @@ export function isLegacyAgentStatus(value: unknown): value is AgentStatus {
   return true;
 }
 
-export function probeLegacyDaemon(instanceId: string): Promise<LegacyDaemonProbe> {
-  const socketPath = getIpcPath(instanceId);
+export function probeLegacyDaemon(
+  instanceId: string,
+  socketPath: string = getIpcPath(instanceId),
+  timeoutMs = 5000,
+): Promise<LegacyDaemonProbe> {
+  const boundedTimeoutMs = Math.max(1, Math.min(timeoutMs, 5000));
   return new Promise(resolveProbe => {
     let settled = false;
     let data = '';
@@ -546,7 +561,12 @@ export function probeLegacyDaemon(instanceId: string): Promise<LegacyDaemonProbe
     socket.on('end', () => {
       try {
         const response = JSON.parse(data) as { success?: unknown; data?: unknown };
-        if (response.success !== true || !Array.isArray(response.data) || !response.data.every(isLegacyAgentStatus)) {
+        if (
+          response.success !== true
+          || !Array.isArray(response.data)
+          || response.data.length > MAX_DIRECTORY_ENTRIES
+          || !response.data.every(isLegacyAgentStatus)
+        ) {
           finish({ kind: 'invalid' });
           return;
         }
@@ -565,7 +585,7 @@ export function probeLegacyDaemon(instanceId: string): Promise<LegacyDaemonProbe
       else if (error.code === 'ECONNREFUSED') finish({ kind: 'refused' });
       else finish({ kind: 'unknown' });
     });
-    socket.setTimeout(5000, () => {
+    socket.setTimeout(boundedTimeoutMs, () => {
       socket.destroy();
       finish({ kind: 'timeout' });
     });
@@ -765,6 +785,7 @@ export async function collectLegacyStatus(
   let unknownAgents: number | null = null;
   let disabledActive: number | null = null;
   let unregisteredActive: number | null = null;
+  let runtimeIdentityCollision = false;
 
   if (probe.kind === 'responsive') {
     daemonStatus = 'running';
@@ -794,9 +815,25 @@ export async function collectLegacyStatus(
       else degraded += 1;
     }
 
+    const identityVariants = new Map<string, Set<string>>();
+    for (const name of [...inventory.configuredNames, ...observedNames]) {
+      const variants = identityVariants.get(name.toLowerCase()) ?? new Set<string>();
+      variants.add(name);
+      identityVariants.set(name.toLowerCase(), variants);
+    }
+    runtimeIdentityCollision = [...identityVariants.values()].some(variants => variants.size > 1);
+    if (runtimeIdentityCollision) {
+      addObservation('CORTEXT_STATUS_LEGACY_AGENT_NAME_COLLISION', true);
+    }
+
     if ((degraded ?? 0) > 0) addObservation('CORTEXT_STATUS_AGENT_DEGRADED');
 
-    if (inventory.enabledNames && !inventory.collision && !inventory.sourceInvalid) {
+    if (
+      inventory.enabledNames
+      && !inventory.collision
+      && !runtimeIdentityCollision
+      && !inventory.sourceInvalid
+    ) {
       expectedMissing = [...inventory.enabledNames].filter(name => !observedNames.has(name)).length;
       unknownAgents = expectedMissing;
       disabledActive = 0;
@@ -838,7 +875,9 @@ export async function collectLegacyStatus(
     return severity === 'warning' || severity === 'error' || severity === 'critical';
   });
   let overallStatus: OverallStatus;
-  if (!stateReadable || inventory.collision || customRootUnbound) overallStatus = 'blocked';
+  if (!stateReadable || inventory.collision || runtimeIdentityCollision || customRootUnbound) {
+    overallStatus = 'blocked';
+  }
   else if (daemonStatus === 'unknown') overallStatus = 'unknown';
   else if (daemonStatus === 'stopped') overallStatus = 'stopped';
   else if (daemonStatus === 'unresponsive' || materialObservation || partial) overallStatus = 'degraded';
@@ -948,10 +987,10 @@ export async function collectLegacyStatus(
         stopped,
         busy: null,
         degraded,
-        unknown: inventory.collision ? null : unknownAgents,
-        expected_missing: inventory.collision ? null : expectedMissing,
-        disabled_active: inventory.collision ? null : disabledActive,
-        unregistered_active: inventory.collision ? null : unregisteredActive,
+        unknown: inventory.collision || runtimeIdentityCollision ? null : unknownAgents,
+        expected_missing: inventory.collision || runtimeIdentityCollision ? null : expectedMissing,
+        disabled_active: inventory.collision || runtimeIdentityCollision ? null : disabledActive,
+        unregistered_active: inventory.collision || runtimeIdentityCollision ? null : unregisteredActive,
         recent_heartbeat: inventory.recentHeartbeats,
         stale_heartbeat: inventory.staleHeartbeats,
       },
