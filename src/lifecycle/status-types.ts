@@ -26,19 +26,23 @@ export type OverallStatus =
   | 'uninitialized'
   | 'unknown';
 
+type FailedStatusCheckForPolicy<P extends StatusCheckPolicy> = {
+  policy: P;
+  policy_version: `cortext.check.${P}/v1`;
+  result: 'fail';
+  reason_codes: [StatusCheckReasonFor<P>, ...StatusCheckReasonFor<P>[]];
+};
+
 type StatusCheckForPolicy<P extends StatusCheckPolicy> =
-  | {
-    policy: P;
-    policy_version: `cortext.check.${P}/v1`;
-    result: 'pass';
-    reason_codes: [];
-  }
-  | {
-    policy: P;
-    policy_version: `cortext.check.${P}/v1`;
-    result: 'fail';
-    reason_codes: [StatusCheckReasonFor<P>, ...StatusCheckReasonFor<P>[]];
-  };
+  P extends 'update-safe'
+    ? FailedStatusCheckForPolicy<P>
+    : {
+      policy: P;
+      policy_version: `cortext.check.${P}/v1`;
+      result: 'pass';
+      reason_codes: [];
+    }
+      | FailedStatusCheckForPolicy<P>;
 
 export type StatusCheckResult = {
   [P in StatusCheckPolicy]: StatusCheckForPolicy<P>;

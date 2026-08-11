@@ -1096,7 +1096,354 @@
         "check",
         "observations"
       ],
-      "type": "object"
+      "type": "object",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "check": {
+                "type": "object",
+                "properties": {
+                  "policy": {
+                    "const": "usable"
+                  },
+                  "result": {
+                    "const": "pass"
+                  }
+                },
+                "required": [
+                  "policy",
+                  "result"
+                ]
+              }
+            },
+            "required": [
+              "check"
+            ]
+          },
+          "then": {
+            "properties": {
+              "snapshot_status": {
+                "const": "complete"
+              },
+              "state": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "readable"
+                  }
+                }
+              },
+              "overall": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "healthy",
+                      "degraded",
+                      "stopped"
+                    ]
+                  }
+                }
+              },
+              "scope": {
+                "type": "object",
+                "properties": {
+                  "resolved_instance_id": {
+                    "pattern": "^[a-z0-9_-]+$",
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "check": {
+                "type": "object",
+                "properties": {
+                  "policy": {
+                    "const": "healthy"
+                  },
+                  "result": {
+                    "const": "pass"
+                  }
+                },
+                "required": [
+                  "policy",
+                  "result"
+                ]
+              }
+            },
+            "required": [
+              "check"
+            ]
+          },
+          "then": {
+            "properties": {
+              "snapshot_status": {
+                "const": "complete"
+              },
+              "state": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "readable"
+                  }
+                }
+              },
+              "consistency": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "stable",
+                      "unsupported"
+                    ]
+                  }
+                }
+              },
+              "overall": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "healthy"
+                  },
+                  "highest_severity": {
+                    "enum": [
+                      null,
+                      "info"
+                    ]
+                  }
+                }
+              },
+              "scope": {
+                "type": "object",
+                "properties": {
+                  "resolved_instance_id": {
+                    "pattern": "^[a-z0-9_-]+$",
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "check": {
+                "type": "object",
+                "properties": {
+                  "policy": {
+                    "const": "sandbox-namespace"
+                  },
+                  "result": {
+                    "const": "pass"
+                  }
+                },
+                "required": [
+                  "policy",
+                  "result"
+                ]
+              }
+            },
+            "required": [
+              "check"
+            ]
+          },
+          "then": {
+            "properties": {
+              "snapshot_status": {
+                "const": "complete"
+              },
+              "scope": {
+                "type": "object",
+                "properties": {
+                  "target_kind": {
+                    "const": "sandbox"
+                  }
+                }
+              },
+              "runtime": {
+                "type": "object",
+                "properties": {
+                  "isolation": {
+                    "type": "object",
+                    "properties": {
+                      "data_roots": {
+                        "const": "isolated"
+                      },
+                      "process_namespace": {
+                        "const": "isolated"
+                      },
+                      "managed_integrations": {
+                        "enum": [
+                          "intercepted",
+                          "disabled"
+                        ]
+                      },
+                      "claim": {
+                        "enum": [
+                          "cortext_namespace",
+                          "security_contained"
+                        ]
+                      },
+                      "evidence_codes": {
+                        "type": "array",
+                        "allOf": [
+                          {
+                            "contains": {
+                              "const": "CORTEXT_ISOLATION_LIVE_ROOT_DISJOINT"
+                            }
+                          },
+                          {
+                            "contains": {
+                              "const": "CORTEXT_ISOLATION_PROCESS_NAMESPACE_DISJOINT"
+                            }
+                          },
+                          {
+                            "contains": {
+                              "const": "CORTEXT_ISOLATION_MANAGED_INTEGRATIONS_ROUTED"
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "check": {
+                "type": "object",
+                "properties": {
+                  "policy": {
+                    "const": "security-contained"
+                  },
+                  "result": {
+                    "const": "pass"
+                  }
+                },
+                "required": [
+                  "policy",
+                  "result"
+                ]
+              }
+            },
+            "required": [
+              "check"
+            ]
+          },
+          "then": {
+            "properties": {
+              "snapshot_status": {
+                "const": "complete"
+              },
+              "scope": {
+                "type": "object",
+                "properties": {
+                  "target_kind": {
+                    "const": "sandbox"
+                  }
+                }
+              },
+              "runtime": {
+                "type": "object",
+                "properties": {
+                  "isolation": {
+                    "type": "object",
+                    "properties": {
+                      "boundary": {
+                        "enum": [
+                          "container",
+                          "vm"
+                        ]
+                      },
+                      "data_roots": {
+                        "const": "isolated"
+                      },
+                      "process_namespace": {
+                        "const": "isolated"
+                      },
+                      "managed_integrations": {
+                        "enum": [
+                          "intercepted",
+                          "disabled"
+                        ]
+                      },
+                      "credentials": {
+                        "enum": [
+                          "removed",
+                          "scoped"
+                        ]
+                      },
+                      "network": {
+                        "enum": [
+                          "none",
+                          "restricted"
+                        ]
+                      },
+                      "host_access": {
+                        "const": "constrained"
+                      },
+                      "claim": {
+                        "const": "security_contained"
+                      },
+                      "evidence_codes": {
+                        "type": "array",
+                        "allOf": [
+                          {
+                            "contains": {
+                              "const": "CORTEXT_ISOLATION_LIVE_ROOT_DISJOINT"
+                            }
+                          },
+                          {
+                            "contains": {
+                              "const": "CORTEXT_ISOLATION_PROCESS_NAMESPACE_DISJOINT"
+                            }
+                          },
+                          {
+                            "contains": {
+                              "const": "CORTEXT_ISOLATION_MANAGED_INTEGRATIONS_ROUTED"
+                            }
+                          },
+                          {
+                            "contains": {
+                              "const": "CORTEXT_ISOLATION_BOUNDARY_ENFORCED"
+                            }
+                          },
+                          {
+                            "contains": {
+                              "const": "CORTEXT_ISOLATION_HOST_CREDENTIALS_UNAVAILABLE"
+                            }
+                          },
+                          {
+                            "contains": {
+                              "const": "CORTEXT_ISOLATION_EGRESS_POLICY_ENFORCED"
+                            }
+                          },
+                          {
+                            "contains": {
+                              "const": "CORTEXT_ISOLATION_HOST_ACCESS_CONSTRAINED"
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "OverallStatus": {
       "enum": [
@@ -1284,35 +1631,6 @@
             },
             "result": {
               "const": "fail",
-              "type": "string"
-            }
-          },
-          "required": [
-            "policy",
-            "policy_version",
-            "result",
-            "reason_codes"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "policy": {
-              "const": "update-safe",
-              "type": "string"
-            },
-            "policy_version": {
-              "const": "cortext.check.update-safe/v1",
-              "type": "string"
-            },
-            "reason_codes": {
-              "maxItems": 0,
-              "minItems": 0,
-              "type": "array"
-            },
-            "result": {
-              "const": "pass",
               "type": "string"
             }
           },

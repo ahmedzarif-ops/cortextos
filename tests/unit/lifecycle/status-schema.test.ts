@@ -140,6 +140,8 @@ describe('lifecycle status JSON Schemas', () => {
     const validate = new Ajv({ allErrors: true, strict: true })
       .compile(loadSchema('cortext.status.redacted.v1.schema.json'));
     const mutations: Array<(candidate: any) => void> = [
+      candidate => { candidate.report_id = '/Users/private/TOKEN_SECRET_CANARY'; },
+      candidate => { candidate.observed_day = 'private@example.com'; },
       candidate => { candidate.manager.version = 'TOKEN_SECRET_CANARY'; },
       candidate => { candidate.application.version = 'private@example.com'; },
       candidate => { candidate.capabilities.supported[0] = '/Users/private/capability'; },
@@ -182,6 +184,55 @@ describe('lifecycle status JSON Schemas', () => {
       },
     };
     expect(validate(wrongPolicyReason)).toBe(false);
+  });
+
+  it('rejects passing checks contradicted by normative snapshot facts', async () => {
+    const local = await fixtureSnapshot();
+    const redacted = redactLifecycleStatus(
+      local,
+      '00000000-0000-4000-8000-000000000000',
+    );
+    const ajv = new Ajv({ allErrors: true, strict: true });
+    const validateLocal = ajv.compile(loadSchema('cortext.status.v1.schema.json'));
+    const validateRedacted = ajv.compile(loadSchema('cortext.status.redacted.v1.schema.json'));
+    const passingCheck = (policy: string) => ({
+      policy,
+      policy_version: `cortext.check.${policy}/v1`,
+      result: 'pass',
+      reason_codes: [],
+    });
+
+    for (const [document, validate] of [
+      [local, validateLocal],
+      [redacted, validateRedacted],
+    ] as const) {
+      const updateSafe = structuredClone(document) as any;
+      updateSafe.check = passingCheck('update-safe');
+      expect(validate(updateSafe), JSON.stringify(validate.errors)).toBe(false);
+
+      const unusableState = structuredClone(document) as any;
+      unusableState.check = passingCheck('usable');
+      unusableState.state.status = 'missing';
+      expect(validate(unusableState), JSON.stringify(validate.errors)).toBe(false);
+
+      const unusableOverall = structuredClone(document) as any;
+      unusableOverall.check = passingCheck('usable');
+      unusableOverall.overall.status = 'blocked';
+      expect(validate(unusableOverall), JSON.stringify(validate.errors)).toBe(false);
+
+      const unhealthy = structuredClone(document) as any;
+      unhealthy.check = passingCheck('healthy');
+      unhealthy.overall.status = 'stopped';
+      expect(validate(unhealthy), JSON.stringify(validate.errors)).toBe(false);
+
+      const namespace = structuredClone(document) as any;
+      namespace.check = passingCheck('sandbox-namespace');
+      expect(validate(namespace), JSON.stringify(validate.errors)).toBe(false);
+
+      const contained = structuredClone(document) as any;
+      contained.check = passingCheck('security-contained');
+      expect(validate(contained), JSON.stringify(validate.errors)).toBe(false);
+    }
   });
 
   it('recomputes forged passing checks before redacted projection', async () => {

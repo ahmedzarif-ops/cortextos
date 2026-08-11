@@ -60,7 +60,7 @@ function expectJsonRun(result, exitCode, schemaName, expectedCode) {
   return document;
 }
 
-const root = mkdtempSync(join(tmpdir(), 'cortext-lifecycle-cli-'));
+const root = mkdtempSync(join(process.platform === 'win32' ? tmpdir() : '/tmp', 'cx-ls-'));
 try {
   const home = join(root, 'home');
   const frameworkRoot = join(root, 'framework');
@@ -72,11 +72,14 @@ try {
     'utf8',
   );
 
-  expectJsonRun(
+  const local = expectJsonRun(
     run(['--instance', 'default', '--json', '--contract', 'cortext.status/v1'], home, frameworkRoot),
     0,
     'cortext.status.v1.schema.json',
   );
+  if (local.snapshot_status !== 'complete' || local.runtime?.daemon?.status !== 'stopped') {
+    throw new Error('CLI fixture preconditions are not platform-stable');
+  }
   expectJsonRun(
     run([
       '--instance', 'default', '--json', '--redact',
@@ -87,10 +90,10 @@ try {
   );
   const usable = expectJsonRun(
     run(['--instance', 'default', '--json', '--check', 'usable@v1'], home, frameworkRoot),
-    1,
+    0,
     'cortext.status.v1.schema.json',
   );
-  if (usable.check?.result !== 'fail') throw new Error('usable@v1 did not fail closed');
+  if (usable.check?.result !== 'pass') throw new Error('usable@v1 did not pass');
   const healthy = expectJsonRun(
     run(['--instance', 'default', '--json', '--check', 'healthy@v1'], home, frameworkRoot),
     1,

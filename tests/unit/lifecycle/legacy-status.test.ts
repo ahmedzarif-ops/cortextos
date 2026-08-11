@@ -163,6 +163,23 @@ describe('legacy lifecycle status collector', () => {
       });
   });
 
+  it('rejects a programmatic state root that is not explicitly bound to an instance', async () => {
+    const { frameworkRoot, ctxRoot } = makeFixture();
+    let probed = false;
+
+    await expect(collectLegacyStatus({
+      ctxRoot,
+      frameworkRoot,
+      probeDaemon: async () => {
+        probed = true;
+        return { kind: 'absent' };
+      },
+    })).rejects.toMatchObject<Partial<LegacyStatusCollectionError>>({
+      code: 'CORTEXT_STATUS_INVALID_INSTANCE',
+    });
+    expect(probed).toBe(false);
+  });
+
   it('blocks a noncanonical environment-selected state root whose daemon identity is unproven', async () => {
     delete process.env.CTX_INSTANCE_ID;
     const home = tempRoot('split-root-home');
@@ -304,16 +321,15 @@ describe('legacy lifecycle status collector', () => {
       cwd: frameworkRoot,
       encoding: 'utf-8',
     }).trim();
-    const realGit = execFileSync('which', ['git'], { encoding: 'utf-8' }).trim();
     const binRoot = join(root, 'bin');
-    const environmentLog = join(root, 'git-environment.jsonl');
+    const executionCanary = join(root, 'PATH_GIT_EXECUTED_CANARY');
     const traceCanary = join(root, 'GIT_TRACE_WRITE_CANARY');
     mkdirSync(binRoot, { recursive: true });
     const wrapper = join(binRoot, 'git');
     writeFileSync(wrapper, [
       '#!/bin/sh',
-      `printf '%s|%s|%s|%s|%s|%s\\n' "\${GIT_NO_LAZY_FETCH-unset}" "\${GIT_OPTIONAL_LOCKS-unset}" "\${GIT_TERMINAL_PROMPT-unset}" "\${GIT_DIR-unset}" "\${GIT_WORK_TREE-unset}" "\${GIT_TRACE-unset}" >> ${environmentLog}`,
-      `exec ${realGit} "$@"`,
+      `printf executed > ${executionCanary}`,
+      'exit 99',
       '',
     ].join('\n'), 'utf-8');
     chmodSync(wrapper, 0o700);
@@ -345,14 +361,7 @@ describe('legacy lifecycle status collector', () => {
 
     expect(snapshot!.application.source_commit).toBe(frameworkCommit);
     expect(existsSync(traceCanary)).toBe(false);
-    const invocations = readdirNames(root).includes('git-environment.jsonl')
-      ? readFileSync(environmentLog, 'utf-8')
-        .trim().split('\n').map(line => line.split('|'))
-      : [];
-    expect(invocations.length).toBeGreaterThan(0);
-    for (const invocation of invocations) {
-      expect(invocation).toEqual(['1', '0', '0', 'unset', 'unset', 'unset']);
-    }
+    expect(existsSync(executionCanary)).toBe(false);
   });
 
   it('rejects malformed fields in otherwise status-shaped IPC entries', () => {
@@ -543,6 +552,33 @@ describe('legacy lifecycle status collector', () => {
       'CORTEXT_STATUS_LEGACY_AGENT_NAME_COLLISION',
     );
     expect(evaluateStatusCheck(snapshot, 'usable@v1').result).toBe('fail');
+  });
+
+  it('enforces one identity budget across registry and responsive daemon sources', async () => {
+    const { frameworkRoot, ctxRoot } = makeFixture();
+    const registry = Object.fromEntries(
+      Array.from({ length: 4096 }, (_, index) => [`agent${index}`, { enabled: true }]),
+    );
+    writeJson(join(ctxRoot, 'config', 'enabled-agents.json'), registry);
+
+    const snapshot = await collectLegacyStatus({
+      instanceId: 'default',
+      ctxRoot,
+      frameworkRoot,
+      probeDaemon: responsive({
+        kind: 'responsive',
+        statuses: [{ name: 'daemononly', status: 'running' }],
+      }),
+    });
+
+    expect(snapshot.snapshot_status).toBe('partial');
+    expect(snapshot.runtime.daemon).toMatchObject({
+      status: 'unresponsive',
+      ipc_status: 'invalid',
+    });
+    expect(snapshot.observations.map(item => item.code)).toContain(
+      'CORTEXT_STATUS_DAEMON_RESPONSE_INVALID',
+    );
   });
 
   it('keeps identifiers outside the bounded ASCII-case compatibility class invalid', async () => {

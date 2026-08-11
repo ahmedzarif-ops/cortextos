@@ -53,6 +53,9 @@ const SAFE_GIT_CONFIG_ARGS = [
   '-c', 'core.fsmonitor=false',
   '-c', 'core.untrackedCache=false',
 ] as const;
+const TRUSTED_GIT_CANDIDATES = process.platform === 'win32'
+  ? ['C:\\Program Files\\Git\\cmd\\git.exe', 'C:\\Program Files\\Git\\bin\\git.exe']
+  : ['/usr/bin/git', '/bin/git'];
 
 const SEVERITY_ORDER: Record<StatusSeverity, number> = {
   critical: 0,
@@ -207,13 +210,26 @@ function discoverLegacyInstances(home: string): string[] {
     .sort();
 }
 
-function gitEnvironment(): NodeJS.ProcessEnv {
-  const environment = { ...process.env };
-  for (const key of Object.keys(environment)) {
-    if (key.toUpperCase().startsWith('GIT_')) delete environment[key];
+function trustedGitExecutable(): string | null {
+  for (const candidate of TRUSTED_GIT_CANDIDATES) {
+    try {
+      const resolved = realpathSync(candidate);
+      if (!statSync(resolved).isFile()) continue;
+      accessSync(resolved, constants.R_OK | constants.X_OK);
+      return resolved;
+    } catch {
+      // A PATH lookup would let inherited process state select executable code.
+    }
   }
+  return null;
+}
+
+function gitEnvironment(): NodeJS.ProcessEnv {
   return {
-    ...environment,
+    LANG: 'C',
+    LC_ALL: 'C',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
     GIT_NO_LAZY_FETCH: '1',
     GIT_OPTIONAL_LOCKS: '0',
     GIT_TERMINAL_PROMPT: '0',
@@ -221,7 +237,9 @@ function gitEnvironment(): NodeJS.ProcessEnv {
 }
 
 function gitOutput(frameworkRoot: string, args: string[]): string | null {
-  const result = spawnSync('git', [...SAFE_GIT_CONFIG_ARGS, ...args], {
+  const executable = trustedGitExecutable();
+  if (!executable) return null;
+  const result = spawnSync(executable, [...SAFE_GIT_CONFIG_ARGS, ...args], {
     cwd: frameworkRoot,
     encoding: 'utf-8',
     env: gitEnvironment(),
@@ -233,7 +251,9 @@ function gitOutput(frameworkRoot: string, args: string[]): string | null {
 }
 
 function gitModificationStatus(frameworkRoot: string): 'clean' | 'modified' | 'unknown' {
-  const result = spawnSync('git', [
+  const executable = trustedGitExecutable();
+  if (!executable) return 'unknown';
+  const result = spawnSync(executable, [
     ...SAFE_GIT_CONFIG_ARGS,
     'status', '--porcelain=v1', '--untracked-files=normal',
   ], {
@@ -633,6 +653,9 @@ function overallSummary(status: OverallStatus): string {
 export async function collectLegacyStatus(
   options: CollectLegacyStatusOptions = {},
 ): Promise<LifecycleStatusSnapshot> {
+  if (options.ctxRoot !== undefined && options.instanceId === undefined) {
+    throw new LegacyStatusCollectionError('CORTEXT_STATUS_INVALID_INSTANCE');
+  }
   const collectionStarted = options.now ?? new Date();
   const nowMs = collectionStarted.getTime();
   const home = options.homeDir ?? homedir();
@@ -770,7 +793,19 @@ export async function collectLegacyStatus(
   }
 
   const inventory = collectAgentInventory(frameworkRoot, ctxRoot, nowMs, addObservation);
-  const probe = await (options.probeDaemon ?? probeLegacyDaemon)(instanceId);
+  let probe = await (options.probeDaemon ?? probeLegacyDaemon)(instanceId);
+  if (probe.kind === 'responsive') {
+    const configuredCanonicalNames = new Set(
+      [...inventory.configuredNames].map(name => name.toLowerCase()),
+    );
+    const daemonOnlyCanonicalNames = new Set(
+      probe.statuses
+        .map(status => status.name.toLowerCase())
+        .filter(name => !configuredCanonicalNames.has(name)),
+    );
+    const combinedIdentityCount = (inventory.configured ?? 0) + daemonOnlyCanonicalNames.size;
+    if (combinedIdentityCount > MAX_DIRECTORY_ENTRIES) probe = { kind: 'invalid' };
+  }
   const pidAlive = options.pidAlive ?? defaultPidAlive;
 
   let daemonStatus: LifecycleStatusSnapshot['runtime']['daemon']['status'];
