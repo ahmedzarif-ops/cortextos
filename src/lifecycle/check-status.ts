@@ -6,6 +6,7 @@ import type {
 } from './status-types.js';
 import {
   LEGACY_STATUS_OBSERVATIONS,
+  LEGACY_PARTIAL_OBSERVATION_CODES,
   STATUS_CHECK_POLICIES,
   type LegacyStatusObservationCode,
 } from './status-contract.js';
@@ -30,6 +31,9 @@ const BLOCKING_OBSERVATION_CODES = new Set<LegacyStatusObservationCode>([
   'CORTEXT_STATUS_STATE_MISSING',
   'CORTEXT_STATUS_STATE_UNREADABLE',
 ]);
+const PARTIAL_OBSERVATION_CODES = new Set<LegacyStatusObservationCode>(
+  LEGACY_PARTIAL_OBSERVATION_CODES,
+);
 
 export class UnsupportedStatusCheckPolicyError extends Error {
   constructor() {
@@ -62,7 +66,13 @@ function evaluateUsable(
   snapshot: LifecycleStatusSnapshot,
   reasons: StatusCheckReasonCode[],
 ): void {
-  addReason(reasons, snapshot.snapshot_status !== 'complete', 'CORTEXT_CHECK_SNAPSHOT_INCOMPLETE');
+  addReason(
+    reasons,
+    snapshot.snapshot_status !== 'complete'
+      || snapshot.observations.some(observation =>
+        PARTIAL_OBSERVATION_CODES.has(observation.code as LegacyStatusObservationCode)),
+    'CORTEXT_CHECK_SNAPSHOT_INCOMPLETE',
+  );
   addReason(reasons, !snapshot.scope.resolved_instance_id, 'CORTEXT_CHECK_INSTANCE_UNRESOLVED');
   addReason(
     reasons,

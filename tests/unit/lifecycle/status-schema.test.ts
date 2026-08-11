@@ -6,7 +6,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { collectLegacyStatus } from '../../../src/lifecycle/legacy-status';
 import { redactLifecycleStatus } from '../../../src/lifecycle/redact-status';
 import { evaluateStatusCheck } from '../../../src/lifecycle/check-status';
-import { LEGACY_STATUS_OBSERVATIONS } from '../../../src/lifecycle/status-contract';
+import {
+  LEGACY_PARTIAL_OBSERVATION_CODES,
+  LEGACY_STATUS_OBSERVATIONS,
+} from '../../../src/lifecycle/status-contract';
 import {
   LifecycleStatusCliError,
   localErrorEnvelope,
@@ -32,6 +35,15 @@ function objectAt(root: unknown, path: Array<string | number>): Record<string, u
   let current = root as unknown;
   for (const segment of path) current = (current as Record<string | number, unknown>)[segment];
   return current as Record<string, unknown>;
+}
+
+function passingCheck(policy: string) {
+  return {
+    policy,
+    policy_version: `cortext.check.${policy}/v1`,
+    result: 'pass',
+    reason_codes: [],
+  };
 }
 
 async function fixtureSnapshot() {
@@ -196,13 +208,6 @@ describe('lifecycle status JSON Schemas', () => {
     const ajv = new Ajv({ allErrors: true, strict: true });
     const validateLocal = ajv.compile(loadSchema('cortext.status.v1.schema.json'));
     const validateRedacted = ajv.compile(loadSchema('cortext.status.redacted.v1.schema.json'));
-    const passingCheck = (policy: string) => ({
-      policy,
-      policy_version: `cortext.check.${policy}/v1`,
-      result: 'pass',
-      reason_codes: [],
-    });
-
     for (const [document, validate] of [
       [local, validateLocal],
       [redacted, validateRedacted],
@@ -267,6 +272,50 @@ describe('lifecycle status JSON Schemas', () => {
       const contained = structuredClone(document) as any;
       contained.check = passingCheck('security-contained');
       expect(validate(contained), JSON.stringify(validate.errors)).toBe(false);
+    }
+  });
+
+  it('derives partial status from every canonical partial observation', async () => {
+    expect(new Set(LEGACY_PARTIAL_OBSERVATION_CODES).size)
+      .toBe(LEGACY_PARTIAL_OBSERVATION_CODES.length);
+    const local = await fixtureSnapshot();
+    const ajv = new Ajv({ allErrors: true, strict: true });
+    const validateLocal = ajv.compile(loadSchema('cortext.status.v1.schema.json'));
+    const validateRedacted = ajv.compile(loadSchema('cortext.status.redacted.v1.schema.json'));
+
+    for (const code of LEGACY_PARTIAL_OBSERVATION_CODES) {
+      const metadata = LEGACY_STATUS_OBSERVATIONS[code];
+      const forged = structuredClone(local) as any;
+      forged.snapshot_status = 'complete';
+      forged.overall = { status: 'degraded', highest_severity: metadata.severity };
+      forged.observations.push({ code, ...metadata });
+      forged.check = passingCheck('usable');
+
+      expect(evaluateStatusCheck(forged, 'usable@v1').reason_codes, code).toContain(
+        'CORTEXT_CHECK_SNAPSHOT_INCOMPLETE',
+      );
+      expect(validateLocal(forged), `${code}: ${JSON.stringify(validateLocal.errors)}`)
+        .toBe(false);
+
+      const redacted = redactLifecycleStatus(
+        forged,
+        '00000000-0000-4000-8000-000000000000',
+      );
+      expect(redacted.snapshot_status, code).toBe('partial');
+      expect(redacted.check?.result, code).toBe('fail');
+      expect(redacted.check?.reason_codes, code).toContain('CORTEXT_CHECK_SNAPSHOT_INCOMPLETE');
+      expect(redacted.observations, code).toContainEqual(expect.objectContaining({
+        code,
+        severity: metadata.severity,
+        domain: metadata.domain,
+      }));
+      expect(validateRedacted(redacted), `${code}: ${JSON.stringify(validateRedacted.errors)}`)
+        .toBe(true);
+
+      const impossible = structuredClone(redacted) as any;
+      impossible.snapshot_status = 'complete';
+      impossible.check = passingCheck('usable');
+      expect(validateRedacted(impossible), code).toBe(false);
     }
   });
 

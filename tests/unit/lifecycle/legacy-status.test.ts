@@ -550,7 +550,7 @@ describe('legacy lifecycle status collector', () => {
       probeDaemon: async () => ({ kind: 'absent' }),
     });
 
-    expect(snapshot.snapshot_status).toBe('complete');
+    expect(snapshot.snapshot_status).toBe('partial');
     expect(snapshot.overall.status).toBe('blocked');
     expect(snapshot.runtime.agents.enabled).toBeNull();
     expect(snapshot.observations.map(item => item.code)).toEqual(expect.arrayContaining([
@@ -645,7 +645,7 @@ describe('legacy lifecycle status collector', () => {
       }),
     });
 
-    expect(snapshot.snapshot_status).toBe('complete');
+    expect(snapshot.snapshot_status).toBe('partial');
     expect(snapshot.overall.status).toBe('blocked');
     expect(snapshot.runtime.agents).toMatchObject({
       configured: 2,

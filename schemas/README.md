@@ -12,6 +12,9 @@ Passing results are additionally bound to the snapshot facts required by the
 policy evaluator; the legacy `update-safe` policy has no passing schema branch.
 Healthy summaries and checks require a running, responsive daemon and canonical
 info-only observations; usable checks reject canonical blocking observations.
+Observations that make legacy collection incomplete are declared once in the
+shared partial-observation manifest; collectors, redaction, checks, schemas, and
+data-driven mutation tests all consume that invariant.
 Observation codes are bound to their fixed severity and domain. Redacted error
 codes are likewise bound to one static message and detail code. Redacted
 capabilities, observations, isolation evidence, and version strings are closed

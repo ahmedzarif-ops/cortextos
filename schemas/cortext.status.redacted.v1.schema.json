@@ -1452,7 +1452,16 @@
                       "code": {
                         "enum": [
                           "CORTEXT_STATUS_LEGACY_ROOT_AUTHORITY_UNPROVEN",
+                          "CORTEXT_STATUS_FRAMEWORK_NOT_FOUND",
+                          "CORTEXT_STATUS_APPLICATION_VERSION_UNKNOWN",
+                          "CORTEXT_STATUS_REGISTRY_INVALID",
+                          "CORTEXT_STATUS_AGENT_CONFIG_INVALID",
+                          "CORTEXT_STATUS_AGENT_ID_INVALID",
                           "CORTEXT_STATUS_LEGACY_AGENT_NAME_COLLISION",
+                          "CORTEXT_STATUS_HEARTBEAT_INVALID",
+                          "CORTEXT_STATUS_DAEMON_TIMEOUT",
+                          "CORTEXT_STATUS_DAEMON_RESPONSE_INVALID",
+                          "CORTEXT_STATUS_DAEMON_STATUS_UNKNOWN",
                           "CORTEXT_STATUS_STATE_MISSING",
                           "CORTEXT_STATUS_STATE_UNREADABLE"
                         ]
@@ -1837,6 +1846,50 @@
                     "const": "running"
                   }
                 }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "observations": {
+                "type": "array",
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "CORTEXT_STATUS_LEGACY_ROOT_AUTHORITY_UNPROVEN",
+                        "CORTEXT_STATUS_FRAMEWORK_NOT_FOUND",
+                        "CORTEXT_STATUS_APPLICATION_VERSION_UNKNOWN",
+                        "CORTEXT_STATUS_REGISTRY_INVALID",
+                        "CORTEXT_STATUS_AGENT_CONFIG_INVALID",
+                        "CORTEXT_STATUS_AGENT_ID_INVALID",
+                        "CORTEXT_STATUS_LEGACY_AGENT_NAME_COLLISION",
+                        "CORTEXT_STATUS_HEARTBEAT_INVALID",
+                        "CORTEXT_STATUS_DAEMON_TIMEOUT",
+                        "CORTEXT_STATUS_DAEMON_RESPONSE_INVALID",
+                        "CORTEXT_STATUS_DAEMON_STATUS_UNKNOWN",
+                        "CORTEXT_STATUS_STATE_MISSING",
+                        "CORTEXT_STATUS_STATE_UNREADABLE"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "observations"
+            ]
+          },
+          "then": {
+            "properties": {
+              "snapshot_status": {
+                "const": "partial"
               }
             }
           }

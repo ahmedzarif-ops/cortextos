@@ -4,6 +4,7 @@ import { evaluateStatusCheck } from './check-status.js';
 import {
   ISOLATION_EVIDENCE_CODES,
   LEGACY_STATUS_OBSERVATIONS,
+  LEGACY_PARTIAL_OBSERVATION_CODES,
   LEGACY_SUPPORTED_CAPABILITIES,
   LEGACY_UNSUPPORTED_CAPABILITIES,
   STATUS_CHECK_POLICIES,
@@ -27,6 +28,9 @@ const BLOCKING_OBSERVATIONS = new Set<LegacyStatusObservationCode>([
   'CORTEXT_STATUS_STATE_MISSING',
   'CORTEXT_STATUS_STATE_UNREADABLE',
 ]);
+const PARTIAL_OBSERVATIONS = new Set<LegacyStatusObservationCode>(
+  LEGACY_PARTIAL_OBSERVATION_CODES,
+);
 
 export function countBucket(value: number | null): CountBucket | null {
   if (value === null || !Number.isSafeInteger(value) || value < 0) return null;
@@ -96,7 +100,15 @@ export function redactLifecycleStatus(
     const metadata = LEGACY_STATUS_OBSERVATIONS[code];
     return [{ code, ...metadata }];
   });
-  const snapshotStatus = closedValue(snapshot.snapshot_status, ['complete', 'partial'], 'partial');
+  const suppliedSnapshotStatus = closedValue(
+    snapshot.snapshot_status,
+    ['complete', 'partial'],
+    'partial',
+  );
+  const snapshotStatus = suppliedSnapshotStatus === 'partial'
+    || canonicalObservations.some(observation => PARTIAL_OBSERVATIONS.has(observation.code))
+    ? 'partial'
+    : 'complete';
   const stateStatus = closedValue(
     snapshot.state.status,
     ['readable', 'missing', 'unreadable', 'unknown'],

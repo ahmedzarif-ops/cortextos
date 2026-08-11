@@ -21,6 +21,7 @@ import { stripBom } from '../utils/strip-bom.js';
 import { CORTEXTOS_VERSION } from '../version.js';
 import {
   LEGACY_STATUS_OBSERVATIONS,
+  LEGACY_PARTIAL_OBSERVATION_CODES,
   LEGACY_SUPPORTED_CAPABILITIES,
   LEGACY_UNSUPPORTED_CAPABILITIES,
   PUBLIC_VERSION_RE,
@@ -57,6 +58,7 @@ const SAFE_GIT_CONFIG_ARGS = [
 const TRUSTED_GIT_CANDIDATES = process.platform === 'win32'
   ? ['C:\\Program Files\\Git\\cmd\\git.exe', 'C:\\Program Files\\Git\\bin\\git.exe']
   : ['/usr/bin/git', '/bin/git'];
+const PARTIAL_OBSERVATION_CODES = new Set<string>(LEGACY_PARTIAL_OBSERVATION_CODES);
 
 const SEVERITY_ORDER: Record<StatusSeverity, number> = {
   critical: 0,
@@ -279,7 +281,7 @@ function resolveFrameworkRoot(options: CollectLegacyStatusOptions): string | nul
 
 function listAgentDirectories(
   frameworkRoot: string,
-  addObservation: (code: string, partial?: boolean) => void,
+  addObservation: (code: string) => void,
 ): { definitions: AgentDefinition[]; invalid: boolean } {
   const definitions: AgentDefinition[] = [];
   const entryBudget: DirectoryEntryBudget = { remaining: MAX_DIRECTORY_ENTRIES };
@@ -289,7 +291,7 @@ function listAgentDirectories(
     const nameSafe = LEGACY_SAFE_AGENT_ID_RE.test(name);
     const orgSafe = org === '@root' || LEGACY_SAFE_AGENT_ID_RE.test(org);
     if (!nameSafe || !orgSafe) {
-      addObservation('CORTEXT_STATUS_AGENT_ID_INVALID', true);
+      addObservation('CORTEXT_STATUS_AGENT_ID_INVALID');
       invalid = true;
     } else if (
       !CANONICAL_AGENT_ID_RE.test(name)
@@ -315,7 +317,7 @@ function listAgentDirectories(
         if (entry.isDirectory()) addAgentDir('@root', entry.name, join(flatRoot, entry.name));
       }
     } catch {
-      addObservation('CORTEXT_STATUS_AGENT_CONFIG_INVALID', true);
+      addObservation('CORTEXT_STATUS_AGENT_CONFIG_INVALID');
       invalid = true;
     }
   }
@@ -334,12 +336,12 @@ function listAgentDirectories(
             }
           }
         } catch {
-          addObservation('CORTEXT_STATUS_AGENT_CONFIG_INVALID', true);
+          addObservation('CORTEXT_STATUS_AGENT_CONFIG_INVALID');
           invalid = true;
         }
       }
     } catch {
-      addObservation('CORTEXT_STATUS_AGENT_CONFIG_INVALID', true);
+      addObservation('CORTEXT_STATUS_AGENT_CONFIG_INVALID');
       invalid = true;
     }
   }
@@ -349,7 +351,7 @@ function listAgentDirectories(
     const config = readJson(join(definition.dir, 'config.json'));
     if (config.kind === 'missing') continue;
     if (config.kind !== 'ok' || !isRecord(config.value)) {
-      addObservation('CORTEXT_STATUS_AGENT_CONFIG_INVALID', true);
+      addObservation('CORTEXT_STATUS_AGENT_CONFIG_INVALID');
       invalid = true;
       continue;
     }
@@ -363,7 +365,7 @@ function collectAgentInventory(
   frameworkRoot: string | null,
   ctxRoot: string,
   nowMs: number,
-  addObservation: (code: string, partial?: boolean) => void,
+  addObservation: (code: string) => void,
 ): AgentInventory {
   if (!frameworkRoot) {
     return {
@@ -385,7 +387,7 @@ function collectAgentInventory(
   const registryResult = readJson(join(ctxRoot, 'config', 'enabled-agents.json'));
   let registry: Record<string, unknown> = {};
   if (registryResult.kind === 'invalid' || (registryResult.kind === 'ok' && !isRecord(registryResult.value))) {
-    addObservation('CORTEXT_STATUS_REGISTRY_INVALID', true);
+    addObservation('CORTEXT_STATUS_REGISTRY_INVALID');
     sourceInvalid = true;
   } else if (registryResult.kind === 'ok') {
     registry = registryResult.value as Record<string, unknown>;
@@ -401,7 +403,7 @@ function collectAgentInventory(
   let registryIdentityBudget = Math.max(0, MAX_DIRECTORY_ENTRIES - definitions.length);
   for (const [name, rawEntry] of Object.entries(registry)) {
     if (!LEGACY_SAFE_AGENT_ID_RE.test(name) || !isRecord(rawEntry)) {
-      addObservation('CORTEXT_STATUS_REGISTRY_INVALID', true);
+      addObservation('CORTEXT_STATUS_REGISTRY_INVALID');
       sourceInvalid = true;
       continue;
     }
@@ -410,7 +412,7 @@ function collectAgentInventory(
     }
     const org = typeof rawEntry.org === 'string' ? rawEntry.org : null;
     if (org && !LEGACY_SAFE_AGENT_ID_RE.test(org)) {
-      addObservation('CORTEXT_STATUS_REGISTRY_INVALID', true);
+      addObservation('CORTEXT_STATUS_REGISTRY_INVALID');
       sourceInvalid = true;
       continue;
     }
@@ -428,7 +430,7 @@ function collectAgentInventory(
 
     if (!definition) {
       if (registryIdentityBudget <= 0) {
-        addObservation('CORTEXT_STATUS_REGISTRY_INVALID', true);
+        addObservation('CORTEXT_STATUS_REGISTRY_INVALID');
         sourceInvalid = true;
         break;
       }
@@ -483,7 +485,7 @@ function collectAgentInventory(
       const heartbeat = readJson(join(ctxRoot, 'state', name, 'heartbeat.json'));
       if (heartbeat.kind === 'missing') continue;
       if (heartbeat.kind !== 'ok' || !isRecord(heartbeat.value)) {
-        addObservation('CORTEXT_STATUS_HEARTBEAT_INVALID', true);
+        addObservation('CORTEXT_STATUS_HEARTBEAT_INVALID');
         continue;
       }
       const rawTimestamp = typeof heartbeat.value.last_heartbeat === 'string'
@@ -493,7 +495,7 @@ function collectAgentInventory(
           : null;
       const timestamp = rawTimestamp ? Date.parse(rawTimestamp) : NaN;
       if (!Number.isFinite(timestamp) || timestamp > nowMs + HEARTBEAT_FUTURE_TOLERANCE_MS) {
-        addObservation('CORTEXT_STATUS_HEARTBEAT_INVALID', true);
+        addObservation('CORTEXT_STATUS_HEARTBEAT_INVALID');
         continue;
       }
       if (nowMs - timestamp < HEARTBEAT_STALE_MS) recentHeartbeats += 1;
@@ -687,9 +689,9 @@ export async function collectLegacyStatus(
 
   const observationCodes = new Set<string>();
   let partial = false;
-  const addObservation = (code: string, makesPartial = false) => {
+  const addObservation = (code: string) => {
     observationCodes.add(code);
-    if (makesPartial) partial = true;
+    if (PARTIAL_OBSERVATION_CODES.has(code)) partial = true;
   };
 
   addObservation('CORTEXT_STATUS_LEGACY_CAPABILITIES_LIMITED');
@@ -697,7 +699,7 @@ export async function collectLegacyStatus(
     && process.env.CTX_ROOT !== undefined
     && ctxRoot !== canonicalCtxRoot;
   if (customRootUnbound) {
-    addObservation('CORTEXT_STATUS_LEGACY_ROOT_AUTHORITY_UNPROVEN', true);
+    addObservation('CORTEXT_STATUS_LEGACY_ROOT_AUTHORITY_UNPROVEN');
   }
 
   const ctxRootReadable = readableDirectory(ctxRoot);
@@ -711,12 +713,12 @@ export async function collectLegacyStatus(
       : stateReadable
         ? 'readable'
         : 'unreadable';
-  if (!stateDirExists) addObservation('CORTEXT_STATUS_STATE_MISSING', true);
-  else if (!stateReadable) addObservation('CORTEXT_STATUS_STATE_UNREADABLE', true);
+  if (!stateDirExists) addObservation('CORTEXT_STATUS_STATE_MISSING');
+  else if (!stateReadable) addObservation('CORTEXT_STATUS_STATE_UNREADABLE');
 
   const frameworkRoot = resolveFrameworkRoot(options);
   if (frameworkRoot) addObservation('CORTEXT_STATUS_LEGACY_LAYOUT');
-  else addObservation('CORTEXT_STATUS_FRAMEWORK_NOT_FOUND', true);
+  else addObservation('CORTEXT_STATUS_FRAMEWORK_NOT_FOUND');
 
   const versionEvidence: LifecycleStatusSnapshot['application']['version_evidence'] = [];
   let rootVersion: string | null = null;
@@ -733,7 +735,7 @@ export async function collectLegacyStatus(
         domain: 'application', source: 'root_package', authority: 'primary_legacy', value: rootVersion,
       });
     } else {
-      addObservation('CORTEXT_STATUS_APPLICATION_VERSION_UNKNOWN', true);
+      addObservation('CORTEXT_STATUS_APPLICATION_VERSION_UNKNOWN');
     }
 
     const dashboardPackage = packageVersion(join(frameworkRoot, 'dashboard', 'package.json'));
@@ -769,7 +771,7 @@ export async function collectLegacyStatus(
     addObservation('CORTEXT_STATUS_VERSION_CONFLICT');
   }
   if (!applicationVersion && !observationCodes.has('CORTEXT_STATUS_APPLICATION_VERSION_UNKNOWN')) {
-    addObservation('CORTEXT_STATUS_APPLICATION_VERSION_UNKNOWN', true);
+    addObservation('CORTEXT_STATUS_APPLICATION_VERSION_UNKNOWN');
   }
 
   const inventory = collectAgentInventory(frameworkRoot, ctxRoot, nowMs, addObservation);
@@ -838,7 +840,7 @@ export async function collectLegacyStatus(
     }
     runtimeIdentityCollision = [...identityVariants.values()].some(variants => variants.size > 1);
     if (runtimeIdentityCollision) {
-      addObservation('CORTEXT_STATUS_LEGACY_AGENT_NAME_COLLISION', true);
+      addObservation('CORTEXT_STATUS_LEGACY_AGENT_NAME_COLLISION');
     }
 
     if ((degraded ?? 0) > 0) addObservation('CORTEXT_STATUS_AGENT_DEGRADED');
@@ -872,15 +874,15 @@ export async function collectLegacyStatus(
   } else if (probe.kind === 'timeout') {
     daemonStatus = 'unresponsive';
     ipcStatus = 'timeout';
-    addObservation('CORTEXT_STATUS_DAEMON_TIMEOUT', true);
+    addObservation('CORTEXT_STATUS_DAEMON_TIMEOUT');
   } else if (probe.kind === 'invalid') {
     daemonStatus = 'unresponsive';
     ipcStatus = 'invalid';
-    addObservation('CORTEXT_STATUS_DAEMON_RESPONSE_INVALID', true);
+    addObservation('CORTEXT_STATUS_DAEMON_RESPONSE_INVALID');
   } else {
     daemonStatus = 'unknown';
     ipcStatus = 'unknown';
-    addObservation('CORTEXT_STATUS_DAEMON_STATUS_UNKNOWN', true);
+    addObservation('CORTEXT_STATUS_DAEMON_STATUS_UNKNOWN');
   }
 
   const materialObservation = [...observationCodes].some(code => {
