@@ -20,6 +20,7 @@ import { stripControlChars } from '../utils/validate.js';
 import { processMediaMessage } from '../telegram/media.js';
 import { stripBom } from '../utils/strip-bom.js';
 import { BuzzRelayClient, BuzzDispatcher, loadBuzzConfig, type NostrEvent } from '../buzz/index.js';
+import { computeDormancy } from '../utils/dormancy.js';
 
 type LogFn = (msg: string) => void;
 
@@ -127,6 +128,12 @@ export class AgentManager {
   // the orchestrator (e.g. a restart) while this daemon process is alive.
   private slackSocketStarted = false;
   private slackSocketClient: SlackSocketModeClient | null = null;
+
+  // silent-dormancy fix: epoch ms of when this AgentManager (i.e. the daemon)
+  // was constructed. Used as the Face-B liveness baseline for enabled agents
+  // that are absent from the mapped set — there is no per-agent uptime for
+  // them, so staleness is measured relative to daemon start.
+  private daemonStartMs: number = Date.now();
 
   constructor(instanceId: string, ctxRoot: string, frameworkRoot: string, org: string) {
     this.instanceId = instanceId;
@@ -1601,8 +1608,17 @@ export class AgentManager {
    * Get status of all agents.
    */
   getAllStatuses(): AgentStatus[] {
+    const nowMs = Date.now();
+    const daemonUptimeMs = nowMs - this.daemonStartMs;
+    // silent-dormancy fix: agents not in enabled-agents.json default to enabled
+    // (matching discoverAndStart's default-on behavior); an explicit
+    // `enabled: false` entry is the only way to be disabled.
+    const enabledList = this.readInstanceEnableList();
+    const isEnabled = (name: string): boolean => enabledList[name]?.enabled !== false;
+
     const statuses: AgentStatus[] = [];
-    for (const [, entry] of this.agents) {
+    const mapped = new Set<string>();
+    for (const [name, entry] of this.agents) {
       const status = entry.process.getStatus();
       // liveness fix: a mapped entry still reporting 'running' whose OS pid is
       // gone is dead, not running. getStatus() returns a fresh object, so
@@ -1610,9 +1626,66 @@ export class AgentManager {
       if (status.status === 'running' && (!status.pid || !isPidAlive(status.pid))) {
         status.status = 'stopped';
       }
+      mapped.add(name);
+      // Face A — staleness relative to the agent's own process uptime.
+      const d = computeDormancy({
+        agent: name,
+        org: enabledList[name]?.org,
+        enabled: isEnabled(name),
+        mapped: true,
+        nowMs,
+        lastSeenMs: this.readHeartbeatMs(name),
+        uptimeMs: status.uptime != null ? status.uptime * 1000 : null,
+        daemonUptimeMs,
+      });
+      if (d.dormant) {
+        status.dormant = true;
+        status.dormancyReason = d.reason;
+      }
       statuses.push(status);
     }
+
+    // Face B — roster-diff: enabled agents absent from the mapped set. There is
+    // no per-agent uptime, so staleness is measured relative to daemon start.
+    for (const name of Object.keys(enabledList)) {
+      if (mapped.has(name) || !isEnabled(name)) continue;
+      const d = computeDormancy({
+        agent: name,
+        org: enabledList[name]?.org,
+        enabled: true,
+        mapped: false,
+        nowMs,
+        lastSeenMs: this.readHeartbeatMs(name),
+        uptimeMs: null,
+        daemonUptimeMs,
+      });
+      statuses.push({
+        name,
+        status: 'stopped',
+        ...(d.dormant ? { dormant: true, dormancyReason: d.reason } : {}),
+      });
+    }
+
     return statuses;
+  }
+
+  /**
+   * silent-dormancy fix: read the epoch ms of an agent's last heartbeat from
+   * its canonical state/<agent>/heartbeat.json. Returns null if missing or
+   * unparseable — best effort, never throws.
+   */
+  private readHeartbeatMs(agent: string): number | null {
+    const hbPath = join(this.ctxRoot, 'state', agent, 'heartbeat.json');
+    if (!existsSync(hbPath)) return null;
+    try {
+      const hb = JSON.parse(readFileSync(hbPath, 'utf-8'));
+      const ts = hb.last_heartbeat || hb.timestamp;
+      if (!ts) return null;
+      const ms = new Date(ts).getTime();
+      return isNaN(ms) ? null : ms;
+    } catch {
+      return null;
+    }
   }
 
   /**
