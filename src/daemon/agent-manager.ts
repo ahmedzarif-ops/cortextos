@@ -20,7 +20,8 @@ import { stripControlChars } from '../utils/validate.js';
 import { processMediaMessage } from '../telegram/media.js';
 import { stripBom } from '../utils/strip-bom.js';
 import { BuzzRelayClient, BuzzDispatcher, loadBuzzConfig, type NostrEvent } from '../buzz/index.js';
-import { computeDormancy } from '../utils/dormancy.js';
+import { computeDormancy, parseHeartbeatIntervalMs } from '../utils/dormancy.js';
+import { CRONS_DIRECTORY, CRONS_FILENAME } from '../bus/crons-schema.js';
 
 type LogFn = (msg: string) => void;
 
@@ -1637,6 +1638,7 @@ export class AgentManager {
         lastSeenMs: this.readHeartbeatMs(name),
         uptimeMs: status.uptime != null ? status.uptime * 1000 : null,
         daemonUptimeMs,
+        expectedIntervalMs: this.readHeartbeatIntervalMs(name),
       });
       if (d.dormant) {
         status.dormant = true;
@@ -1658,6 +1660,7 @@ export class AgentManager {
         lastSeenMs: this.readHeartbeatMs(name),
         uptimeMs: null,
         daemonUptimeMs,
+        expectedIntervalMs: this.readHeartbeatIntervalMs(name),
       });
       statuses.push({
         name,
@@ -1683,6 +1686,35 @@ export class AgentManager {
       if (!ts) return null;
       const ms = new Date(ts).getTime();
       return isNaN(ms) ? null : ms;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * silent-dormancy fix: read an agent's expected heartbeat cadence (ms) from
+   * its ENABLED `heartbeat` cron, so computeDormancy derives the staleness
+   * threshold from the agent's OWN configured cadence rather than a fixed
+   * default. Returns null when there is no enabled `heartbeat` cron or its
+   * schedule form is unparseable — best effort, never throws; the caller then
+   * falls back to FALLBACK_INTERVAL_MS (24h).
+   *
+   * Root resolution is load-bearing. We build the crons path directly from
+   * `this.ctxRoot` (mirroring readHeartbeatMs) using CRONS_DIRECTORY/
+   * CRONS_FILENAME — NOT `readCrons()` from bus/crons.ts, whose cronsFilePath
+   * resolves its root from `process.env.CTX_ROOT ?? process.cwd()`
+   * independently of the daemon's own ctxRoot. A wrong root would read zero
+   * crons and silently drop every agent to the 24h fallback.
+   */
+  private readHeartbeatIntervalMs(agent: string): number | null {
+    const cronsPath = join(this.ctxRoot, CRONS_DIRECTORY, agent, CRONS_FILENAME);
+    if (!existsSync(cronsPath)) return null;
+    try {
+      const parsed = JSON.parse(readFileSync(cronsPath, 'utf-8'));
+      const crons: CronDefinition[] = Array.isArray(parsed?.crons) ? parsed.crons : [];
+      const heartbeat = crons.find(c => c.name === 'heartbeat' && c.enabled !== false);
+      if (!heartbeat) return null;
+      return parseHeartbeatIntervalMs(heartbeat.schedule);
     } catch {
       return null;
     }

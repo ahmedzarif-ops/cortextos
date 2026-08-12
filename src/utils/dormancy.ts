@@ -21,6 +21,22 @@
  *
  * `mapped` is NEVER part of the predicate — it only selects which baseline
  * applies and is echoed into the reason string.
+ *
+ * Named residuals (advisory-only surface — no action is taken on any of these):
+ *   (a) Agents with no `heartbeat` cron fall to
+ *       the 24h fallback and are effectively not caught — and may not even be
+ *       "dormant": they can be event-driven rather than beat-driven.
+ *   (b) Agents whose `heartbeat` cron uses a schedule form the parser cannot
+ *       read also fall to the 24h fallback.
+ *   (c) Sub-cadence dormancy (a stall shorter than interval + margin) is
+ *       undetectable BY DESIGN at these cadences — the margin is the price of
+ *       not false-flagging normal jitter.
+ *   (d) The 24h fallback is a conservative, UNVALIDATED ceiling (see
+ *       FALLBACK_INTERVAL_MS); durable per-agent cadence measurement is a
+ *       tracked follow-up.
+ *   (e) A genuinely-idle agent stuck in a single >45m turn exactly when its
+ *       beat is due could receive one spurious advisory flag. Status-surface
+ *       only — nothing acts on it.
  */
 
 // ---------------------------------------------------------------------------
@@ -30,11 +46,29 @@
 /** Below this uptime (Face A) / daemon uptime (Face B) an agent is never flagged. */
 export const BOOT_GRACE_MS = 15 * 60 * 1000; // 15 min
 
-/** Heartbeat is stale when its age exceeds MULTIPLIER × expected interval. */
-export const STALENESS_MULTIPLIER = 3;
+/**
+ * Additive slack added to an agent's OWN configured heartbeat cadence to get the
+ * staleness threshold. It is ADDITIVE, not a multiplier, on purpose: the jitter
+ * that delays a beat is ~constant wall-clock (a heartbeat cron whose fire lands
+ * behind a long agent turn is late by roughly one turn, regardless of whether
+ * the cadence is 20m or 4h). A multiplier would scale this fixed slack with the
+ * cadence and silently flag slow-cadence agents for most of every cycle — the
+ * exact defect this fix removes.
+ */
+export const JITTER_MARGIN_MS = 45 * 60 * 1000; // 45 min
 
-/** Fallback expected heartbeat interval when the caller supplies none. */
-export const DEFAULT_HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000; // 30 min
+/**
+ * Fallback expected heartbeat interval, used ONLY when an agent's real cadence
+ * cannot be parsed (no `heartbeat` cron, or a cron form the parser can't read).
+ *
+ * ⚠ CONSERVATIVE, UNVALIDATED best-estimate CEILING — NOT a measured
+ * zero-false-positive number. It is deliberately large so the fallback path
+ * almost never emits a spurious advisory flag; the cost is that a genuinely
+ * dormant agent on this path is caught late (or, if it is purely event-driven
+ * and legitimately heals-idle beyond 24h, not caught at all). Durable
+ * measurement of real per-agent cadences is a tracked follow-up.
+ */
+export const FALLBACK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 h
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -57,7 +91,7 @@ export interface DormancyInput {
   uptimeMs: number | null;
   /** Time since daemon start in ms (Face B baseline). */
   daemonUptimeMs: number;
-  /** Expected heartbeat interval in ms; falls back to DEFAULT when null/undefined. */
+  /** Expected heartbeat interval in ms; falls back to FALLBACK_INTERVAL_MS when null/undefined. */
   expectedIntervalMs?: number | null;
 }
 
@@ -87,8 +121,8 @@ export interface DormancyResult {
  * baseline and staleness measure. The `mapped` flag selects the face.
  */
 export function computeDormancy(input: DormancyInput): DormancyResult {
-  const interval = input.expectedIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
-  const thresholdMs = Math.max(BOOT_GRACE_MS, STALENESS_MULTIPLIER * interval);
+  const interval = input.expectedIntervalMs ?? FALLBACK_INTERVAL_MS;
+  const thresholdMs = Math.max(BOOT_GRACE_MS, interval + JITTER_MARGIN_MS);
 
   if (input.mapped) {
     // Face A — baseline is the agent's own uptime. Staleness is clamped to
@@ -126,4 +160,51 @@ function formatMs(ms: number): string {
   if (ms >= 3_600_000)  return `${Math.round(ms / 3_600_000)}h`;
   if (ms >= 60_000)     return `${Math.round(ms / 60_000)}m`;
   return `${ms}ms`;
+}
+
+// ---------------------------------------------------------------------------
+// Heartbeat schedule parser — pure, no I/O
+// ---------------------------------------------------------------------------
+
+//
+// Parse a cron `schedule` string into an expected interval in ms, or null when
+// the cadence cannot be determined (caller then falls back to
+// FALLBACK_INTERVAL_MS).
+//
+// Recognized forms — deliberately narrow so an ambiguous schedule fails to
+// `null` rather than yielding a wrong (and silently trusted) cadence:
+//   - Interval shorthand: "Nh" / "Nm" / "Nd"  (e.g. "4h" -> 14_400_000).
+//   - Every-N-hours 5-field cron "<min> [star][slash]N [star] [star] [star]"
+//     (fixed minute, stepped hour, wildcard day/month/dow) -> N x 3_600_000.
+//
+// Everything else — arbitrary cron expressions (specific hour lists,
+// day-of-week schedules, minute steps), unrecognized text, empty,
+// null/undefined — returns null. A schedule the parser cannot read is a named
+// residual: the agent falls to the 24h fallback and is not caught at its true
+// cadence.
+//
+export function parseHeartbeatIntervalMs(schedule: string | null | undefined): number | null {
+  if (schedule == null) return null;
+  const s = schedule.trim();
+  if (s === '') return null;
+
+  // Interval shorthand: Nh / Nm / Nd.
+  const shorthand = /^(\d+)([hmd])$/.exec(s);
+  if (shorthand) {
+    const n = Number(shorthand[1]);
+    if (n <= 0) return null;
+    const unit = shorthand[2];
+    const mult = unit === 'h' ? 3_600_000 : unit === 'm' ? 60_000 : 86_400_000;
+    return n * mult;
+  }
+
+  // Every-N-hours 5-field cron: "<min> */N * * *" — a fixed minute, a stepped
+  // hour, and wildcard day-of-month / month / day-of-week.
+  const everyNHours = /^\d+\s+\*\/(\d+)\s+\*\s+\*\s+\*$/.exec(s);
+  if (everyNHours) {
+    const n = Number(everyNHours[1]);
+    if (n > 0) return n * 3_600_000;
+  }
+
+  return null;
 }
