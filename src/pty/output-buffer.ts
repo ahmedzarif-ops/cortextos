@@ -13,6 +13,21 @@ async function loadStripAnsi() {
 
 const MAX_LOG_BYTES = 50 * 1024 * 1024; // 50 MB — rotate before OS file-cache pressure builds
 
+// Synchronous equivalent of the ansi-regex pattern used by strip-ansi. PTY
+// lifecycle polling cannot await the ESM-only package, and Claude's TUI places
+// cursor/private-mode sequences (for example ESC[1C and ESC[?25l) between
+// visible words. The previous color-only regex left those sequences behind.
+const ANSI_SYNC_PATTERN = /(?:\u001B\][\s\S]*?(?:\u0007|\u001B\u005C|\u009C))|[\u001B\u009B][[\]()#;?]*(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]/g;
+
+export function stripAnsiSync(text: string): string {
+  if (!text.includes('\u001B') && !text.includes('\u009B')) return text;
+  // Cursor-forward is commonly used instead of emitting literal spaces. Keep
+  // the visible word boundary before removing the remaining control codes.
+  const withVisibleSpacing = text.replace(/\u001B\[(\d*)C/g, (_match, width: string) =>
+    ' '.repeat(Math.max(1, Number(width) || 1)));
+  return withVisibleSpacing.replace(ANSI_SYNC_PATTERN, '');
+}
+
 /**
  * Ring buffer for PTY output. Replaces tmux capture-pane.
  * Stores raw output chunks and provides search/retrieval with ANSI stripping.
@@ -87,7 +102,7 @@ export class OutputBuffer {
    * Does basic ANSI stripping inline (strips ESC[ sequences).
    */
   searchSync(pattern: string): boolean {
-    const text = this.getRecent().replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    const text = stripAnsiSync(this.getRecent());
     return text.includes(pattern);
   }
 
@@ -100,7 +115,7 @@ export class OutputBuffer {
    */
   isBootstrapped(): boolean {
     const recent = this.getRecent();
-    const cleaned = recent.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    const cleaned = stripAnsiSync(recent);
 
     if (this.bootstrapPattern === 'permissions') {
       // Claude Code: exclude trust-folder prompt false positives.

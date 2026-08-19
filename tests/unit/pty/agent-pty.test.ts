@@ -149,6 +149,14 @@ describe('AgentPTY broadened auto-accept token match (rec B)', () => {
     expect(mockPty.write).toHaveBeenCalledWith('\r');
   });
 
+  it('accepts theme selection when cursor controls split visible words', async () => {
+    const pty = newPty({});
+    await pty.spawn('fresh', 'P');
+    pty.getOutputBuffer().push('Choose\x1b[1Cthe\x1b[1Ctext\x1b[?25l style ... Syntax\x1b[1Ctheme');
+    await vi.advanceTimersByTimeAsync(1300);
+    expect(mockPty.write).toHaveBeenCalledWith('\r');
+  });
+
   it('accepts the default account method after host authentication', async () => {
     const pty = newPty({});
     await pty.spawn('fresh', 'P');

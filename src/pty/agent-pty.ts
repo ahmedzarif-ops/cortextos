@@ -2,7 +2,7 @@ import { join } from 'path';
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { platform } from 'os';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
-import { OutputBuffer } from './output-buffer.js';
+import { OutputBuffer, stripAnsiSync } from './output-buffer.js';
 import { injectMessage as injectMessageIntoPty } from './inject.js';
 
 // node-pty types
@@ -209,7 +209,7 @@ export class AgentPTY {
       // first-run observability fix: stop BEFORE evaluating any prompt branch — once the
       // real session is up, never write a stray keystroke (Down/CR/Enter) into it.
       if (this.outputBuffer.isBootstrapped()) { clearInterval(promptPoll); return; }
-      const recent = this.outputBuffer.getRecent().replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+      const recent = stripAnsiSync(this.outputBuffer.getRecent());
       const kind = this.detectFirstRunPrompt(recent);
       const showingBypass = kind === 'bypass';
       const showingTrust = kind === 'trust';
@@ -255,7 +255,7 @@ export class AgentPTY {
     setTimeout(() => {
       clearInterval(promptPoll);
       if (this.pty && !this.outputBuffer.isBootstrapped()) {
-        const recent = this.outputBuffer.getRecent().replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+        const recent = stripAnsiSync(this.outputBuffer.getRecent());
         if (this.detectFirstRunPrompt(recent) !== null) {
           this._awaitingInteractiveConfirmation = true;
           console.warn(`[agent-pty] ${this.env.agentName}: awaiting interactive confirmation — first-run prompt still showing at backstop, not bootstrapped`);
