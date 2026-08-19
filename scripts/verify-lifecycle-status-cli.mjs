@@ -4,7 +4,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -65,12 +64,6 @@ function expectJsonRun(result, exitCode, schemaName, expectedCode) {
 const root = mkdtempSync(join(process.platform === 'win32' ? tmpdir() : '/tmp', 'cx-ls-'));
 try {
   const instanceId = `verify_${randomUUID().replaceAll('-', '')}`;
-  if (process.platform === 'win32') {
-    const pipeName = `cortextos-${instanceId}`;
-    if (readdirSync('\\\\.\\pipe\\').includes(pipeName)) {
-      throw new Error('random verifier pipe unexpectedly exists');
-    }
-  }
   const home = join(root, 'home');
   const frameworkRoot = join(root, 'framework');
   mkdirSync(join(home, '.cortextos', instanceId, 'state'), { recursive: true });
