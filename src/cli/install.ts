@@ -188,7 +188,7 @@ export const installCommand = new Command('install')
     // Smoke test: verify node-pty can actually spawn a process
     {
       try {
-        await verifyPtySpawn(require('node-pty'));
+        await verifyPtySpawn();
         console.log('  ✓ node-pty: spawn test passed');
       } catch (err) {
         console.error('  ✗ node-pty: spawn test failed');

@@ -1,60 +1,60 @@
 import { describe, expect, it, vi } from 'vitest';
-import { verifyPtySpawn } from '../../../src/platform/pty-smoke';
+import { verifyPtySpawn, type SmokeChildProcess } from '../../../src/platform/pty-smoke';
 
-describe('PTY smoke cleanup', () => {
-  it('disposes ConPTY subscriptions after a successful command', async () => {
-    const disposeData = vi.fn();
-    const disposeExit = vi.fn();
-    const fakePty = {
-      kill: vi.fn(),
-      onData(callback: (data: string) => void) {
-        queueMicrotask(() => callback('pty-ok\r\n'));
-        return { dispose: disposeData };
-      },
-      onExit(callback: (event: { exitCode: number }) => void) {
-        queueMicrotask(() => callback({ exitCode: 0 }));
-        return { dispose: disposeExit };
-      },
-    };
+function fakeChild(): {
+  child: SmokeChildProcess;
+  emitExit: (code: number | null) => void;
+  emitError: (error: Error) => void;
+  kill: ReturnType<typeof vi.fn>;
+} {
+  let exitListener: ((code: number | null) => void) | undefined;
+  let errorListener: ((error: Error) => void) | undefined;
+  const kill = vi.fn(() => true);
+  const child = {
+    kill,
+    once(event: 'error' | 'exit', listener: ((value: Error) => void) | ((value: number | null) => void)) {
+      if (event === 'error') errorListener = listener as (error: Error) => void;
+      else exitListener = listener as (code: number | null) => void;
+      return this;
+    },
+  };
+  return {
+    child,
+    emitExit: (code) => exitListener?.(code),
+    emitError: (error) => errorListener?.(error),
+    kill,
+  };
+}
 
-    await verifyPtySpawn({ spawn: () => fakePty }, 'win32', 100);
+describe('PTY smoke process isolation', () => {
+  it('resolves when the isolated native probe exits successfully', async () => {
+    const fake = fakeChild();
+    const spawn = vi.fn(() => fake.child);
+    const result = verifyPtySpawn(100, spawn);
+    fake.emitExit(0);
 
-    expect(disposeData).toHaveBeenCalledOnce();
-    expect(disposeExit).toHaveBeenCalledOnce();
-    expect(fakePty.kill).toHaveBeenCalledOnce();
+    await expect(result).resolves.toBeUndefined();
+    expect(spawn).toHaveBeenCalledOnce();
+    expect(spawn.mock.calls[0][0]).toBe(process.execPath);
+    expect(spawn.mock.calls[0][1][0]).toBe('-e');
+    expect(fake.kill).not.toHaveBeenCalled();
   });
 
-  it('does not kill an already-exited Unix PTY', async () => {
-    const fakePty = {
-      kill: vi.fn(),
-      onData(callback: (data: string) => void) {
-        queueMicrotask(() => callback('pty-ok\n'));
-        return { dispose: vi.fn() };
-      },
-      onExit(callback: (event: { exitCode: number }) => void) {
-        queueMicrotask(() => callback({ exitCode: 0 }));
-        return { dispose: vi.fn() };
-      },
-    };
+  it('rejects a failed isolated probe', async () => {
+    const fake = fakeChild();
+    const result = verifyPtySpawn(100, () => fake.child);
+    fake.emitExit(1);
 
-    await verifyPtySpawn({ spawn: () => fakePty }, 'linux', 100);
-
-    expect(fakePty.kill).not.toHaveBeenCalled();
+    await expect(result).rejects.toThrow('spawn test failed (exit 1)');
   });
 
-  it('kills and disposes a timed-out PTY', async () => {
-    const disposeData = vi.fn();
-    const disposeExit = vi.fn();
-    const fakePty = {
-      kill: vi.fn(),
-      onData: () => ({ dispose: disposeData }),
-      onExit: () => ({ dispose: disposeExit }),
-    };
+  it('kills and rejects a timed-out isolated probe', async () => {
+    const fake = fakeChild();
+    const result = verifyPtySpawn(5, () => fake.child);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fake.kill).toHaveBeenCalledOnce();
+    fake.emitExit(null);
 
-    await expect(verifyPtySpawn({ spawn: () => fakePty }, 'win32', 5))
-      .rejects.toThrow('timed out');
-    expect(fakePty.kill).toHaveBeenCalledOnce();
-    expect(disposeData).toHaveBeenCalledOnce();
-    expect(disposeExit).toHaveBeenCalledOnce();
+    await expect(result).rejects.toThrow('timed out');
   });
 });

@@ -1,75 +1,83 @@
-import { platform } from 'os';
+import { spawn } from 'child_process';
 
-interface Disposable {
-  dispose(): void;
+export interface SmokeChildProcess {
+  kill(): boolean;
+  once(event: 'error', listener: (error: Error) => void): this;
+  once(event: 'exit', listener: (code: number | null) => void): this;
 }
 
-interface SmokePty {
-  kill(): void;
-  onData(callback: (data: string) => void): Disposable;
-  onExit(callback: (event: { exitCode: number }) => void): Disposable;
-}
+export type SmokeProcessSpawner = (
+  command: string,
+  args: readonly string[],
+  options: Record<string, unknown>,
+) => SmokeChildProcess;
 
-interface PtyModule {
-  spawn(file: string, args: string[], options: Record<string, unknown>): SmokePty;
-}
-
-/** Spawn one native PTY command and release every ConPTY/event resource. */
-export async function verifyPtySpawn(
-  ptyModule: PtyModule,
-  platformName: NodeJS.Platform = platform(),
-  timeoutMs = 5_000,
-): Promise<void> {
-  const isWindows = platformName === 'win32';
-  const command = isWindows ? 'cmd.exe' : '/bin/echo';
-  // Keep the Windows shell alive after emitting the token. Closing a ConPTY
-  // only after `cmd /c` has already exited makes node-pty's cleanup helper try
-  // to attach to a vanished console, producing a spurious AttachConsole error.
-  const args = isWindows ? ['/q', '/k', 'echo', 'pty-ok'] : ['pty-ok'];
-  const pty = ptyModule.spawn(command, args, {
-    name: 'xterm-256color', cols: 80, rows: 24,
+// Keep node-pty in a process boundary. On Windows its ConPTY output worker can
+// retain a MessagePort after a normally exited shell, keeping doctor/install
+// alive. Calling the public kill() method after exit has a separate race that
+// can print a false `AttachConsole failed` error. A one-shot child proves the
+// same native spawn contract and then exits with all native handles contained.
+const SMOKE_SCRIPT = String.raw`
+try {
+  const pty = require('node-pty');
+  const windows = process.platform === 'win32';
+  const terminal = pty.spawn(windows ? 'cmd.exe' : '/bin/echo', windows ? ['/c', 'echo', 'pty-ok'] : ['pty-ok'], {
+    name: 'xterm-256color', cols: 80, rows: 24
   });
+  let output = '';
+  terminal.onData((data) => { output += data; });
+  terminal.onExit(({ exitCode }) => {
+    process.exit(exitCode === 0 && output.includes('pty-ok') ? 0 : 1);
+  });
+  setTimeout(() => process.exit(1), 4000);
+} catch {
+  process.exit(1);
+}
+`;
 
-  await new Promise<void>((resolve, reject) => {
-    let output = '';
+/** Verify that node-pty can load, spawn, exchange output, and exit cleanly. */
+export function verifyPtySpawn(
+  timeoutMs = 5_000,
+  spawnProcess: SmokeProcessSpawner = spawn as unknown as SmokeProcessSpawner,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
     let settled = false;
-    let closeRequested = false;
-    let dataSubscription: Disposable | undefined;
-    let exitSubscription: Disposable | undefined;
+    let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const finish = (error?: Error): void => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      try { dataSubscription?.dispose(); } catch { /* best-effort */ }
-      try { exitSubscription?.dispose(); } catch { /* best-effort */ }
-      // Best-effort fallback for setup failures before the success token. The
-      // normal Windows path closes the still-live shell from onData below.
-      if (isWindows && !closeRequested) {
-        closeRequested = true;
-        try { pty.kill(); } catch { /* child/session may already be closed */ }
-      }
       if (error) reject(error);
       else resolve();
     };
 
-    dataSubscription = pty.onData((data) => {
-      output += data;
-      if (isWindows && output.includes('pty-ok') && !closeRequested) {
-        closeRequested = true;
-        try { pty.kill(); } catch (err) {
-          finish(err instanceof Error ? err : new Error(String(err)));
-        }
+    let child: SmokeChildProcess;
+    try {
+      child = spawnProcess(process.execPath, ['-e', SMOKE_SCRIPT], {
+        stdio: 'ignore',
+        windowsHide: true,
+        cwd: process.cwd(),
+      });
+    } catch (err) {
+      finish(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
+
+    child.once('error', (err) => finish(err));
+    child.once('exit', (code) => {
+      if (timedOut) {
+        finish(new Error('spawn test timed out'));
+      } else if (code === 0) {
+        finish();
+      } else {
+        finish(new Error(`spawn test failed (exit ${code ?? 'unknown'})`));
       }
     });
-    exitSubscription = pty.onExit(({ exitCode }) => {
-      finish((isWindows || exitCode === 0) && output.includes('pty-ok')
-        ? undefined
-        : new Error(`spawn test failed (exit ${exitCode})`));
-    });
     timer = setTimeout(() => {
-      finish(new Error('spawn test timed out'));
+      timedOut = true;
+      try { child.kill(); } catch { /* process may already be exiting */ }
     }, timeoutMs);
   });
 }

@@ -227,7 +227,7 @@ export const doctorCommand = new Command('doctor')
 
     // Actual spawn test (cross-platform)
     try {
-      await verifyPtySpawn(require('node-pty'));
+      await verifyPtySpawn();
       checks.push({
         name: 'node-pty spawn test',
         status: 'pass',
