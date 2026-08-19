@@ -38,6 +38,7 @@ Statuses: `new`, `reproduced`, `test-added`, `fixed`, `verified`, `deferred`, `n
 | WIN-026 | high | product/config lifecycle | fixed | PowerShell/Notepad BOM-prefixed agent config makes a deliberate `telegram_polling:false` look malformed, blocking enable and degrading daemon config reads | Apply the existing BOM-stripping contract to Telegram preflight, daemon config load/reload, session timer reload, and crash hooks |
 | WIN-027 | high | product/Claude lifecycle | fixed | Authenticated Claude Code can remain stuck at its one-time theme/account-method screens on a fresh Windows profile, so bus messages are typed into the menu | Detect the prompt-specific multi-token screens and safely confirm their defaults before the existing trust/bypass handling; retain the bootstrap no-keystroke guard |
 | WIN-028 | high | product/terminal parsing | fixed | Claude's TUI cursor/private-mode escapes split visible first-run phrases, defeating the color-only ANSI stripper and leaving the agent falsely `running` | Centralize full synchronous CSI/OSC stripping for lifecycle polling, bootstrap detection, and first-run recognition |
+| WIN-029 | high | product/Claude lifecycle | fixed | First-run trust/bypass warnings contain lowercase `permissions`, so the generic bootstrap substring stops the auto-confirmer before the blocking screen is accepted | Require Claude's actual `permissions: <mode>` ready-status shape and regress the real warning text |
 
 ## Adaptive notes
 

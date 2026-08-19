@@ -124,7 +124,7 @@ describe('AgentPTY first-run wedge detection (awaiting interactive confirmation)
     pty.getOutputBuffer().push('2. Yes, I accept - Bypass Permissions mode');
     await vi.advanceTimersByTimeAsync(46000);
     expect(pty.isAwaitingInteractiveConfirmation()).toBe(true);
-    pty.getOutputBuffer().push('permissions');
+    pty.getOutputBuffer().push('permissions: bypass');
     expect(pty.isAwaitingInteractiveConfirmation()).toBe(false);
   });
 });
@@ -184,6 +184,15 @@ describe('AgentPTY broadened auto-accept token match (rec B)', () => {
     expect(mockPty.write).toHaveBeenCalledWith('\x1b[B');
   });
 
+  it('handles bypass confirmation even when the warning mentions tool permissions', async () => {
+    const pty = newPty({});
+    await pty.spawn('fresh', 'P');
+    pty.getOutputBuffer().push('This folder pre-approves tool permissions. Bypass Permissions mode ... 2. Yes, I accept');
+    await vi.advanceTimersByTimeAsync(1700);
+    expect(mockPty.write).toHaveBeenCalledWith('\x1b[B');
+    expect(mockPty.write).toHaveBeenCalledWith('\r');
+  });
+
   it('does NOT inject on benign single-token output', async () => {
     const pty = newPty({});
     await pty.spawn('fresh', 'P');
@@ -204,7 +213,7 @@ describe('AgentPTY structural no-keystroke-into-live-session invariant', () => {
     // into the live session. Fails against the old ordering (branches first).
     const pty = newPty({});
     await pty.spawn('fresh', 'P');
-    pty.getOutputBuffer().push('Bypass Permissions ... 2. Yes, I accept · permissions');
+    pty.getOutputBuffer().push('Bypass Permissions ... 2. Yes, I accept · permissions: bypass');
     await vi.advanceTimersByTimeAsync(2000);
     expect(mockPty.write).not.toHaveBeenCalled();
   });

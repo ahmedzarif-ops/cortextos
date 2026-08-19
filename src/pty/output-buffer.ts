@@ -118,11 +118,11 @@ export class OutputBuffer {
     const cleaned = stripAnsiSync(recent);
 
     if (this.bootstrapPattern === 'permissions') {
-      // Claude Code: exclude trust-folder prompt false positives.
-      // The trust prompt shows "trust this folder" before the status bar appears.
-      if (cleaned.includes('trust') && !cleaned.includes('> ')) {
-        return false;
-      }
+      // Claude's ready status bar uses `permissions: <mode>`. First-run trust
+      // and bypass warnings also contain the word "permissions" (including a
+      // lowercase occurrence in the pre-approved tools explanation), so a
+      // bare substring falsely marks those blocking screens as bootstrapped.
+      return /permissions\s*:\s*[a-z-]+/i.test(cleaned);
     }
 
     return cleaned.includes(this.bootstrapPattern);

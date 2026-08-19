@@ -79,6 +79,12 @@ describe('OutputBuffer redaction', () => {
     expect(buf.isBootstrapped()).toBe(true);
   });
 
+  it('does not treat first-run permission warnings as a ready status bar', () => {
+    const buf = new OutputBuffer();
+    buf.push('This folder pre-approves 6 tool permissions. WARNING: Bypass Permissions mode > 1. No, exit');
+    expect(buf.isBootstrapped()).toBe(false);
+  });
+
   it('chunk-boundary edge case is NOT redacted (documents the known limitation)', () => {
     // Split a JWT across two push() calls. Neither chunk matches the
     // regex on its own — the redactor is stateless and chunk-local. This
