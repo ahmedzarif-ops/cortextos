@@ -157,6 +157,13 @@ describe('BUG-035 + BUG-013: enable-agent validation', () => {
       expect(requiresTelegramCredentials(agentDir)).toBe(false);
     });
 
+    it('accepts a BOM-prefixed Windows config for a bus-only agent', () => {
+      const agentDir = join(tmpHome, 'agent-bus-only-bom');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, 'config.json'), `\uFEFF${JSON.stringify({ telegram_polling: false })}`);
+      expect(requiresTelegramCredentials(agentDir)).toBe(false);
+    });
+
     it('fails closed when config is malformed', () => {
       const agentDir = join(tmpHome, 'agent-malformed');
       mkdirSync(agentDir, { recursive: true });

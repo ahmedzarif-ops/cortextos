@@ -45,6 +45,11 @@ describe('readMaxCrashesPerDay', () => {
     expect(readMaxCrashesPerDay(tmp)).toBe(10);
   });
 
+  it('reads a BOM-prefixed Windows config', () => {
+    writeFileSync(join(tmp, 'config.json'), `\uFEFF${JSON.stringify({ max_crashes_per_day: 7 })}`, 'utf-8');
+    expect(readMaxCrashesPerDay(tmp)).toBe(7);
+  });
+
   it('returns null when max_crashes_per_day is not a number', () => {
     writeFileSync(join(tmp, 'config.json'), JSON.stringify({ max_crashes_per_day: 'ten' }), 'utf-8');
     expect(readMaxCrashesPerDay(tmp)).toBeNull();

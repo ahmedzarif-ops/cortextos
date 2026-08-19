@@ -18,6 +18,7 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync, unlinkSync, mk
 import { join } from 'path';
 import { homedir } from 'os';
 import { execFile } from 'child_process';
+import { stripBom } from '../utils/strip-bom.js';
 
 const DEDUP_WINDOW_MS = 10 * 60 * 1000;         // 10 minutes
 const QUIET_HOUR_START_LA = 22;                 // 22:00 America/Los_Angeles
@@ -86,7 +87,7 @@ function detectRateLimitInLog(logPath: string): boolean {
 export function readMaxCrashesPerDay(agentDir: string | undefined): number | null {
   if (!agentDir) return null;
   try {
-    const cfg = JSON.parse(readFileSync(join(agentDir, 'config.json'), 'utf-8')) as Record<string, unknown>;
+    const cfg = JSON.parse(stripBom(readFileSync(join(agentDir, 'config.json'), 'utf-8'))) as Record<string, unknown>;
     return typeof cfg.max_crashes_per_day === 'number' ? cfg.max_crashes_per_day : null;
   } catch {
     return null;

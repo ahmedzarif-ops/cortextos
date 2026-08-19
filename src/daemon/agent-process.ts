@@ -13,6 +13,7 @@ import { writeCortextosEnv } from '../utils/env.js';
 import { getOverdueReminders } from '../bus/reminders.js';
 import { resolvePaths } from '../utils/paths.js';
 import { terminateProcessTree } from '../platform/process.js';
+import { stripBom } from '../utils/strip-bom.js';
 
 type LogFn = (msg: string) => void;
 
@@ -1065,7 +1066,7 @@ export class AgentProcess {
         try {
           const configPath = join(this.env.agentDir, 'config.json');
           if (existsSync(configPath)) {
-            const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
+            const cfg = JSON.parse(stripBom(readFileSync(configPath, 'utf-8')));
             currentMaxMs = (cfg.max_session_seconds || DEFAULT_MAX_SESSION_S) * 1000;
           }
         } catch { /* use initial value on read error */ }

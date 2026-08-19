@@ -4,6 +4,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI, formatValidateError } from '../telegram/api.js';
+import { stripBom } from '../utils/strip-bom.js';
 
 /**
  * BUG-035 fix: discover the cortextOS framework root without depending on
@@ -53,7 +54,7 @@ function parseEnvFile(path: string): Record<string, string> {
  */
 export function requiresTelegramCredentials(agentDir: string): boolean {
   try {
-    const config = JSON.parse(readFileSync(join(agentDir, 'config.json'), 'utf-8')) as {
+    const config = JSON.parse(stripBom(readFileSync(join(agentDir, 'config.json'), 'utf-8'))) as {
       telegram_polling?: unknown;
     };
     return config.telegram_polling !== false;

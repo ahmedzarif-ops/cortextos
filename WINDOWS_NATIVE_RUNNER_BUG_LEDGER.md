@@ -35,6 +35,7 @@ Statuses: `new`, `reproduced`, `test-added`, `fixed`, `verified`, `deferred`, `n
 | WIN-023 | high | product/diagnostics | fixed | `install` and `doctor` print completion but remain alive after their Windows ConPTY smoke test | Run the bounded native PTY probe in an isolated child process so node-pty workers cannot retain the CLI; real Azure `doctor` and idempotent `install` both return exit 0 with empty stderr |
 | WIN-024 | high | product/dashboard security | fixed | Generated PM2 dashboard ignores the operator's desired bind address and Next.js listens on all interfaces | Add an explicit `--dashboard-host` generator option; preserve existing defaults while allowing VPS instances to bind loopback-only |
 | WIN-025 | high | product/dashboard lifecycle | fixed | Supported `install` then `ecosystem` flow starts a dashboard that returns HTTP 500 because instance credentials never reach Next.js | Materialize a permission-restricted, gitignored `.env.local` from instance `dashboard.env`; preserve an existing custom file and never embed secrets in PM2 config |
+| WIN-026 | high | product/config lifecycle | fixed | PowerShell/Notepad BOM-prefixed agent config makes a deliberate `telegram_polling:false` look malformed, blocking enable and degrading daemon config reads | Apply the existing BOM-stripping contract to Telegram preflight, daemon config load/reload, session timer reload, and crash hooks |
 
 ## Adaptive notes
 

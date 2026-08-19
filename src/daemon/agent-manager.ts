@@ -2038,7 +2038,7 @@ export class AgentManager {
       return {};
     }
     try {
-      return JSON.parse(raw);
+      return JSON.parse(stripBom(raw));
     } catch (err) {
       const msg = (err as SyntaxError).message;
       // Best-effort line/column extraction from V8 SyntaxError messages.
