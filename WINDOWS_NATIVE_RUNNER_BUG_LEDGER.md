@@ -32,6 +32,7 @@ Statuses: `new`, `reproduced`, `test-added`, `fixed`, `verified`, `deferred`, `n
 | WIN-020 | high | security/dependencies | deferred | Dashboard production dependency audit reports 19 advisories (2 critical, 11 high, 4 moderate, 2 low); a non-forcing lock-only audit proposes no changes | Keep live acceptance loopback-only; do not claim unrestricted production readiness; triage direct `next-auth`, `next`, and `marked` upgrades in a dedicated security change |
 | WIN-021 | medium | install/isolation | reproduced | Non-default `install` still performs a host-global `npm link`, and the completed command remained alive over SSH; optional model/KB assets are partly user-global | Add an explicit isolated-install mode and a deterministic CLI-exit regression before claiming clean instance isolation |
 | WIN-022 | high | product/persistence | fixed | Startup helper misses version-manager PM2 layouts; Azure local accounts can also report `USERDOMAIN=WORKGROUP`, which Task Scheduler cannot map to a SID | Resolve the active PM2 shim's sibling Node entry and the authenticated Windows identity; register twice idempotently and prove resurrection |
+| WIN-023 | high | product/diagnostics | fixed | `install` and `doctor` print completion but remain alive after their Windows ConPTY smoke test | Shared bounded PTY probe disposes data/exit subscriptions, kills on timeout, and both real CLI commands return cleanly on Windows |
 
 ## Adaptive notes
 

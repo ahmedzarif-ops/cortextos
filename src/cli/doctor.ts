@@ -3,6 +3,7 @@ import { execSync, spawnSync } from 'child_process';
 import { existsSync, readFileSync, readdirSync, statSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { verifyPtySpawn } from '../platform/pty-smoke.js';
 
 export interface Check {
   name: string;
@@ -226,20 +227,7 @@ export const doctorCommand = new Command('doctor')
 
     // Actual spawn test (cross-platform)
     try {
-      const pty = require('node-pty');
-      let output = '';
-      const isWin = process.platform === 'win32';
-      const smokeCmd = isWin ? 'cmd.exe' : '/bin/echo';
-      const smokeArgs = isWin ? ['/c', 'echo', 'pty-ok'] : ['pty-ok'];
-      const p = pty.spawn(smokeCmd, smokeArgs, { name: 'xterm-256color', cols: 80, rows: 24 });
-      await new Promise<void>((resolve, reject) => {
-        p.onData((data: string) => { output += data; });
-        p.onExit(({ exitCode }: { exitCode: number }) => {
-          if (exitCode === 0 && output.includes('pty-ok')) resolve();
-          else reject(new Error(`exit ${exitCode}`));
-        });
-        setTimeout(() => reject(new Error('timed out')), 5000);
-      });
+      await verifyPtySpawn(require('node-pty'));
       checks.push({
         name: 'node-pty spawn test',
         status: 'pass',

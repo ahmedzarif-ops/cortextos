@@ -4,6 +4,7 @@ import { join } from 'path';
 import { homedir, platform, arch } from 'os';
 import { execSync, spawnSync } from 'child_process';
 import { randomBytes } from 'crypto';
+import { verifyPtySpawn } from '../platform/pty-smoke.js';
 
 const IS_WINDOWS = platform() === 'win32';
 const IS_MAC = platform() === 'darwin';
@@ -187,19 +188,7 @@ export const installCommand = new Command('install')
     // Smoke test: verify node-pty can actually spawn a process
     {
       try {
-        const pty = require('node-pty');
-        let output = '';
-        const smokeCmd = IS_WINDOWS ? 'cmd.exe' : '/bin/echo';
-        const smokeArgs = IS_WINDOWS ? ['/c', 'echo', 'pty-ok'] : ['pty-ok'];
-        const p = pty.spawn(smokeCmd, smokeArgs, { name: 'xterm-256color', cols: 80, rows: 24 });
-        await new Promise<void>((resolve, reject) => {
-          p.onData((data: string) => { output += data; });
-          p.onExit(({ exitCode }: { exitCode: number }) => {
-            if (exitCode === 0 && output.includes('pty-ok')) resolve();
-            else reject(new Error(`spawn test failed (exit ${exitCode})`));
-          });
-          setTimeout(() => reject(new Error('spawn test timed out')), 5000);
-        });
+        await verifyPtySpawn(require('node-pty'));
         console.log('  ✓ node-pty: spawn test passed');
       } catch (err) {
         console.error('  ✗ node-pty: spawn test failed');
