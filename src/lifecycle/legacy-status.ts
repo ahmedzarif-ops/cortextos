@@ -243,7 +243,10 @@ function gitEnvironment(): NodeJS.ProcessEnv {
   // scrubbed. Keep this an explicit allowlist: inheriting the full environment
   // would re-introduce GIT_DIR/GIT_WORK_TREE/GIT_TRACE/PATH injection.
   if (process.platform === 'win32') {
-    for (const key of ['SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT', 'TEMP', 'TMP']) {
+    for (const key of [
+      'SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT', 'TEMP', 'TMP',
+      'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA',
+    ]) {
       const value = process.env[key];
       if (value) env[key] = value;
     }

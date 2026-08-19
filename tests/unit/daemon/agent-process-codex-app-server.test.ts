@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { join } from 'node:path';
 
 let capturedOnExit: ((exitCode: number, signal?: number) => void) | null = null;
 
@@ -207,7 +208,12 @@ describe('AgentProcess codex-app-server runtime', () => {
     // exit_code=0 in a crash loop (2026-05-09, 05-14, 05-16). The runtime gate
     // means: codex-app-server checks ITS OWN thread state file, never the
     // Claude conversation dir.
-    const codexThreadPath = '/tmp/test-ctx/state/codex-app-agent/codex-app-server-thread.json';
+    const codexThreadPath = join(
+      mockEnv.ctxRoot,
+      'state',
+      'codex-app-agent',
+      'codex-app-server-thread.json',
+    );
 
     // Stale Claude JSONL present but no codex-app-server thread state → fresh.
     fsMocks.existsSync.mockImplementation((path: string) => {
