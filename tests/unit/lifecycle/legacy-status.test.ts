@@ -305,6 +305,29 @@ describe('legacy lifecycle status collector', () => {
     );
   });
 
+  it.runIf(process.platform === 'win32')(
+    'treats differently-cased Windows repository paths as the same canonical root',
+    async () => {
+      const { frameworkRoot, ctxRoot } = makeFixture();
+      execFileSync('git', ['init'], { cwd: frameworkRoot, stdio: 'ignore' });
+      execFileSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: frameworkRoot });
+      execFileSync('git', ['config', 'user.name', 'Lifecycle Test'], { cwd: frameworkRoot });
+      execFileSync('git', ['add', 'package.json'], { cwd: frameworkRoot });
+      execFileSync('git', ['commit', '-m', 'fixture'], { cwd: frameworkRoot, stdio: 'ignore' });
+
+      const caseVariant = frameworkRoot.replace(/[A-Za-z]/, character =>
+        character === character.toLowerCase() ? character.toUpperCase() : character.toLowerCase());
+      const snapshot = await collectLegacyStatus({
+        instanceId: 'default',
+        ctxRoot,
+        frameworkRoot: caseVariant,
+        probeDaemon: async () => ({ kind: 'absent' }),
+      });
+
+      expect(snapshot.application.source_commit).toMatch(/^[a-f0-9]{40,64}$/);
+    },
+  );
+
   it('does not execute a repository-configured fsmonitor command during Git inspection', async () => {
     const { frameworkRoot, ctxRoot } = makeFixture();
     execFileSync('git', ['init'], { cwd: frameworkRoot, stdio: 'ignore' });

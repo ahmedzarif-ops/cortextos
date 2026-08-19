@@ -279,7 +279,15 @@ function gitOutput(frameworkRoot: string, args: string[]): string | null {
 
 function sameRealPath(first: string, second: string): boolean {
   try {
-    return realpathSync(first) === realpathSync(second);
+    const firstReal = realpathSync(first);
+    const secondReal = realpathSync(second);
+    // NTFS path identity is case-insensitive in the supported Windows setup.
+    // Git for Windows and Node can report the same drive/root with different
+    // casing (notably under hosted service accounts), so byte comparison
+    // rejects valid repository provenance there.
+    return process.platform === 'win32'
+      ? firstReal.toLowerCase() === secondReal.toLowerCase()
+      : firstReal === secondReal;
   } catch {
     return false;
   }
