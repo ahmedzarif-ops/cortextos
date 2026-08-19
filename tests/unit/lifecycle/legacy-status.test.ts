@@ -100,6 +100,11 @@ async function probeFromTemporaryServer(
 function treeMetadata(root: string, relative = ''): string[] {
   const current = join(root, relative);
   const entries = readdirSync(current, { withFileTypes: true })
+    // Git may create and remove internal maintenance locks asynchronously
+    // after fixture commands return. Those private implementation files are
+    // not part of the framework/instance immutability contract and racing
+    // their lstat made this oracle intermittently fail on macOS runners.
+    .filter(entry => entry.name !== '.git')
     .sort((a, b) => a.name.localeCompare(b.name));
   const result: string[] = [];
   for (const entry of entries) {
