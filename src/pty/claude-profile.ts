@@ -24,7 +24,7 @@ export function markAuthenticatedClaudeProfileReady(profilePath: string, authSta
 }
 
 /** Prepare an authenticated Windows profile for a non-interactive PTY launch. */
-export function prepareClaudeHeadlessProfile(binary: string): void {
+export function prepareClaudeHeadlessProfile(binary: string, argsPrefix: readonly string[] = []): void {
   if (platform() !== 'win32') return;
   const profilePath = join(homedir(), '.claude.json');
   try {
@@ -32,10 +32,12 @@ export function prepareClaudeHeadlessProfile(binary: string): void {
       const profile = JSON.parse(stripBom(readFileSync(profilePath, 'utf-8'))) as Record<string, unknown>;
       if (profile.hasCompletedOnboarding === true) return;
     }
-    const isCmd = binary.toLowerCase().endsWith('.cmd');
-    const result = isCmd
-      ? spawnSync(`${binary} auth status`, [], { encoding: 'utf-8', stdio: 'pipe', timeout: 10_000, shell: true, windowsHide: true })
-      : spawnSync(binary, ['auth', 'status'], { encoding: 'utf-8', stdio: 'pipe', timeout: 10_000, windowsHide: true });
+    const result = spawnSync(binary, [...argsPrefix, 'auth', 'status'], {
+      encoding: 'utf-8',
+      stdio: 'pipe',
+      timeout: 10_000,
+      windowsHide: true,
+    });
     const captured = [result.stdout, result.stderr]
       .filter((value): value is string => typeof value === 'string')
       .join('\n');

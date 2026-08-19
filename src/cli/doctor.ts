@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync, statSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { verifyPtySpawn } from '../platform/pty-smoke.js';
+import { resolveClaudeCommand } from '../pty/claude-command.js';
 
 export interface Check {
   name: string;
@@ -32,12 +33,11 @@ export function runRuntimeProbe(command: string, args: readonly string[]): Runti
   if (![command, ...args].every((part) => /^[A-Za-z0-9._/-]+$/.test(part))) {
     return { ok: false, stdout: '' };
   }
-  const windows = process.platform === 'win32';
-  const result = spawnSync(windows ? [command, ...args].join(' ') : command, windows ? [] : [...args], {
+  const invocation = resolveRuntimeProbeInvocation(command, args, process.platform, process.env);
+  const result = spawnSync(invocation.file, invocation.args, {
     encoding: 'utf-8',
     stdio: 'pipe',
     timeout: 10_000,
-    shell: windows,
     windowsHide: true,
   });
   return {
@@ -45,6 +45,24 @@ export function runRuntimeProbe(command: string, args: readonly string[]): Runti
     // Some CLI versions write status to stderr. It is still captured and only
     // interpreted in-memory; auth probe output is never displayed.
     stdout: [result.stdout, result.stderr].filter((value): value is string => typeof value === 'string').join('\n'),
+  };
+}
+
+export function resolveRuntimeProbeInvocation(
+  command: string,
+  args: readonly string[],
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+  fileExists: (path: string) => boolean = existsSync,
+): { file: string; args: string[] } {
+  if (platform !== 'win32') return { file: command, args: [...args] };
+  if (command === 'claude') {
+    const resolved = resolveClaudeCommand(platform, env, fileExists);
+    return { file: resolved.file, args: [...resolved.argsPrefix, ...args] };
+  }
+  return {
+    file: env.ComSpec || env.COMSPEC || 'cmd.exe',
+    args: ['/d', '/s', '/c', command, ...args],
   };
 }
 

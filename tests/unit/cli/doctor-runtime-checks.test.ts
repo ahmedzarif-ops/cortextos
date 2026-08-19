@@ -1,7 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
-import { getAgentRuntimeChecks, type RuntimeProbe } from '../../../src/cli/doctor';
+import { getAgentRuntimeChecks, resolveRuntimeProbeInvocation, type RuntimeProbe } from '../../../src/cli/doctor';
 
 describe('doctor agent runtime checks', () => {
+  it('probes the native Claude executable on Windows instead of its cmd shim', () => {
+    const prefix = 'C:\\ProgramData\\cortextos\\npm-global';
+    const native = `${prefix}\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe`;
+    expect(resolveRuntimeProbeInvocation(
+      'claude', ['auth', 'status'], 'win32', { PATH: prefix }, path => path === native,
+    )).toEqual({ file: native, args: ['auth', 'status'] });
+  });
+
   it('verifies executable and authentication readiness for all runtimes', () => {
     const outputs = new Map<string, string>([
       ['claude --version', '2.1.0\n'],
