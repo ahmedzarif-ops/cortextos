@@ -69,6 +69,15 @@ if ($env:APPDATA) {
     $pm2BinCandidates += Join-Path $env:APPDATA 'npm\node_modules\pm2\bin\pm2'
 }
 $pm2BinCandidates += Join-Path (Split-Path $node -Parent) 'node_modules\pm2\bin\pm2'
+# npm version managers and user-scoped Node distributions can place the
+# executable shim outside both APPDATA\npm and node.exe's directory. Resolve
+# the shim the operator is actually using, then inspect only its conventional
+# sibling node_modules path; the scheduled task still launches the real Node
+# entry point directly rather than persisting the mutable .cmd wrapper.
+$pm2Command = Get-Command pm2.cmd -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($pm2Command) {
+    $pm2BinCandidates += Join-Path (Split-Path $pm2Command.Source -Parent) 'node_modules\pm2\bin\pm2'
+}
 try {
     $npmRoot = (& npm.cmd root --global 2>$null | Select-Object -First 1).Trim()
     if ($npmRoot) {
@@ -111,12 +120,21 @@ $action = New-ScheduledTaskAction `
     -Execute $powerShellExe `
     -Argument "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $encodedAction"
 
+# Resolve the authenticated Windows principal rather than composing
+# USERDOMAIN\USERNAME. Local Azure/standalone accounts can report
+# USERDOMAIN=WORKGROUP, which has no account-to-SID mapping and makes
+# Register-ScheduledTask fail with 0x80070534.
+$currentPrincipal = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+if (-not $currentPrincipal) {
+    $currentPrincipal = "$env:COMPUTERNAME\$env:USERNAME"
+}
+
 # Trigger at the current user's logon. AtLogon (not AtStartup) avoids needing
 # admin rights / SYSTEM-level service config; Task Scheduler runs under your
 # user, which is what PM2 expects (it stores state in %USERPROFILE%\.pm2).
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentPrincipal
 
-$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+$principal = New-ScheduledTaskPrincipal -UserId $currentPrincipal -LogonType Interactive -RunLevel Limited
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -142,7 +160,7 @@ Register-ScheduledTask `
 
 Write-Host ""
 Write-Host "[ok] Registered scheduled task: $TaskName"
-Write-Host "      Trigger:   At logon ($env:USERDOMAIN\$env:USERNAME)"
+Write-Host "      Trigger:   At logon ($currentPrincipal)"
 Write-Host "      Instance:  $InstanceId"
 Write-Host "      PM2_HOME:  $Pm2Home"
 Write-Host "      Action:    powershell.exe (encoded): node pm2 resurrect"

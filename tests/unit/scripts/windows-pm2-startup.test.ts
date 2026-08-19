@@ -16,8 +16,16 @@ describe('native Windows PM2 startup helper contract', () => {
   it('uses native limited-privilege Task Scheduler without external services', () => {
     expect(script).toContain('-LogonType Interactive -RunLevel Limited');
     expect(script).toContain('New-ScheduledTaskTrigger -AtLogOn');
+    expect(script).toContain('[System.Security.Principal.WindowsIdentity]::GetCurrent().Name');
+    expect(script).not.toContain('$env:USERDOMAIN\\$env:USERNAME');
     expect(script).toContain('-EncodedCommand $encodedAction');
     expect(script).not.toMatch(/Developer Mode/i);
     expect(script).not.toMatch(/pm2-windows-(startup|service).*\binstall\b/i);
+  });
+
+  it('resolves version-manager PM2 shims without persisting the cmd wrapper', () => {
+    expect(script).toContain('Get-Command pm2.cmd -CommandType Application');
+    expect(script).toContain("Join-Path (Split-Path $pm2Command.Source -Parent) 'node_modules\\pm2\\bin\\pm2'");
+    expect(script).toContain('& $nodeLiteral $pm2BinLiteral resurrect');
   });
 });
