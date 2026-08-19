@@ -283,26 +283,32 @@ function gitEnvironment(executable: string): NodeJS.ProcessEnv {
 
 function gitOutput(frameworkRoot: string, args: string[]): string | null {
   const executable = trustedGitExecutable();
-  if (!executable) {
-    if (process.platform === 'win32') {
-      console.warn('[lifecycle] trusted Git unavailable (allowlisted executable not found)');
-    }
+  if (!executable) return null;
+  let safeDirectory: string;
+  try {
+    safeDirectory = realpathSync(frameworkRoot);
+  } catch {
     return null;
   }
-  const result = spawnSync(executable, [...SAFE_GIT_CONFIG_ARGS, ...args], {
+  if (process.platform === 'win32') safeDirectory = safeDirectory.replace(/\\/g, '/');
+
+  // Hosted Windows service identities can see a checkout as owned by another
+  // ACL principal. We intentionally ignore global Git config (which commonly
+  // contains safe.directory=*) and replace it with the exact canonical root
+  // being inspected. This preserves dubious-ownership protection everywhere
+  // else without making status silently lose source provenance.
+  const result = spawnSync(executable, [
+    ...SAFE_GIT_CONFIG_ARGS,
+    '-c', `safe.directory=${safeDirectory}`,
+    ...args,
+  ], {
     cwd: frameworkRoot,
     encoding: 'utf-8',
     env: gitEnvironment(executable),
     timeout: 3000,
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
   });
-  if (result.status !== 0 || typeof result.stdout !== 'string') {
-    if (process.platform === 'win32') {
-      const code = result.error && 'code' in result.error ? String(result.error.code) : 'none';
-      console.warn(`[lifecycle] trusted Git probe failed (status=${result.status ?? 'none'}, error=${code})`);
-    }
-    return null;
-  }
+  if (result.status !== 0 || typeof result.stdout !== 'string') return null;
   return result.stdout.trim();
 }
 
