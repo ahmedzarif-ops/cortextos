@@ -141,6 +141,31 @@ describe('AgentPTY broadened auto-accept token match (rec B)', () => {
     expect(mockPty.write).toHaveBeenCalledWith('\r');
   });
 
+  it('accepts Claude Code theme selection in a fresh Windows profile', async () => {
+    const pty = newPty({});
+    await pty.spawn('fresh', 'P');
+    pty.getOutputBuffer().push('Choose the text style that looks best with your terminal ... Syntax theme: Monokai');
+    await vi.advanceTimersByTimeAsync(1300);
+    expect(mockPty.write).toHaveBeenCalledWith('\r');
+  });
+
+  it('accepts the default account method after host authentication', async () => {
+    const pty = newPty({});
+    await pty.spawn('fresh', 'P');
+    pty.getOutputBuffer().push('Select login method: 1. Claude account with subscription');
+    await vi.advanceTimersByTimeAsync(1300);
+    expect(mockPty.write).toHaveBeenCalledWith('\r');
+  });
+
+  it('prefers a later login screen over retained theme text', async () => {
+    const pty = newPty({});
+    await pty.spawn('fresh', 'P');
+    pty.getOutputBuffer().push('Choose the text style ... Syntax theme ... Select login method: 1. Claude account');
+    await vi.advanceTimersByTimeAsync(1300);
+    expect(mockPty.write).toHaveBeenCalledTimes(1);
+    expect(mockPty.write).toHaveBeenCalledWith('\r');
+  });
+
   it('injects Down+Enter for a lowercase "bypass" prompt variant', async () => {
     // Fixture avoids the lowercase "permissions" bootstrap token so the poll's
     // top-of-tick bootstrap self-stop does not fire before the bypass branch.

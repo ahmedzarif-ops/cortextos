@@ -202,6 +202,8 @@ export class AgentPTY {
     // normal agent output can never trigger a stray keystroke.
     let trustHandled = false;
     let bypassHandled = false;
+    let themeHandled = false;
+    let loginHandled = false;
     const promptPoll = setInterval(() => {
       if (!this.pty) { clearInterval(promptPoll); return; }
       // first-run observability fix: stop BEFORE evaluating any prompt branch — once the
@@ -211,6 +213,20 @@ export class AgentPTY {
       const kind = this.detectFirstRunPrompt(recent);
       const showingBypass = kind === 'bypass';
       const showingTrust = kind === 'trust';
+      const showingTheme = kind === 'theme';
+      const showingLogin = kind === 'login';
+      if (showingLogin && !loginHandled) {
+        // Host authentication may already be valid while Claude still needs
+        // its one-time account-method confirmation in a fresh OS profile.
+        loginHandled = true;
+        this.pty.write('\r');
+        return;
+      }
+      if (showingTheme && !themeHandled) {
+        themeHandled = true;
+        this.pty.write('\r');
+        return;
+      }
       if (showingBypass && !bypassHandled) {
         // Bypass screen: default selection is "1. No, exit". Move DOWN to
         // "2. Yes, I accept", then confirm. Bare Enter here would quit the agent.
@@ -251,10 +267,28 @@ export class AgentPTY {
   // first-run observability fix: co-occurring, prompt-specific tokens only — never a
   // single word — so live agent output can't trigger a keystroke. Broadened (B) to
   // catch case + folder/directory variants of the same two first-run screens.
-  private detectFirstRunPrompt(recent: string): 'bypass' | 'trust' | null {
-    if ((recent.includes('Bypass') || recent.includes('bypass')) && recent.includes('accept')) return 'bypass';
-    if (recent.includes('trust') && (recent.includes('folder') || recent.includes('directory'))) return 'trust';
-    return null;
+  private detectFirstRunPrompt(recent: string): 'bypass' | 'trust' | 'theme' | 'login' | null {
+    // Claude redraws its TUI in place, while OutputBuffer retains prior screen
+    // text. Select the most recently rendered recognized screen so stale theme
+    // or login tokens cannot mask a later trust/bypass prompt.
+    const candidates: Array<{ kind: 'bypass' | 'trust' | 'theme' | 'login'; index: number }> = [];
+    const loginIndex = recent.lastIndexOf('Select login method');
+    if (loginIndex >= 0 && recent.slice(loginIndex).includes('Claude account')) {
+      candidates.push({ kind: 'login', index: loginIndex });
+    }
+    const themeIndex = recent.lastIndexOf('Choose the text style');
+    if (themeIndex >= 0 && recent.slice(themeIndex).includes('Syntax theme')) {
+      candidates.push({ kind: 'theme', index: themeIndex });
+    }
+    const bypassIndex = Math.max(recent.lastIndexOf('Bypass'), recent.lastIndexOf('bypass'));
+    if (bypassIndex >= 0 && recent.includes('accept')) {
+      candidates.push({ kind: 'bypass', index: bypassIndex });
+    }
+    const trustIndex = recent.lastIndexOf('trust');
+    if (trustIndex >= 0 && /folder|directory/.test(recent.slice(trustIndex))) {
+      candidates.push({ kind: 'trust', index: trustIndex });
+    }
+    return candidates.sort((a, b) => b.index - a.index)[0]?.kind ?? null;
   }
 
   /**

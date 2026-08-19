@@ -30,6 +30,7 @@ import type { CronDefinition, CronEntry } from '../types/index.js';
 import { readCrons, writeCrons } from '../bus/crons.js';
 import { CRONS_DIRECTORY } from '../bus/crons-schema.js';
 import { scanAgentDir } from '../utils/cron-teaching-scanner.js';
+import { stripBom } from '../utils/strip-bom.js';
 
 // ---------------------------------------------------------------------------
 // Marker file path helpers
@@ -409,7 +410,7 @@ function runMigrationCore(
 
   let rawConfig: unknown;
   try {
-    rawConfig = JSON.parse(readFileSync(configJsonPath, 'utf-8'));
+    rawConfig = JSON.parse(stripBom(readFileSync(configJsonPath, 'utf-8')));
   } catch (err) {
     // Unreadable / corrupt config.json: write empty crons.json + marker so we
     // don't retry on every boot with the same broken file
