@@ -97,6 +97,25 @@ describe('AgentPTY working_directory validation', () => {
   });
 });
 
+describe('AgentPTY authentication environment', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => {
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  it('passes host Claude OAuth auth into the deliberately filtered PTY environment', async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'test-oauth-token';
+    const pty = new AgentPTY(mockEnv, {});
+    const spawn = vi.fn(() => mockPty);
+    (pty as any).spawnFn = spawn;
+    await pty.spawn('fresh', 'P');
+
+    expect(spawn.mock.calls[0][2].env.CLAUDE_CODE_OAUTH_TOKEN).toBe('test-oauth-token');
+  });
+});
+
 describe('AgentPTY first-run wedge detection (awaiting interactive confirmation)', () => {
   beforeEach(() => { vi.useFakeTimers(); mockPty.write.mockClear(); });
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
