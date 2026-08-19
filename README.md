@@ -126,9 +126,19 @@ powershell -ExecutionPolicy Bypass -File scripts\install-windows-pm2-startup.ps1
 ```
 
 The startup helper registers an idempotent, limited-privilege logon task named
-`PM2 Resurrect` (preserving the existing default). Re-running it updates that task. To test a
-disposable instance without touching the default PM2 process list, use a unique
-PM2 home and instance-scoped task:
+`PM2 Resurrect` (preserving the existing default). Re-running it updates that task.
+For a headless Windows VPS, use `-TriggerMode Startup` so PM2 returns before any
+RDP or console login:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install-windows-pm2-startup.ps1 -TriggerMode Startup
+```
+
+The default `Logon` mode remains appropriate for desktop machines. `Startup`
+uses a limited S4U task (no stored Windows password); it has local disk/process
+and outbound internet access but cannot authenticate to remote Windows network
+shares. To test a disposable instance without touching the default PM2 process
+list, use a unique PM2 home and instance-scoped task:
 
 ```powershell
 $env:CTX_INSTANCE_ID = 'windows-smoke'

@@ -14,6 +14,8 @@
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\install-windows-pm2-startup.ps1
+#   # Headless VPS (starts before any RDP/console login):
+#   powershell -ExecutionPolicy Bypass -File scripts\install-windows-pm2-startup.ps1 -TriggerMode Startup
 #   # or, to remove:
 #   powershell -ExecutionPolicy Bypass -File scripts\install-windows-pm2-startup.ps1 -Uninstall
 
@@ -22,7 +24,9 @@ param(
     [switch]$Uninstall,
     [string]$TaskName,
     [string]$InstanceId,
-    [string]$Pm2Home
+    [string]$Pm2Home,
+    [ValidateSet('Logon', 'Startup')]
+    [string]$TriggerMode = 'Logon'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -129,12 +133,20 @@ if (-not $currentPrincipal) {
     $currentPrincipal = "$env:COMPUTERNAME\$env:USERNAME"
 }
 
-# Trigger at the current user's logon. AtLogon (not AtStartup) avoids needing
-# admin rights / SYSTEM-level service config; Task Scheduler runs under your
-# user, which is what PM2 expects (it stores state in %USERPROFILE%\.pm2).
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentPrincipal
-
-$principal = New-ScheduledTaskPrincipal -UserId $currentPrincipal -LogonType Interactive -RunLevel Limited
+# Desktop installs retain the historical interactive-logon behavior. A
+# headless VPS has no console/RDP logon after reboot, so it must use AtStartup
+# with S4U: Task Scheduler obtains a non-interactive user token without storing
+# a password. S4U retains local disk/process access and outbound internet, but
+# intentionally cannot authenticate to remote Windows network shares.
+if ($TriggerMode -eq 'Startup') {
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId $currentPrincipal -LogonType S4U -RunLevel Limited
+    $triggerLabel = 'At Windows startup (headless S4U)'
+} else {
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentPrincipal
+    $principal = New-ScheduledTaskPrincipal -UserId $currentPrincipal -LogonType Interactive -RunLevel Limited
+    $triggerLabel = "At logon ($currentPrincipal)"
+}
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -155,12 +167,12 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Principal $principal `
     -Settings $settings `
-    -Description "cortextOS ($InstanceId): revive PM2-managed daemon + dashboard at user logon. PM2_HOME=$Pm2Home" `
+    -Description "cortextOS ($InstanceId): revive PM2-managed daemon + dashboard. Trigger=$TriggerMode; PM2_HOME=$Pm2Home" `
     -Force | Out-Null
 
 Write-Host ""
 Write-Host "[ok] Registered scheduled task: $TaskName"
-Write-Host "      Trigger:   At logon ($currentPrincipal)"
+Write-Host "      Trigger:   $triggerLabel"
 Write-Host "      Instance:  $InstanceId"
 Write-Host "      PM2_HOME:  $Pm2Home"
 Write-Host "      Action:    powershell.exe (encoded): node pm2 resurrect"

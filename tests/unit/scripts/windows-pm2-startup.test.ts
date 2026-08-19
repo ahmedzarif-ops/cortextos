@@ -15,12 +15,21 @@ describe('native Windows PM2 startup helper contract', () => {
 
   it('uses native limited-privilege Task Scheduler without external services', () => {
     expect(script).toContain('-LogonType Interactive -RunLevel Limited');
+    expect(script).toContain('-LogonType S4U -RunLevel Limited');
     expect(script).toContain('New-ScheduledTaskTrigger -AtLogOn');
+    expect(script).toContain('New-ScheduledTaskTrigger -AtStartup');
+    expect(script).toContain("[ValidateSet('Logon', 'Startup')]");
     expect(script).toContain('[System.Security.Principal.WindowsIdentity]::GetCurrent().Name');
     expect(script).not.toContain('$env:USERDOMAIN\\$env:USERNAME');
     expect(script).toContain('-EncodedCommand $encodedAction');
     expect(script).not.toMatch(/Developer Mode/i);
     expect(script).not.toMatch(/pm2-windows-(startup|service).*\binstall\b/i);
+  });
+
+  it('keeps desktop logon compatibility while offering explicit headless VPS startup', () => {
+    expect(script).toContain("[string]$TriggerMode = 'Logon'");
+    expect(script).toContain("if ($TriggerMode -eq 'Startup')");
+    expect(script).toContain("$triggerLabel = 'At Windows startup (headless S4U)'");
   });
 
   it('resolves version-manager PM2 shims without persisting the cmd wrapper', () => {
