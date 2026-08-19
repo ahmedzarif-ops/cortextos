@@ -75,6 +75,28 @@ describe('FastChecker', () => {
     rmSync(testDir, { recursive: true, force: true });
   });
 
+  it('leaves queued inbox messages untouched while a crash replacement bootstraps', async () => {
+    const agent = createMockAgent();
+    agent.isBootstrapped.mockReturnValue(false);
+    const checker = new FastChecker(agent, paths, '/tmp/framework');
+    const queued = join(paths.inbox, '1-1700000000000-from-operator-abcde.json');
+    writeFileSync(queued, JSON.stringify({
+      id: '1700000000000-operator-abcde',
+      from: 'operator',
+      to: 'test-agent',
+      priority: 'urgent',
+      timestamp: '2026-08-19T09:00:00.000Z',
+      text: 'survive restart readiness',
+      reply_to: null,
+    }));
+
+    await (checker as any).pollCycle();
+
+    expect(agent.injectMessage).not.toHaveBeenCalled();
+    expect(existsSync(queued)).toBe(true);
+    expect(readdirSync(paths.inflight)).toEqual([]);
+  });
+
   describe('handleActivityCallback (Telegram approval inline buttons)', () => {
     // Helper: write a minimal pending approval to disk so updateApproval
     // (called inside handleActivityCallback) has a target to resolve.

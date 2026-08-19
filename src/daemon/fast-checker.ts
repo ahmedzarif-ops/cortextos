@@ -229,6 +229,14 @@ export class FastChecker {
    * Single poll cycle: check inbox + queued Telegram messages.
    */
   private async pollCycle(): Promise<void> {
+    // A FastChecker outlives individual PTY processes. After crash recovery,
+    // AgentProcess can report `running` as soon as the replacement child is
+    // spawned, before its terminal/app-server is ready for input. Do not drain
+    // queues or move inbox files to inflight during that window: otherwise a
+    // message can be typed into startup chrome and then sit unrecoverable in
+    // inflight until the stale-message timeout.
+    if (!this.agent.isBootstrapped()) return;
+
     let messageBlock = '';
     const ackIds: string[] = [];
 
