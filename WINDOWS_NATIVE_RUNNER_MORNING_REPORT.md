@@ -15,7 +15,7 @@ This report does not claim unrestricted production readiness because a dedicated
 
 Only `codex/windows-native-runner` was changed and pushed. `main` was not modified, merged, or pushed, and no pull request was opened.
 
-Commits after the starting SHA:
+Tested implementation commits after the starting SHA (report-only commits are intentionally omitted):
 
 ```text
 fa86b55a fix: make filesystem behavior cross-platform
