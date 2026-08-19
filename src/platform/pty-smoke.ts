@@ -40,6 +40,14 @@ export async function verifyPtySpawn(
       if (timer) clearTimeout(timer);
       try { dataSubscription?.dispose(); } catch { /* best-effort */ }
       try { exitSubscription?.dispose(); } catch { /* best-effort */ }
+      // node-pty's ConPTY output worker survives a normally exited child until
+      // the terminal itself is closed. Leaving it open keeps short-lived CLI
+      // commands such as `doctor` and `install` alive indefinitely on Windows.
+      // Unix PTYs close their own descriptor on child exit and must not be
+      // signalled again.
+      if (isWindows) {
+        try { pty.kill(); } catch { /* child/session may already be closed */ }
+      }
       if (error) reject(error);
       else resolve();
     };
@@ -51,7 +59,6 @@ export async function verifyPtySpawn(
         : new Error(`spawn test failed (exit ${exitCode})`));
     });
     timer = setTimeout(() => {
-      try { pty.kill(); } catch { /* already exited */ }
       finish(new Error('spawn test timed out'));
     }, timeoutMs);
   });

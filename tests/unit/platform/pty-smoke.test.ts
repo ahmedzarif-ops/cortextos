@@ -21,6 +21,24 @@ describe('PTY smoke cleanup', () => {
 
     expect(disposeData).toHaveBeenCalledOnce();
     expect(disposeExit).toHaveBeenCalledOnce();
+    expect(fakePty.kill).toHaveBeenCalledOnce();
+  });
+
+  it('does not kill an already-exited Unix PTY', async () => {
+    const fakePty = {
+      kill: vi.fn(),
+      onData(callback: (data: string) => void) {
+        queueMicrotask(() => callback('pty-ok\n'));
+        return { dispose: vi.fn() };
+      },
+      onExit(callback: (event: { exitCode: number }) => void) {
+        queueMicrotask(() => callback({ exitCode: 0 }));
+        return { dispose: vi.fn() };
+      },
+    };
+
+    await verifyPtySpawn({ spawn: () => fakePty }, 'linux', 100);
+
     expect(fakePty.kill).not.toHaveBeenCalled();
   });
 
