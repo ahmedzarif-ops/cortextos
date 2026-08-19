@@ -59,4 +59,16 @@ describe('Windows onboarding portability contract', () => {
     expect(setup).toContain('api.getUpdates(0, 30)');
     expect(setup).not.toContain("spawnSync(process.execPath, ['-e', script, botToken]");
   });
+
+  it('keeps CLI handoff text executable in native Windows PowerShell', () => {
+    const install = read('src/cli/install.ts');
+    const dashboard = read('src/cli/dashboard.ts');
+    const start = read('src/cli/start.ts');
+    expect(install).not.toContain('View password with: cat');
+    expect(dashboard).not.toContain('View password with: cat');
+    expect(install).not.toContain('ecosystem && pm2 start');
+    expect(start).not.toContain('ecosystem && pm2 start');
+    expect(start).not.toContain('pm2-windows-startup');
+    expect(start).toContain('install-windows-pm2-startup.ps1');
+  });
 });

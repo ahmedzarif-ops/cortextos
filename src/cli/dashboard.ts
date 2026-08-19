@@ -63,7 +63,7 @@ export const dashboardCommand = new Command('dashboard')
       if (!dashCreds['ADMIN_PASSWORD']) {
         dashCreds['ADMIN_PASSWORD'] = randomBytes(12).toString('hex');
         console.log(`  Generated admin credentials saved to: ${dashEnvPath}`);
-        console.log(`  (View password with: cat ${dashEnvPath})`);
+        console.log('  Open that file in your text editor to view the generated password.');
       }
       const content = Object.entries(dashCreds).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
       writeSecretFileSync(dashEnvPath, content);
@@ -145,7 +145,7 @@ export const dashboardCommand = new Command('dashboard')
     console.log(`\nDashboard starting on http://localhost:${options.port}`);
     console.log(`  Admin username: ${adminUsername}`);
     console.log(`  Admin credentials: ${dashEnvPath}`);
-    console.log(`  (View password with: cat ${dashEnvPath})`);
+    console.log('  Open that file in your text editor to view the generated password.');
     if (options.build) {
       console.log('  Mode: production');
     } else {

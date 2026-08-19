@@ -426,12 +426,13 @@ export const installCommand = new Command('install')
     console.log(`\n  Dashboard credentials saved to: ${dashEnvPath}`);
     console.log(`    Admin username: admin`);
     console.log(`    Admin credentials saved to: ${dashEnvPath}`);
-    console.log(`    (View password with: cat ${dashEnvPath})`);
+    console.log('    Open that file in your text editor to view the generated password.');
     console.log('\n  Next steps:');
     console.log('    1. cortextos init <org-name>');
     console.log('    2. cortextos add-agent <name> --template orchestrator');
-    console.log('    3. cortextos ecosystem && pm2 start ecosystem.config.js');
-    console.log('    4. cortextos dashboard\n');
+    console.log('    3. cortextos ecosystem');
+    console.log('    4. pm2 start ecosystem.config.js');
+    console.log('    5. cortextos dashboard\n');
   });
 
 /**

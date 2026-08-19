@@ -81,8 +81,7 @@ export const startCommand = new Command('start')
             console.log('\nDaemon started. Use `cortextos status` to check agents.');
             if (IS_WINDOWS) {
               console.log('\nFor auto-start on Windows boot:');
-              console.log('  npm install -g pm2-windows-startup');
-              console.log('  pm2-windows-startup install');
+              console.log(`  powershell -ExecutionPolicy Bypass -File scripts\\install-windows-pm2-startup.ps1 -InstanceId ${options.instance}`);
             }
           } catch {
             console.error('PM2 start failed. Try: pm2 start ecosystem.config.js');
@@ -100,12 +99,12 @@ export const startCommand = new Command('start')
             console.log('\nDaemon started. Use `cortextos status` to check agents.');
             if (IS_WINDOWS) {
               console.log('\nFor auto-start on Windows boot:');
-              console.log('  npm install -g pm2-windows-startup');
-              console.log('  pm2-windows-startup install');
+              console.log(`  powershell -ExecutionPolicy Bypass -File scripts\\install-windows-pm2-startup.ps1 -InstanceId ${options.instance}`);
             }
           } catch {
             console.error('Failed to generate ecosystem and start. Try manually:');
-            console.error('  cortextos ecosystem && pm2 start ecosystem.config.js');
+            console.error('  cortextos ecosystem');
+            console.error('  pm2 start ecosystem.config.js');
           }
         }
       } else {
