@@ -14,7 +14,7 @@ import {
 } from 'fs';
 import { createConnection } from 'net';
 import { homedir } from 'os';
-import { basename, join, resolve } from 'path';
+import { basename, dirname, join, resolve, win32 as win32Path } from 'path';
 import type { AgentStatus } from '../types/index.js';
 import { getIpcPath } from '../utils/paths.js';
 import { stripBom } from '../utils/strip-bom.js';
@@ -234,7 +234,7 @@ function trustedGitExecutable(): string | null {
   return null;
 }
 
-function gitEnvironment(): NodeJS.ProcessEnv {
+function gitEnvironment(executable: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     LANG: 'C',
     LC_ALL: 'C',
@@ -258,6 +258,24 @@ function gitEnvironment(): NodeJS.ProcessEnv {
       const value = process.env[key];
       if (value) env[key] = value;
     }
+
+    // Do not inherit PATH: repository inspection deliberately resists caller
+    // redirection. Git for Windows can still need its own installation-local
+    // helper directories to dispatch built-in subcommands under service
+    // accounts, so construct a closed PATH from the already trusted executable.
+    const normalizedExecutable = win32Path.normalize(executable);
+    const gitMarker = `${win32Path.sep}Git${win32Path.sep}`.toLowerCase();
+    const markerIndex = normalizedExecutable.toLowerCase().indexOf(gitMarker);
+    if (markerIndex >= 0) {
+      const gitRoot = normalizedExecutable.slice(0, markerIndex + gitMarker.length - 1);
+      env.PATH = [
+        dirname(normalizedExecutable),
+        win32Path.join(gitRoot, 'cmd'),
+        win32Path.join(gitRoot, 'bin'),
+        win32Path.join(gitRoot, 'mingw64', 'bin'),
+        win32Path.join(gitRoot, 'usr', 'bin'),
+      ].join(win32Path.delimiter);
+    }
   }
 
   return env;
@@ -265,15 +283,26 @@ function gitEnvironment(): NodeJS.ProcessEnv {
 
 function gitOutput(frameworkRoot: string, args: string[]): string | null {
   const executable = trustedGitExecutable();
-  if (!executable) return null;
+  if (!executable) {
+    if (process.platform === 'win32') {
+      console.warn('[lifecycle] trusted Git unavailable (allowlisted executable not found)');
+    }
+    return null;
+  }
   const result = spawnSync(executable, [...SAFE_GIT_CONFIG_ARGS, ...args], {
     cwd: frameworkRoot,
     encoding: 'utf-8',
-    env: gitEnvironment(),
+    env: gitEnvironment(executable),
     timeout: 3000,
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
   });
-  if (result.status !== 0 || typeof result.stdout !== 'string') return null;
+  if (result.status !== 0 || typeof result.stdout !== 'string') {
+    if (process.platform === 'win32') {
+      const code = result.error && 'code' in result.error ? String(result.error.code) : 'none';
+      console.warn(`[lifecycle] trusted Git probe failed (status=${result.status ?? 'none'}, error=${code})`);
+    }
+    return null;
+  }
   return result.stdout.trim();
 }
 
