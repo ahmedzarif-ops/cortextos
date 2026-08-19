@@ -218,7 +218,14 @@ function trustedGitExecutable(): string | null {
     try {
       const resolved = realpathSync(candidate);
       if (!statSync(resolved).isFile()) continue;
-      accessSync(resolved, constants.R_OK | constants.X_OK);
+      // Windows ACLs do not expose a POSIX executable bit. Requiring X_OK can
+      // reject an otherwise runnable Git-for-Windows binary under service and
+      // hosted-runner identities; file-ness plus readable Program Files
+      // placement is the native trust boundary there.
+      accessSync(
+        resolved,
+        process.platform === 'win32' ? constants.R_OK : constants.R_OK | constants.X_OK,
+      );
       return resolved;
     } catch {
       // A PATH lookup would let inherited process state select executable code.
@@ -246,6 +253,7 @@ function gitEnvironment(): NodeJS.ProcessEnv {
     for (const key of [
       'SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT', 'TEMP', 'TMP',
       'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA',
+      'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'CommonProgramFiles',
     ]) {
       const value = process.env[key];
       if (value) env[key] = value;
