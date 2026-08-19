@@ -34,13 +34,14 @@ describe('cross-platform PM2 ecosystem generation', () => {
 
     await ecosystemCommand.parseAsync([
       'node', 'cortextos', '--instance', 'windows-smoke', '--org', 'testorg', '--output', output,
+      '--dashboard-host', '127.0.0.1',
     ]);
 
     const generated = readFileSync(output, 'utf8');
     expect(generated).toContain("name: \"cortextos-daemon-windows-smoke\"");
     expect(generated).toContain("name: \"cortextos-dashboard-windows-smoke\"");
     expect(generated).toContain(`script: ${JSON.stringify(nextBin)}`);
-    expect(generated).toContain("args: \"dev\"");
+    expect(generated).toContain('args: ["dev","--hostname","127.0.0.1"]');
     expect(generated).toContain('interpreter: process.execPath');
     expect(generated).not.toContain("script: \"npm\"");
     expect(generated.match(/windowsHide: true/g)).toHaveLength(2);

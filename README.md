@@ -133,7 +133,7 @@ PM2 home and instance-scoped task:
 ```powershell
 $env:CTX_INSTANCE_ID = 'windows-smoke'
 $env:PM2_HOME = "$env:USERPROFILE\.pm2-windows-smoke"
-cortextos ecosystem --instance windows-smoke --output ecosystem.windows-smoke.config.js
+cortextos ecosystem --instance windows-smoke --output ecosystem.windows-smoke.config.js --dashboard-host 127.0.0.1
 pm2 start ecosystem.windows-smoke.config.js
 pm2 save
 powershell -ExecutionPolicy Bypass -File scripts\install-windows-pm2-startup.ps1 `

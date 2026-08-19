@@ -14,8 +14,9 @@ export const ecosystemCommand = new Command('ecosystem')
   .option('--instance <id>', 'Instance ID', 'default')
   .option('--org <name>', 'Organization name (auto-detected if not specified)')
   .option('--output <path>', 'Output file', 'ecosystem.config.js')
+  .option('--dashboard-host <host>', 'Dashboard bind address (for a VPS, use 127.0.0.1)')
   .description('Generate PM2 ecosystem.config.js from agent configs')
-  .action(async (options: { instance: string; org?: string; output: string }) => {
+  .action(async (options: { instance: string; org?: string; output: string; dashboardHost?: string }) => {
     const ctxRoot = join(homedir(), '.cortextos', options.instance);
     // BUG-035 (companion fix): same project-root discovery as enable-agent.ts
     // so `cortextos ecosystem` works from outside ~/cortextos.
@@ -100,7 +101,12 @@ export const ecosystemCommand = new Command('ecosystem')
     // platform-specific npm/npm.cmd shim distinction while keeping one PM2
     // runner definition for Windows, macOS, and Linux.
     const dashboardScript = nextBin;
-    const dashboardArgs = 'dev';
+    // Preserve the historical all-interface Next.js default unless the user
+    // explicitly chooses a bind address. VPS installs can select loopback and
+    // reach the dashboard through an SSH tunnel without opening a web port.
+    const dashboardArgs = options.dashboardHost
+      ? ['dev', '--hostname', options.dashboardHost]
+      : ['dev'];
     const daemonName = pm2ProcessName('cortextos-daemon', options.instance);
     const dashboardName = pm2ProcessName('cortextos-dashboard', options.instance);
 
