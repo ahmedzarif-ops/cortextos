@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { join, win32 as win32Path } from 'path';
 import { homedir, platform } from 'os';
 import { AgentPTY } from './agent-pty.js';
@@ -7,6 +7,7 @@ import { OpencodeContextReporter } from './opencode-context-reporter.js';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { stripControlChars } from '../utils/validate.js';
 import { terminateProcessTree } from '../platform/process.js';
+import { restrictSecretFile } from '../platform/secret-permissions.js';
 
 // OpenCode has used both strings for the persistent chat input across recent
 // releases. Either one is the same native TUI readiness contract.
@@ -166,7 +167,7 @@ export class OpencodePTY extends AgentPTY {
       mkdirSync(isolatedAuthDir, { recursive: true });
       copyFileSync(hostAuthPath, isolatedAuthPath);
       try {
-        chmodSync(isolatedAuthPath, 0o600);
+        restrictSecretFile(isolatedAuthPath);
       } catch {
         // Windows ACLs inherit from the user-owned state directory; chmod may
         // be unsupported or only partially implemented there.

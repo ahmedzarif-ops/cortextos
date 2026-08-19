@@ -10,12 +10,14 @@
  */
 import { Command } from 'commander';
 import { createInterface, type Interface } from 'readline';
-import { existsSync, writeFileSync, chmodSync } from 'fs';
+import { existsSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
+import { homedir, platform } from 'os';
 import { spawnSync } from 'child_process';
+import { password } from '@inquirer/prompts';
 import { TelegramAPI, formatValidateError } from '../telegram/api.js';
 import { validateAgentName, validateOrgName } from '../utils/validate.js';
+import { writeSecretFileSync } from '../platform/secret-permissions.js';
 
 function rl(): Interface {
   return createInterface({ input: process.stdin, output: process.stdout });
@@ -72,37 +74,62 @@ function runCli(cwd: string, args: string[], label: string): boolean {
   return true;
 }
 
-function writeAgentEnv(agentDir: string, botToken: string, chatId: string): void {
+function writeAgentEnv(agentDir: string, botToken: string, chatId: string, allowedUser: string): void {
   const envPath = join(agentDir, '.env');
-  const content = `BOT_TOKEN=${botToken}\nCHAT_ID=${chatId}\n`;
-  writeFileSync(envPath, content, 'utf-8');
-  try { chmodSync(envPath, 0o600); } catch { /* ignore on Windows */ }
+  const content = `BOT_TOKEN=${botToken}\nCHAT_ID=${chatId}\nALLOWED_USER=${allowedUser}\n`;
+  writeSecretFileSync(envPath, content);
 }
 
-/**
- * Fetch the most recent chat ID for a bot token via getUpdates.
- * Uses spawnSync with array args — no shell, no injection risk.
- * Returns empty string if the fetch fails or no updates exist.
- */
-function fetchChatId(botToken: string): string {
-  const script = [
-    `fetch('https://api.telegram.org/bot' + process.argv[1] + '/getUpdates')`,
-    `.then(r => r.json())`,
-    `.then(d => { const m = d.result?.slice(-1)[0]?.message; console.log(m?.chat?.id || ''); })`,
-    `.catch(() => console.log(''))`,
-  ].join('');
-  const result = spawnSync(process.execPath, ['-e', script, botToken], {
-    encoding: 'utf-8',
-    stdio: 'pipe',
-    timeout: 10000,
-  });
-  const id = result.stdout?.trim() ?? '';
-  if (id && /^\d+$/.test(id)) {
-    console.log(`  Chat ID: ${id}`);
-    return id;
+export interface TelegramIdentity {
+  chatId: string;
+  userId: string;
+}
+
+export function selectTelegramIdentity(result: any): TelegramIdentity | null {
+  const messages = Array.isArray(result?.result)
+    ? result.result
+      .map((update: any) => update?.message)
+      .filter((message: any) => message?.chat?.type === 'private')
+    : [];
+  const message = messages.at(-1);
+  const chatId = message?.chat?.id;
+  const userId = message?.from?.id;
+  if (!Number.isSafeInteger(chatId) || !Number.isSafeInteger(userId)) return null;
+  return { chatId: String(chatId), userId: String(userId) };
+}
+
+async function fetchTelegramIdentity(botToken: string): Promise<TelegramIdentity | null> {
+  const api = new TelegramAPI(botToken);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      // Do not advance an offset here. The live poller must still receive the
+      // user's first message when the agent boots.
+      const identity = selectTelegramIdentity(await api.getUpdates(0, 30));
+      if (identity) {
+        console.log(`  Chat ID: ${identity.chatId}`);
+        return identity;
+      }
+    } catch {
+      // Keep tokens and Telegram URLs out of diagnostics; the credential
+      // validator below provides a safe, categorized error.
+    }
+    if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 5_000));
   }
   console.log('  Could not auto-detect chat ID.');
-  return '';
+  return null;
+}
+
+export function pm2Command(platformName: NodeJS.Platform, args: string[]): { command: string; args: string[] } {
+  if (platformName === 'win32') {
+    const comspec = process.env.ComSpec || process.env.COMSPEC || 'cmd.exe';
+    return { command: comspec, args: ['/d', '/s', '/c', `pm2 ${args.join(' ')}`] };
+  }
+  return { command: 'pm2', args };
+}
+
+function runPm2(args: string[], cwd: string): ReturnType<typeof spawnSync> {
+  const invocation = pm2Command(platform(), args);
+  return spawnSync(invocation.command, invocation.args, { cwd, stdio: 'inherit' });
 }
 
 /**
@@ -198,7 +225,7 @@ export const setupCommand = new Command('setup')
     const projectRoot = findProjectRoot();
     const ctxRoot = join(homedir(), '.cortextos', instanceId);
 
-    const iface = rl();
+    let iface = rl();
 
     console.log('\n  Welcome to cortextOS setup\n');
     console.log('  This wizard will:');
@@ -269,23 +296,28 @@ export const setupCommand = new Command('setup')
       break;
     }
 
-    const orchToken = await askRequired(
-      iface,
-      '  Orchestrator bot token (from @BotFather): ',
-      'Bot token is required.'
-    );
+    // @inquirer owns stdin while masking the token. Do not leave a second
+    // readline interface competing for keystrokes on Windows ConPTY.
+    iface.close();
+    const orchToken = (await password({
+      message: 'Orchestrator bot token (from @BotFather)',
+      mask: '*',
+      validate: value => value.trim() ? true : 'Bot token is required.',
+    })).trim();
+    iface = rl();
 
     console.log('\n  Now send a message to your new bot in Telegram (any message).');
-    console.log('  This lets us fetch your chat ID.\n');
-    await ask(iface, '  Press Enter when done...');
+    console.log('  This lets us fetch your chat ID. Waiting now...\n');
 
-    let orchChatId = '';
+    let orchIdentity: TelegramIdentity | null = null;
     console.log('\n  Fetching your chat ID...');
-    orchChatId = fetchChatId(orchToken);
+    orchIdentity = await fetchTelegramIdentity(orchToken);
 
-    if (!orchChatId) {
-      orchChatId = await askRequired(iface, '  Enter your Telegram chat ID manually: ', 'Chat ID is required.');
+    if (!orchIdentity) {
+      const chatId = await askRequired(iface, '  Enter your private Telegram chat ID manually: ', 'Chat ID is required.');
+      orchIdentity = { chatId, userId: chatId };
     }
+    let orchChatId = orchIdentity.chatId;
 
     // self-chat trap preflight: validate credentials against the live Telegram API
     // BEFORE writing .env. Catches bad tokens, unreachable chats, bot
@@ -317,7 +349,7 @@ export const setupCommand = new Command('setup')
 
     // Write .env
     const orchDir = join(projectRoot, 'orgs', orgName, 'agents', orchName);
-    writeAgentEnv(orchDir, orchToken, orchChatId);
+    writeAgentEnv(orchDir, orchToken, orchChatId, orchIdentity.userId);
     console.log(`  Wrote .env for ${orchName}`);
 
     // Enable orchestrator
@@ -365,17 +397,23 @@ export const setupCommand = new Command('setup')
       if (!templateChoices.includes(template)) template = 'agent';
 
       console.log(`\n  Create a Telegram bot for ${agentName} via @BotFather, then enter its token.\n`);
-      const agentToken = await askRequired(iface, `  Bot token for ${agentName}: `, 'Bot token is required.');
+      iface.close();
+      const agentToken = (await password({
+        message: `Bot token for ${agentName}`,
+        mask: '*',
+        validate: value => value.trim() ? true : 'Bot token is required.',
+      })).trim();
+      iface = rl();
 
-      console.log(`\n  Send a message to the ${agentName} bot in Telegram, then press Enter.`);
-      await ask(iface, '  Press Enter when done...');
+      console.log(`\n  Send a message to the ${agentName} bot in Telegram. Waiting now...`);
 
-      let agentChatId = '';
-      agentChatId = fetchChatId(agentToken);
+      let agentIdentity = await fetchTelegramIdentity(agentToken);
 
-      if (!agentChatId) {
-        agentChatId = await askRequired(iface, `  Enter chat ID for ${agentName} manually: `, 'Chat ID is required.');
+      if (!agentIdentity) {
+        const chatId = await askRequired(iface, `  Enter private chat ID for ${agentName} manually: `, 'Chat ID is required.');
+        agentIdentity = { chatId, userId: chatId };
       }
+      let agentChatId = agentIdentity.chatId;
 
       // self-chat trap preflight (see validateTelegramCredsInteractive above).
       const validatedAgentChatId = await validateTelegramCredsInteractive(
@@ -398,7 +436,7 @@ export const setupCommand = new Command('setup')
 
       if (addOk) {
         const agentDir = join(projectRoot, 'orgs', orgName, 'agents', agentName);
-        writeAgentEnv(agentDir, agentToken, agentChatId);
+        writeAgentEnv(agentDir, agentToken, agentChatId, agentIdentity.userId);
         console.log(`  Wrote .env for ${agentName}`);
 
         runCli(projectRoot, ['enable', agentName, '--org', orgName, '--instance', instanceId], `enable ${agentName}`);
@@ -422,12 +460,9 @@ export const setupCommand = new Command('setup')
       console.error('  Failed to generate ecosystem config. Run manually: cortextos ecosystem');
     } else {
       // Try PM2 start
-      const pm2Result = spawnSync('pm2', ['start', 'ecosystem.config.js'], {
-        cwd: projectRoot,
-        stdio: 'inherit',
-      });
+      const pm2Result = runPm2(['start', 'ecosystem.config.js'], projectRoot);
       if (pm2Result.status === 0) {
-        spawnSync('pm2', ['save'], { cwd: projectRoot, stdio: 'inherit' });
+        runPm2(['save'], projectRoot);
         console.log('\n  Daemon started via PM2.');
       } else {
         // Fallback: cortextos start

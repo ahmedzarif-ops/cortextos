@@ -4,6 +4,8 @@ This is your first time running. Before starting normal operations, complete thi
 
 > **Environment variables**: `CTX_ROOT`, `CTX_FRAMEWORK_ROOT`, `CTX_ORG`, `CTX_AGENT_NAME`, `CTX_AGENT_DIR`, and `CTX_INSTANCE_ID` are automatically set by the cortextOS framework. You do not need to set them — they are available in every shell command you run.
 
+> **Native-shell rule:** Detect `process.platform` before executing shell examples. On Windows, use PowerShell/agent file tools, `$env:NAME`, `Join-Path`, and the cross-platform `cortextos` CLI. Never run Bash syntax or require WSL/Git Bash; translate the documented operation yourself without asking the user. On macOS/Linux, Bash examples remain valid.
+
 > **Runtime:** This is a `codex-app-server` agent. Telegram replies go through `cortextos bus send-telegram <chat_id> '<msg>'`. There is no other reply path — every user-facing message MUST use this command.
 
 **IMPORTANT: When this document says "END YOUR TURN", you MUST stop all tool execution and end your response. The user's Telegram reply will arrive as your next conversation turn. Do not keep working — the message will not reach you until your current turn ends.**

@@ -9,16 +9,25 @@ external_calls: []
 
 This skill runs on first boot or when explicitly triggered. It is the only thing you should do until it is complete.
 
+## Native host contract
+
+Use the harness's file read/write tools for file operations and the `cortextos`
+Node CLI for Cortext operations. Detect the host with `node -p
+"process.platform"` only when needed. On native Windows use PowerShell; never
+assume Bash, WSL, Git Bash, POSIX utilities, Unix paths, or symlink privileges.
+Any shell examples in the role's `ONBOARDING.md` describe the intended
+operation: translate them yourself to native PowerShell/file tools and never
+ask the user to perform that translation.
+
 ---
 
 ## Step 0: Detect your runtime
 
 Read `config.json` to find your runtime — it determines where your skills live, which slash-commands exist, and which env vars matter.
 
-```bash
-RUNTIME=$(grep -o '"runtime"[[:space:]]*:[[:space:]]*"[^"]*"' config.json | sed -E 's/.*"runtime"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')
-echo "Runtime: ${RUNTIME:-claude-code}"
-```
+Read and parse `config.json` with the harness file/JSON tools. Use its `runtime`
+string, defaulting to `claude-code` only when the field is absent or empty. Do
+not parse JSON with `grep`/`sed` on Windows.
 
 Branch the rest of onboarding on this value:
 
@@ -34,9 +43,8 @@ If `runtime` is missing or empty, treat it as `claude-code` (legacy default).
 
 ## Step 1: Check onboarding status
 
-```bash
-[[ -f "${CTX_ROOT}/state/${CTX_AGENT_NAME}/.onboarded" ]] && echo "ONBOARDED" || echo "NEEDS_ONBOARDING"
-```
+Check for `.onboarded` under the native path formed from `CTX_ROOT`, `state`,
+and `CTX_AGENT_NAME` with the harness filesystem tools.
 
 If already `ONBOARDED`, skip to normal session start. Do not re-run onboarding unless the user explicitly requests it.
 
@@ -44,9 +52,7 @@ If already `ONBOARDED`, skip to normal session start. Do not re-run onboarding u
 
 ## Step 2: Read ONBOARDING.md
 
-```bash
-cat ONBOARDING.md
-```
+Read `ONBOARDING.md` with the harness file tool.
 
 This file contains the full onboarding protocol for your specific agent role. Follow every step exactly. Do not improvise.
 
@@ -92,10 +98,10 @@ For full details, see the `## External Persistent Crons` section in `AGENTS.md`.
 
 When all steps in ONBOARDING.md are done:
 
-```bash
-mkdir -p "$CTX_ROOT/state/$CTX_AGENT_NAME"
-touch "$CTX_ROOT/state/$CTX_AGENT_NAME/.onboarded"
-```
+Create the native state directory recursively and then create the empty
+`.onboarded` marker with the harness filesystem tools. On Windows the native
+fallback is `New-Item -ItemType Directory -Force` followed by `New-Item
+-ItemType File -Force`; do not run `mkdir -p` or `touch`.
 
 Then notify the user via Telegram that you are online and ready.
 

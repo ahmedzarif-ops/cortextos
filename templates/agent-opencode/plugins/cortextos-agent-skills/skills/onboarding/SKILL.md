@@ -7,13 +7,20 @@ description: "You have just booted for the first time — there is no .onboarded
 
 This skill runs on first boot or when explicitly triggered. It is the only thing you should do until it is complete.
 
+## Native host contract
+
+Use harness file tools for file operations and the `cortextos` Node CLI for
+Cortext operations. On Windows use native PowerShell and Windows paths; never
+assume Bash, WSL, Git Bash, POSIX utilities, Unix paths, or symlink privileges.
+Translate any semantic shell example in `ONBOARDING.md` yourself rather than
+asking the user to translate it.
+
 ---
 
 ## Step 1: Check onboarding status
 
-```bash
-[[ -f "${CTX_ROOT}/state/${CTX_AGENT_NAME}/.onboarded" ]] && echo "ONBOARDED" || echo "NEEDS_ONBOARDING"
-```
+Check for `.onboarded` under the native path formed from `CTX_ROOT`, `state`,
+and `CTX_AGENT_NAME` with the harness filesystem tools.
 
 If already `ONBOARDED`, skip to normal session start. Do not re-run onboarding unless the user explicitly requests it.
 
@@ -21,9 +28,7 @@ If already `ONBOARDED`, skip to normal session start. Do not re-run onboarding u
 
 ## Step 2: Read ONBOARDING.md
 
-```bash
-cat ONBOARDING.md
-```
+Read `ONBOARDING.md` with the harness file tool.
 
 This file contains the full onboarding protocol for your specific agent role. Follow every step exactly. Do not improvise.
 
@@ -54,10 +59,9 @@ Onboarding must complete all of the following before you are considered function
 
 When all steps in ONBOARDING.md are done:
 
-```bash
-mkdir -p "$CTX_ROOT/state/$CTX_AGENT_NAME"
-touch "$CTX_ROOT/state/$CTX_AGENT_NAME/.onboarded"
-```
+Create the native state directory recursively and then create the empty marker
+with the harness file tools. The Windows fallback is `New-Item`; do not run
+`mkdir -p` or `touch`.
 
 Then notify the user via Telegram that you are online and ready.
 

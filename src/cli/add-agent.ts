@@ -1,8 +1,9 @@
 import { Command } from 'commander';
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, chmodSync, lstatSync, unlinkSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, lstatSync, unlinkSync } from 'fs';
 import { join, resolve } from 'path';
 import { homedir } from 'os';
 import { createDirectoryLink } from '../platform/filesystem.js';
+import { writeSecretFileSync } from '../platform/secret-permissions.js';
 import { OrgContext } from '../types';
 import { validateAgentName, validateOrgName } from '../utils/validate';
 
@@ -201,7 +202,7 @@ export const addAgentCommand = new Command('add-agent')
     // Create .env placeholder with helpful comments
     const envPath = join(agentDir, '.env');
     if (!existsSync(envPath)) {
-      writeFileSync(envPath, [
+      writeSecretFileSync(envPath, [
         `# Agent environment for ${name}`,
         '#',
         '# BOT_TOKEN: Create a Telegram bot with @BotFather and paste the token here',
@@ -219,8 +220,7 @@ export const addAgentCommand = new Command('add-agent')
         '# (Opus on Max / Team / Enterprise includes 1M natively — leave this commented.)',
         '# CLAUDE_CODE_DISABLE_1M_CONTEXT=true',
         '',
-      ].join('\n'), 'utf-8');
-      chmodSync(envPath, 0o600); // credentials — owner read/write only
+      ].join('\n'));
     }
 
     // Generate SYSTEM.md from context.json (static org context only).

@@ -1,12 +1,13 @@
 import { Command } from 'commander';
 import { execSync } from 'child_process';
-import { existsSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, readdirSync, chmodSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { ensureDir } from '../utils/atomic.js';
 import { validateOrgName } from '../utils/validate.js';
 import { stripBom } from '../utils/strip-bom.js';
 import type { OrgContext } from '../types/index.js';
+import { writeSecretFileSync } from '../platform/secret-permissions.js';
 
 export const initCommand = new Command('init')
   .argument('<org-name>', 'Organization name')
@@ -120,7 +121,7 @@ export const initCommand = new Command('init')
     // Create secrets.env placeholder
     const secretsPath = join(orgDir, 'secrets.env');
     if (!existsSync(secretsPath)) {
-      writeFileSync(secretsPath, [
+      writeSecretFileSync(secretsPath, [
         '# cortextOS secrets for ' + orgName,
         '# Add your Telegram bot token and other secrets here',
         'BOT_TOKEN=',
@@ -131,8 +132,7 @@ export const initCommand = new Command('init')
         '# Get your API key from https://aistudio.google.com/app/apikey (free tier available)',
         'GEMINI_API_KEY=',
         '',
-      ].join('\n'), 'utf-8');
-      chmodSync(secretsPath, 0o600); // credentials — owner read/write only
+      ].join('\n'));
       console.log('  Created secrets.env');
     }
 

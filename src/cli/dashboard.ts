@@ -1,8 +1,9 @@
 import { Command } from 'commander';
-import { existsSync, readFileSync, writeFileSync, chmodSync, mkdirSync, openSync } from 'fs';
+import { existsSync, readFileSync, mkdirSync, openSync } from 'fs';
 import { join } from 'path';
 import { homedir, platform } from 'os';
 import { randomBytes } from 'crypto';
+import { writeSecretFileSync } from '../platform/secret-permissions.js';
 
 const IS_WINDOWS = platform() === 'win32';
 
@@ -65,8 +66,7 @@ export const dashboardCommand = new Command('dashboard')
         console.log(`  (View password with: cat ${dashEnvPath})`);
       }
       const content = Object.entries(dashCreds).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
-      writeFileSync(dashEnvPath, content, 'utf-8');
-      try { chmodSync(dashEnvPath, 0o600); } catch { /* ignore on Windows */ }
+      writeSecretFileSync(dashEnvPath, content);
     }
 
     // Admin password: env > dashboard.env > hard fail
@@ -121,8 +121,7 @@ export const dashboardCommand = new Command('dashboard')
       `CTX_INSTANCE_ID=${options.instance}`,
       `PORT=${options.port}`,
     ];
-    writeFileSync(nextEnvPath, nextEnvLines.join('\n') + '\n', 'utf-8');
-    try { chmodSync(nextEnvPath, 0o600); } catch { /* ignore on Windows */ }
+    writeSecretFileSync(nextEnvPath, nextEnvLines.join('\n') + '\n');
 
     // ─── Start server ─────────────────────────────────────────────────────────
 

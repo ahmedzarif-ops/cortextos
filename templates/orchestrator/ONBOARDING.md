@@ -4,6 +4,8 @@ This is your first session as the orchestrator. Complete every step before start
 
 > **Environment variables**: `CTX_ROOT`, `CTX_FRAMEWORK_ROOT`, `CTX_ORG`, `CTX_AGENT_NAME`, `CTX_TELEGRAM_CHAT_ID`, and `CTX_INSTANCE_ID` are automatically set by the cortextOS framework.
 
+> **Native-shell rule:** Detect `process.platform` before executing shell examples. On Windows, use PowerShell/agent file tools, `$env:NAME`, `Join-Path`, and the cross-platform `cortextos` CLI. Never run Bash syntax or require WSL/Git Bash; translate the documented operation yourself without asking the user. On macOS/Linux, Bash examples remain valid.
+
 ---
 
 ## Part 1: Read Org Config - Do Not Re-Ask

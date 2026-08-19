@@ -55,12 +55,49 @@ Failure of isolation, secret handling, runtime authentication, or network exposu
 ### Gate B — clean dogfood install
 
 - Install and initialize a new instance through the supported Windows PowerShell flow.
+- Exercise the repository onboarding skill as a Windows user would, not only the
+  underlying CLI commands. Every command it recommends must either be
+  cross-platform or have an explicit native PowerShell alternative; Docker,
+  WSL, Git Bash, `bash`, POSIX test syntax, `touch`, `cat`, `grep`, `sed`, and
+  Unix path assumptions cannot be silent prerequisites.
+- Verify the onboarding skill detects the host OS and agent runtime, chooses
+  the native Windows install/start/persistence path, and never tells the user
+  to run `pm2 startup` on Windows.
+- Treat any manual translation, undocumented prerequisite, or operator repair
+  needed to follow onboarding on Windows as a product/onboarding failure, even
+  when the equivalent CLI operation succeeds manually.
 - Create one org and the three agents listed above using normal CLI/onboarding behavior.
 - Confirm each agent has the intended runtime and only its own bot configuration.
 - Start daemon, pollers, agents, and loopback dashboard through the generated ecosystem configuration.
 - Install the scoped Windows startup task twice; the second run must be idempotent and must not create a duplicate task.
 - Confirm `doctor`, `list-agents`, `status`, PM2 status, and dashboard status agree.
 - An agent may be shown as online only after its runtime is actually ready to accept a message.
+
+### Gate B2 — first-boot onboarding behavior
+
+For each live Windows runtime, allow the newly scaffolded agent to follow its
+own packaged onboarding skill and `ONBOARDING.md` through Telegram. Verify:
+
+- the packaged skill is the runtime-correct copy and is discoverable by that
+  harness on Windows;
+- shell snippets execute in the native Windows shell or use cross-platform
+  Node/CLI commands without requiring the user to translate Bash;
+- runtime detection reads `config.json` correctly (`claude-code` legacy
+  default and explicit `codex-app-server` both work);
+- identity, soul, goals, user context, guardrails, approval rules, and system
+  context are written to the intended agent directory only;
+- Telegram is tested before completion, persistent crons use the cortextOS bus,
+  and the agent does not claim to be online prematurely;
+- an intentional interruption resumes at the first incomplete step rather than
+  overwriting completed answers;
+- `.onboarded` is written under the selected instance's Windows state root only
+  after all mandatory steps complete;
+- onboarding and all new-agent functionality still behave equivalently on the
+  macOS/Linux CI paths.
+
+The manual VM setup performed by the test operator establishes prerequisites;
+it is not evidence that Gate B2 passes. Gate B2 requires observing the live
+agents execute the packaged instructions themselves.
 
 ### Gate C — ordinary real-user acceptance
 
@@ -169,6 +206,30 @@ Every programmatic error, unexpected log, behavioral mismatch, confusing status,
 After each fix, begin the next observation cycle from the last known-good checkpoint. Newly discovered bugs are prioritized by: secret/security exposure; message loss or wrong-recipient delivery; process duplication/leak; inability to recover; false status; functional breakage; performance; usability/documentation.
 
 Do not weaken assertions, add unconditional Windows skips, increase timeouts without diagnosing the delay, or restart blindly until a flaky test passes.
+
+### Normal-user attribution rule
+
+Every Windows observation must also receive one attribution before it can
+change the product-readiness verdict:
+
+- **Cortext Windows defect:** reproducible when a normal Windows user follows
+  documented/onboarding steps in one foreground session, or directly caused by
+  repository code/instructions on a supported Windows host.
+- **VM/environment defect:** caused by the Azure image, VM sizing, network,
+  security policy, antivirus, or preinstalled-machine state and not inherent to
+  a supported Cortext install. Record the user-facing remediation if ordinary
+  Windows machines may share that environment.
+- **Test-orchestration defect:** introduced by SSH detachment, concurrent test
+  commands, injected faults, stale test processes, or observer tooling. Repair
+  the test environment and rerun the clean user path; do not file it as a
+  Cortext defect unless that rerun reproduces it.
+
+The deciding oracle is the normal-user path, not whether an expert operator can
+work around a failure. Run supported commands in their documented order from a
+fresh instance, avoid hidden environment variables or pre-created files, and
+record every translation or repair the user would have needed. When attribution
+is uncertain, leave it `UNCLASSIFIED` and gather a clean reproduction rather
+than assigning convenient blame.
 
 ## 9. Soak and exit criteria
 

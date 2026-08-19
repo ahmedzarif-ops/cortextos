@@ -9,6 +9,38 @@ You are guiding the user through a complete interactive onboarding for cortextOS
 
 **CRITICAL**: The more context the user provides, the better the system performs from day one. Encourage them to elaborate. Do not rush.
 
+## Cross-platform execution contract
+
+This onboarding supports native Windows, macOS, and Linux. Before running any
+command, detect the host with:
+
+```text
+node -p "process.platform"
+```
+
+Treat `win32` as native Windows. On Windows:
+
+- use PowerShell and Windows paths;
+- do not require Bash, WSL, Git Bash, Unix utilities, symlink privileges, or
+  Windows Developer Mode;
+- use `Get-Command`, `Test-Path`, `Get-Content`, `Set-Content`, `Copy-Item`,
+  `New-Item`, `Start-Process`, and `Get-NetTCPConnection` when a shell operation
+  is genuinely needed;
+- use the repository's Node CLI for Cortext operations and the Windows startup
+  helper for persistence;
+- never run `pm2 startup`, `sudo`, `chmod`, `which`, `uname`, `grep`, `sed`,
+  `touch`, `cat`, `tail`, `lsof`, or a background `&` command.
+
+On macOS/Linux, the Bash examples remain valid. Commands below that are marked
+`macOS/Linux` must never be given to a Windows user. Prefer the Read, Write,
+Edit, Glob, and JSON-aware tools of the active agent harness over shell text
+processing on every platform.
+
+Shell variables do not reliably persist between agent tool calls. Retain
+`INSTANCE_ID`, `CTX_ROOT`, `ORG_NAME`, and agent names in the onboarding state,
+pass literal `--instance`/`--org` values on every CLI command, and set the
+required environment again in the same command that starts PM2.
+
 ---
 
 ## Phase 1: Welcome
@@ -55,28 +87,27 @@ Ask: "Ready to get started? And - do you already have a Telegram bot token ready
 
 Check and auto-install all dependencies. Do not ask permission - just install what is missing.
 
-**First: verify Claude Code is authenticated** - agents run as Claude Code sessions and require a valid login:
-```bash
+**First: verify Claude Code is authenticated** - the default core agents run as Claude Code sessions and require a valid login:
+```text
 claude --version
+claude auth status
 ```
 If the command fails or shows an auth error:
 > "Claude Code is not authenticated. Run `claude login` in your terminal to sign in, then restart this Claude Code session."
 
 Do not proceed until Claude Code is authenticated.
 
-```bash
-# Check each dependency
-which node      # Node.js 20+
-which npm       # npm
-which claude    # Claude Code CLI
-which pm2       # PM2 process manager (for daemon persistence)
-which jq        # JSON processor
-which curl      # HTTP client
-```
+Check each dependency by running its native version/status command. On Windows,
+use `Get-Command <name> -ErrorAction SilentlyContinue` if a command is missing;
+on macOS/Linux use `command -v <name>`.
 
-Detect the platform first:
-```bash
-OS=$(uname -s 2>/dev/null || echo "Windows")
+```text
+node --version
+npm --version
+claude --version
+pm2 --version
+jq --version
+curl --version
 ```
 
 For any missing dependency, install using the appropriate package manager:
@@ -98,12 +129,12 @@ For any missing dependency, install using the appropriate package manager:
 - `claude`: Tell user to install from https://docs.anthropic.com/en/docs/claude-code - cannot be auto-installed
 
 Verify Node is v20+:
-```bash
+```text
 node --version
 ```
 
 If `pm2` is not installed, install it:
-```bash
+```text
 npm install -g pm2
 ```
 
@@ -111,20 +142,18 @@ npm install -g pm2
 
 ## Phase 3: Install
 
-Check if already installed by looking for `dist/cli.js`:
-
-```bash
-ls dist/cli.js 2>/dev/null && echo "installed" || echo "need to build"
-```
+Check if already installed by inspecting `dist/cli.js` with the harness file
+tools (`Test-Path .\dist\cli.js` in PowerShell). Do not use a Unix `ls` probe on
+Windows.
 
 If not built:
-```bash
-npm install
+```text
+npm ci
 npm run build
 ```
 
 Run the test suite to verify the build is healthy:
-```bash
+```text
 npm test
 ```
 
@@ -134,32 +163,23 @@ npm test
 Diagnose and fix any failures, then re-run until clean.
 
 Then run install:
-```bash
+```text
 node dist/cli.js install
 ```
 
 Or if the user has `cortextos` in their PATH:
-```bash
+```text
 cortextos install
 ```
 
 **Do not ask the user about instance names.** Auto-assign one silently:
 
-```bash
-# Reuse the 'default' instance dir if it exists and is empty (the typical
-# fresh-install state — `cortextos install` always creates default/ with an
-# empty enabled-agents.json). Otherwise pick the next free `cortextosN` slot.
-if [ -d "${HOME}/.cortextos/default" ] && \
-   [ "$(cat "${HOME}/.cortextos/default/config/enabled-agents.json" 2>/dev/null | tr -d '[:space:]')" = "{}" ]; then
-  INSTANCE_ID="default"
-else
-  INSTANCE_NUM=1
-  while [ -d "${HOME}/.cortextos/cortextos${INSTANCE_NUM}" ]; do
-    INSTANCE_NUM=$((INSTANCE_NUM + 1))
-  done
-  INSTANCE_ID="cortextos${INSTANCE_NUM}"
-fi
-```
+Use the harness file/JSON tools to inspect the native user-home `.cortextos`
+directory. Reuse `default` only when its `config/enabled-agents.json` is an
+empty object. Otherwise choose the first absent `cortextosN` directory. On
+Windows the base is `%USERPROFILE%\.cortextos`; on macOS/Linux it is
+`$HOME/.cortextos`. Do not make the user choose the ID and do not implement
+this selection with OS-specific shell parsing.
 
 **IMPORTANT:** Every `node dist/cli.js <subcommand>` call below MUST include
 `--instance "${INSTANCE_ID}"` (and `--org "${ORG_NAME}"` where the command
@@ -168,12 +188,10 @@ neither the flag nor the `CTX_INSTANCE_ID` env var is set. Forgetting the flag
 silently writes to the wrong instance dir, splitting the agent registration
 across multiple `~/.cortextos/<instance>/` trees. Always pass the flags.
 
-Also export the env vars so any indirect subprocess (e.g. PM2 reading `ecosystem.config.js`) inherits them:
-
-```bash
-export CTX_INSTANCE_ID="${INSTANCE_ID}"
-export CTX_ROOT="${HOME}/.cortextos/${INSTANCE_ID}"
-```
+Do not rely on exported variables surviving between tool calls. Pass the
+instance explicitly on every CLI command. When PM2 is started in Phase 9, set
+`CTX_INSTANCE_ID`, `CTX_ROOT`, and the scoped `PM2_HOME` in that same native
+shell invocation.
 
 ---
 
@@ -195,7 +213,8 @@ Ask these questions one at a time. Follow up on interesting answers. Let the use
 
 4. "What are the top 1-3 goals right now to move toward that?"
 5. "What's the single most important thing to get done this week? One sentence." (this becomes `daily_focus`)
-6. "What's your timezone?" (auto-detect if possible: `readlink /etc/localtime 2>/dev/null | sed 's:.*/zoneinfo/::'`)
+6. "What's your timezone?" (auto-detect with the runtime via
+   `node -p "Intl.DateTimeFormat().resolvedOptions().timeZone"`)
 7. "What are your working hours? This sets when agents are in day mode (responsive, follows your direction) vs night mode (proactive, works autonomously). For example: 8am to midnight, 9am to 6pm." Default to 08:00-00:00 if they don't have a preference.
 8. "What communication style should your agents have? Casual / professional / technical?"
 
@@ -287,16 +306,45 @@ Walk through step by step:
 6. "BotFather will reply with an HTTP API token - paste it here"
 7. Click the t.me link BotFather provides you to open the chat with your new agent. 
 
-After token paste:
+After token paste, create the agent directory before polling so the token can be
+stored in its permission-restricted, Git-ignored `.env` instead of appearing in
+a shell command:
 
-7. Tell the user: "Now send any message to your new bot on Telegram (just 'hi' is fine). This lets me detect your chat ID so that only you can message your agent. You can configure other chat IDs later so other members of your team can use cortextOS as well."
+```text
+node dist/cli.js add-agent <orchestrator-name> --template orchestrator --org <org-name> --instance <instance-id>
+```
+
+Use the Write tool to set only `BOT_TOKEN=<pasted token>`, `CHAT_ID=`, and
+`ALLOWED_USER=` in the new agent `.env`. Never print the token or put it in a
+command-line argument. `add-agent` establishes mode `0600` on Unix and an
+owner/SYSTEM-only ACL on Windows.
+
+Then tell the user: "Now send any message to your new bot on Telegram (just 'hi' is fine). This lets me detect your chat ID so that only you can message your agent. You can configure other chat IDs later so other members of your team can use cortextOS as well."
 
 **CRITICAL — BUG-033 fix**: Do NOT wait for the user to type a confirmation in chat before running the polling curl below. Start the long-poll IMMEDIATELY after delivering the instruction. The poll uses `timeout=30` which blocks for up to 30 seconds waiting for a Telegram message — that IS the user's confirmation. If you wait for typed confirmation first, the poll starts too late and may miss the very first message a user sends to a brand-new bot (Telegram's `getUpdates` first-message-lost trap, BUG-023). The correct sequence is: deliver the instruction, then immediately run the curl loop in the same response.
 
-Use long polling (timeout=30) so Telegram holds the connection open until a message arrives instead of returning empty immediately. This is critical for newly created bots where there's propagation delay:
+Use long polling (timeout=30) so Telegram holds the connection open until a message arrives instead of returning empty immediately. Read the token from the restricted `.env`; do not interpolate it into the logged command.
+
+**Windows PowerShell:**
+
+```powershell
+$AgentEnv = Join-Path $PWD "orgs\<org-name>\agents\<orchestrator-name>\.env"
+$OrchBotToken = ((Get-Content -LiteralPath $AgentEnv | Where-Object { $_ -like 'BOT_TOKEN=*' } | Select-Object -First 1) -split '=', 2)[1]
+$OrchChatId = $null
+$OrchUserId = $null
+for ($i = 0; $i -lt 3 -and -not $OrchChatId; $i++) {
+  $ChatInfo = Invoke-RestMethod -Method Get -Uri ("https://api.telegram.org/bot" + $OrchBotToken + "/getUpdates?timeout=30")
+  $Message = @($ChatInfo.result | Where-Object { $_.message -and $_.message.chat.type -eq 'private' } | Select-Object -Last 1).message
+  if ($Message) { $OrchChatId = [string]$Message.chat.id; $OrchUserId = [string]$Message.from.id }
+  if (-not $OrchChatId -and $i -lt 2) { Start-Sleep -Seconds 5 }
+}
+```
+
+**macOS/Linux:**
 
 ```bash
-ORCH_BOT_TOKEN="<pasted token>"
+AGENT_ENV="orgs/${ORG_NAME}/agents/${ORCH_NAME}/.env"
+ORCH_BOT_TOKEN=$(awk -F= '/^BOT_TOKEN=/{print substr($0,index($0,"=")+1); exit}' "$AGENT_ENV")
 for i in 1 2 3; do
     CHAT_INFO=$(curl -s "https://api.telegram.org/bot${ORCH_BOT_TOKEN}/getUpdates?timeout=30")
     ORCH_CHAT_ID=$(echo "$CHAT_INFO" | jq -r '.result[0].message.chat.id // empty')
@@ -310,49 +358,34 @@ If ORCH_CHAT_ID is empty after 3 retries, tell user to send another message and 
 
 **Do NOT flush the Telegram offset** - the agent should see the user's first message when it boots.
 
-### 6b. Create Agent Directory
+### 6b. Finalize Agent Credentials
 
-```bash
-node dist/cli.js add-agent "${ORCH_NAME}" --template orchestrator --org "${ORG_NAME}" --instance "${INSTANCE_ID}"
-```
-
-Write `.env` with credentials:
-```bash
-cat > "orgs/${ORG_NAME}/agents/${ORCH_NAME}/.env" << EOF
-BOT_TOKEN=${ORCH_BOT_TOKEN}
-CHAT_ID=${ORCH_CHAT_ID}
-ALLOWED_USER=${ORCH_USER_ID}
-EOF
-chmod 600 "orgs/${ORG_NAME}/agents/${ORCH_NAME}/.env"
-```
+Use the Write/Edit tool—not shell redirection—to update the already-created
+`.env` with `BOT_TOKEN`, `CHAT_ID`, and `ALLOWED_USER`. Preserve its restricted
+permissions. Never include the token in a report, screenshot, diagnostic, or
+Git diff.
 
 Update `config.json` with agent name:
-```bash
-ORCH_CONFIG="orgs/${ORG_NAME}/agents/${ORCH_NAME}/config.json"
-jq --arg name "${ORCH_NAME}" '.agent_name = $name' "${ORCH_CONFIG}" > "${TMPDIR:-/tmp}/_cfg.json" && mv "${TMPDIR:-/tmp}/_cfg.json" "${ORCH_CONFIG}"
-```
+read the JSON with the harness file tool, set `agent_name`, and write valid
+formatted JSON atomically. Do not use a `/tmp` + `jq` shell rewrite.
 
 ### 6c. Model Selection
 
 Ask: "Which Claude model should your Orchestrator use? Recommended: `claude-opus-4-6` for the Orchestrator (most capable), `claude-sonnet-4-6` for worker agents (faster, cheaper)."
 
-```bash
-ORCH_CONFIG="orgs/${ORG_NAME}/agents/${ORCH_NAME}/config.json"
-jq --arg model "claude-opus-4-6" '.model = $model' "${ORCH_CONFIG}" > "${TMPDIR:-/tmp}/_cfg.json" && mv "${TMPDIR:-/tmp}/_cfg.json" "${ORCH_CONFIG}"
-```
+Update the same parsed JSON with the selected model using the harness file tool.
 
 **Note:** Everything else - identity, personality, working hours, autonomy level, approval policy, cron schedule, USER.md - is configured by the Orchestrator itself during its Telegram onboarding. The template provides sensible defaults; the agent rewrites them with real content.
 
 ### 6d. Enable Orchestrator
 
-```bash
-node dist/cli.js enable "${ORCH_NAME}" --org "${ORG_NAME}" --instance "${INSTANCE_ID}"
+```text
+node dist/cli.js enable <orchestrator-name> --org <org-name> --instance <instance-id>
 ```
 
 Verify:
-```bash
-cat "${CTX_ROOT}/config/enabled-agents.json" | jq '.agents[] | select(.name == "'${ORCH_NAME}'")'
-```
+read the selected instance's `config/enabled-agents.json` as JSON and verify the
+orchestrator entry is enabled. Do not use `cat | jq` on Windows.
 
 ---
 
@@ -360,13 +393,13 @@ cat "${CTX_ROOT}/config/enabled-agents.json" | jq '.agents[] | select(.name == "
 
 ### 7a. Explain (verbatim)
 
-> "Let's set up the web dashboard first - this is your real-time view of all agents, tasks, approvals, costs, and analytics. We'll get it running before starting the agents."
+> "Let's prepare the web dashboard - this is your real-time view of all agents, tasks, approvals, costs, and analytics. It will start with the agents under the same supervised process configuration."
 
 ### 7b. Install and configure
 
-```bash
-cd ${CTX_FRAMEWORK_ROOT}/dashboard
-npm install
+```text
+cd <absolute-framework-root>/dashboard
+npm ci
 ```
 
 Ask the user:
@@ -376,46 +409,27 @@ Ask the user:
 
 If the user doesn't want to pick, use the auto-generated password from `dashboard.env` and show it clearly.
 
-Read the generated AUTH_SECRET from `dashboard.env`:
-```bash
-cat "${CTX_ROOT}/dashboard.env"
-```
+Read the generated values from the selected instance's `dashboard.env` with the
+harness file tool. Never print `AUTH_SECRET` or the password into logs. If the
+user chooses credentials, update `dashboard.env` with the Write/Edit tool while
+preserving its restricted permissions.
 
-Write `${CTX_FRAMEWORK_ROOT}/dashboard/.env.local` (use the Write tool with full absolute paths - NOT `~`):
-```
-# AUTO-GENERATED by cortextOS onboarding. Edit ~/.cortextos/<instance>/dashboard.env to change credentials.
-CTX_ROOT=<full path to CTX_ROOT>
-CTX_FRAMEWORK_ROOT=<full path to repo root>
-AUTH_SECRET=<from dashboard.env>
-ADMIN_USERNAME=<user's choice or "admin">
-ADMIN_PASSWORD=<user's choice or generated>
-PORT=3000
-```
-
-Then update `dashboard.env` to match:
-```bash
-cat > "${CTX_ROOT}/dashboard.env" << EOF
-AUTH_SECRET=<keep existing from dashboard.env>
-ADMIN_USERNAME=<user's choice>
-ADMIN_PASSWORD=<user's choice>
-CTX_ROOT=${CTX_ROOT}
-CTX_FRAMEWORK_ROOT=${CTX_FRAMEWORK_ROOT}
-EOF
-```
+Do not hand-write `dashboard/.env.local` when the supported generator can do it.
+After dependencies are installed, run `cortextos ecosystem` in Phase 9; it
+materializes the Git-ignored file from `dashboard.env` with restricted
+permissions and keeps secrets out of PM2 configuration.
 
 ### 7c. Build and start
 
-For local access:
-```bash
-npm run dev &
-```
+Do not launch `npm run dev &`; it creates an unsupervised process and is not a
+native PowerShell backgrounding contract. Phase 9 starts the generated
+dashboard entry under PM2. After it is healthy, open it with:
 
-Open in browser:
 - macOS: `open http://localhost:3000`
 - Linux: `xdg-open http://localhost:3000`
-- Windows: `start http://localhost:3000`
-
-> "Dashboard is running. Log in with the credentials you just set. Nothing will be populated yet - that happens once agents start working."
+- Windows desktop: `Start-Process http://localhost:3000`
+- Windows/Linux VPS: keep it bound to `127.0.0.1` and use the existing secure
+  administration tunnel; never open a public dashboard port during onboarding.
 
 Walk the user through the dashboard pages:
 
@@ -427,10 +441,7 @@ Walk the user through the dashboard pages:
 > - **Experiments** - autoresearch cycles and results.
 > - **Knowledge Base** - search your org's shared knowledge base.
 
-Go back to the repo root:
-```bash
-cd ${CTX_FRAMEWORK_ROOT}
-```
+Return to the absolute repository root with the native shell before continuing.
 
 ---
 
@@ -445,34 +456,40 @@ Ask: "Do you want to set up the knowledge base now? You'll need a Gemini API key
 If yes:
 
 1. Get the API key from the user
-2. Write it to the org's secrets.env:
-   ```bash
-   SECRETS_FILE="orgs/${ORG_NAME}/secrets.env"
-   if [[ -f "$SECRETS_FILE" ]]; then
-     grep -q GEMINI_API_KEY "$SECRETS_FILE" || echo "GEMINI_API_KEY=<key>" >> "$SECRETS_FILE"
-   else
-     echo "GEMINI_API_KEY=<key>" > "$SECRETS_FILE"
-     chmod 600 "$SECRETS_FILE"
-   fi
-   ```
+2. Use the Read/Edit tool to set `GEMINI_API_KEY=<key>` in the org's
+   `secrets.env`, preserving all other values and the restricted file
+   permissions established by `cortextos init`. Never put the key in a shell
+   command or report.
 
-3. Run KB setup:
-   ```bash
-   CTX_ORG="${ORG_NAME}" CTX_INSTANCE_ID="${INSTANCE_ID}" CTX_FRAMEWORK_ROOT="$(pwd)" bash bus/kb-setup.sh --org "${ORG_NAME}" --instance "${INSTANCE_ID}"
-   ```
+3. The cross-platform `cortextos install` step already creates the Python venv
+   and installs KB dependencies when Python is available. Verify the venv and
+   run a real ingest/query through the Node bus CLI. Do not require
+   `bash bus/kb-setup.sh` on Windows.
 
-4. Verify it worked - the setup script tests core imports and creates the ChromaDB directory.
+4. Verify the core imports, ChromaDB directory, and one bounded query. If Python
+   or the optional KB dependencies are unavailable, explain the remediation and
+   let the user explicitly defer KB without failing the agent runtime install.
 
 5. Offer to ingest initial docs:
    > "The knowledge base is ready. Want to seed it with any files now? Drop a file path or URL - docs, PDFs, images, anything. You can always add more later, and your agents will ingest their own findings as they work."
 
    For each file:
+   Windows PowerShell:
+
+   ```powershell
+   $env:CTX_INSTANCE_ID = '<instance-id>'
+   $env:CTX_FRAMEWORK_ROOT = (Get-Location).Path
+   node dist/cli.js bus kb-ingest <path> --org <org-name> --scope shared
+   ```
+
+   macOS/Linux:
+
    ```bash
-   CTX_ORG="${ORG_NAME}" CTX_INSTANCE_ID="${INSTANCE_ID}" CTX_FRAMEWORK_ROOT="$(pwd)" GEMINI_API_KEY="<key>" bash bus/kb-ingest.sh "<path>" --org "${ORG_NAME}" --instance "${INSTANCE_ID}" --scope shared
+   CTX_INSTANCE_ID='<instance-id>' CTX_FRAMEWORK_ROOT="$PWD" node dist/cli.js bus kb-ingest <path> --org <org-name> --scope shared
    ```
 
 If no:
-> "No problem. You can set it up anytime later by adding a GEMINI_API_KEY to your org's secrets.env and running `bash bus/kb-setup.sh --org <org>`. Your agents know how to use it once it's configured."
+> "No problem. You can set it up later by adding a GEMINI_API_KEY to your org's secrets.env and running the knowledge-base setup/ingest flow from cortextOS. Your agents know how to use it once it's configured."
 
 ---
 
@@ -482,42 +499,74 @@ Everything is configured. Now start the agents.
 
 ### 9a. Generate PM2 config and start
 
-```bash
-node dist/cli.js ecosystem --instance "${INSTANCE_ID}" --org "${ORG_NAME}"
-pm2 start ecosystem.config.js
-```
+Use an instance-specific output filename. On a VPS, generate a loopback-only
+dashboard with `--dashboard-host 127.0.0.1`; on a normal desktop, preserve the
+documented local default unless the user asks for a different bind.
 
-Wait 5-10 seconds for the daemon to initialize, then save:
+**Windows PowerShell:**
 
-```bash
+```powershell
+$InstanceId = '<instance-id>'
+$OrgName = '<org-name>'
+$env:CTX_INSTANCE_ID = $InstanceId
+$env:CTX_ROOT = Join-Path $env:USERPROFILE ".cortextos\$InstanceId"
+$env:PM2_HOME = if ($InstanceId -eq 'default') { Join-Path $env:USERPROFILE '.pm2' } else { Join-Path $env:USERPROFILE ".pm2-$InstanceId" }
+$Ecosystem = "ecosystem.$InstanceId.config.js"
+node dist/cli.js ecosystem --instance $InstanceId --org $OrgName --output $Ecosystem --dashboard-host 127.0.0.1
+pm2 start $Ecosystem
 pm2 save
 ```
 
-### 9b. Capture reboot-survival command (BUG-021 — DEFERRED, NOT mid-flow)
+For a Windows desktop where other devices do not need dashboard access, the
+loopback bind is still the safe default. Do not open a firewall/NSG port during
+onboarding.
 
-**IMPORTANT — BUG-021 fix**: Run `pm2 startup` and capture its output, but DO NOT prompt the user to do anything mid-flow. The sudo paste step is friction in the critical path. Save the captured command for the end-of-onboarding summary in Phase 10 instead. The user can run it later (or never — cortextOS works fine without reboot persistence).
+**macOS/Linux:**
 
 ```bash
-PM2_STARTUP_OUTPUT=$(pm2 startup 2>&1)
-echo "$PM2_STARTUP_OUTPUT"
+export CTX_INSTANCE_ID='<instance-id>'
+export CTX_ROOT="$HOME/.cortextos/$CTX_INSTANCE_ID"
+export PM2_HOME="${PM2_HOME:-$HOME/.pm2}"
+node dist/cli.js ecosystem --instance "$CTX_INSTANCE_ID" --org '<org-name>' --output "ecosystem.$CTX_INSTANCE_ID.config.js"
+pm2 start "ecosystem.$CTX_INSTANCE_ID.config.js"
+pm2 save
 ```
 
-Then extract the sudo command if present (it starts with `sudo env PATH=`):
-```bash
-PM2_SUDO_CMD=$(echo "$PM2_STARTUP_OUTPUT" | grep -E '^sudo env PATH=' | head -1)
+Wait 5-10 seconds, then verify daemon, dashboard, poller, and runtime readiness.
+Do not equate a PM2 `online` row with an agent that is ready to accept messages.
+
+### 9b. Configure reboot survival by platform
+
+**Windows:** never run `pm2 startup`. Register the repository's idempotent,
+limited-privilege Task Scheduler helper from the same authenticated Windows
+account that owns the runtime credentials and PM2 state:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install-windows-pm2-startup.ps1 -InstanceId $InstanceId -Pm2Home $env:PM2_HOME
 ```
 
-- If `PM2_SUDO_CMD` is non-empty: stash it for the end of onboarding (Phase 10's summary). DO NOT prompt the user.
-- If the output says "already configured" or contains an existing launch daemon: log "PM2 auto-start is already configured" and continue.
-- Either way: do NOT block or prompt the user.
+Use the default Logon trigger for a desktop. On a headless Windows VPS use
+`-TriggerMode Startup` so recovery does not depend on RDP/login. Run the helper
+twice and confirm it updates one scoped task rather than creating duplicates.
+It stores no Windows password.
+
+**macOS/Linux:** run `pm2 startup`, capture its recommended privileged command,
+and defer that optional human step to Phase 10. Do not execute a generated sudo
+command automatically.
 
 ### 9c. Verify and hand off to Telegram
 
-```bash
-pm2 list | grep cortextos
+```text
+pm2 list
+node dist/cli.js doctor --instance <instance-id>
+node dist/cli.js status --instance <instance-id>
 ```
 
-> "Daemon is running. Your Orchestrator will message you on Telegram in 30-60 seconds. Head to Telegram and wait for the first message."
+Confirm the dashboard responds only on its intended interface and the enabled
+agent has crossed its runtime-readiness gate. Then open the local dashboard and
+say:
+
+> "Daemon and dashboard are running. Your Orchestrator is completing first boot and will message you on Telegram when onboarding is ready to continue."
 
 ---
 
@@ -527,16 +576,21 @@ Deliver verbatim:
 
 > "You're all set. Here's what's running:"
 > - **Orchestrator** (`<orch_name>`) - starting up on Telegram now
-> - **Dashboard** - localhost:3000 (login: <username> / <password>)
+> - **Dashboard** - localhost:3000 (login credentials were saved in the selected instance's restricted dashboard.env)
 > - **PM2 daemon** - keeps everything alive, auto-restarts on crash
 >
 > "Go to Telegram and wait for your Orchestrator to message you. It will walk you through its personality, goals, crons, and creating your Analyst agent."
 >
 > "If anything breaks, come back here and run `pm2 logs cortextos-daemon --lines 30`."
 
-### BUG-021 fix — Optional reboot survival (DEFERRED — non-blocking)
+### Optional reboot survival (deferred — non-blocking)
 
-If `PM2_SUDO_CMD` from Phase 9b is non-empty, deliver this verbatim AT THE END (not mid-flow):
+On Windows, report whether the scoped Task Scheduler registration succeeded and
+whether it uses Logon (desktop) or Startup (headless VPS). Do not show Mac/sudo
+instructions.
+
+On macOS/Linux, if `PM2_SUDO_CMD` from Phase 9b is non-empty, deliver this
+verbatim AT THE END (not mid-flow):
 
 > "**OPTIONAL — enable reboot survival**:
 >
@@ -546,7 +600,7 @@ If `PM2_SUDO_CMD` from Phase 9b is non-empty, deliver this verbatim AT THE END (
 > <PM2_SUDO_CMD>
 > ```
 >
-> It will ask for your Mac password (the one you use to log in). When you type it, nothing appears on screen — that's normal. Just type and press Enter. This is a one-time setup. cortextOS works fine without it; you can do this anytime."
+> It may ask for your computer password. When you type it, nothing appears on screen — that's normal. Just type and press Enter. This is a one-time setup. cortextOS works fine without it; you can do this anytime."
 
 If `PM2_SUDO_CMD` is empty (PM2 startup is already configured, or the system doesn't need it), skip this section silently.
 
@@ -557,22 +611,28 @@ If `PM2_SUDO_CMD` is empty (PM2 startup is already configured, or the system doe
 ## Troubleshooting
 
 **Agent not messaging on Telegram:**
-1. Check stdout.log: `tail -50 ~/.cortextos/<instance>/logs/<agent>/stdout.log`
-2. Check activity.log: `tail -20 ~/.cortextos/<instance>/logs/<agent>/activity.log`
-3. Check .env has valid BOT_TOKEN and CHAT_ID
-4. Check fast-checker.log: `tail -20 ~/.cortextos/<instance>/logs/<agent>/fast-checker.log`
+1. Run `node dist/cli.js doctor --instance <instance>` and `node dist/cli.js status --instance <instance>`.
+2. Inspect the selected instance's agent `stdout.log`, `activity.log`, and
+   `fast-checker.log` with the harness Read tool. On Windows PowerShell,
+   `Get-Content -LiteralPath <path> -Tail 50` is the native fallback.
+3. Verify `.env` has non-empty BOT_TOKEN, CHAT_ID, and ALLOWED_USER without
+   printing their values.
+4. Check for one poller per token and a Telegram 409 conflict. Never start a
+   second poller as a diagnostic.
 
 **Daemon not starting:**
-1. Check `pm2 logs cortextos-daemon --lines 30`
-2. Verify dist/daemon.js exists: `ls dist/daemon.js`
-3. Verify enabled-agents.json is valid JSON: `cat ~/.cortextos/<instance>/config/enabled-agents.json | jq .`
+1. Check `pm2 logs <instance-scoped-daemon-name> --lines 30`.
+2. Verify `dist/daemon.js` with `Test-Path` on PowerShell or the harness file tool.
+3. Parse the selected instance's `config/enabled-agents.json` with a JSON-aware
+   tool; do not use `cat | jq` on Windows.
 
 **Agent crashing immediately:**
 1. Check stdout.log for errors
-2. Verify Claude Code is authenticated: run `claude login` if needed
-3. Check `cortextos doctor` for any failing checks
+2. Verify the configured runtime's executable and authentication separately
+3. Check `node dist/cli.js doctor --instance <instance>` for actionable failures
 
 **Dashboard not loading:**
 1. Check `dashboard/.env.local` has correct absolute paths (no `~`)
-2. Verify port 3000 isn't in use: `lsof -i :3000`
+2. On Windows, inspect `Get-NetTCPConnection -LocalPort 3000`; on macOS/Linux,
+   use `lsof -i :3000`
 3. Check dashboard npm logs

@@ -5,6 +5,7 @@ import { homedir, platform, arch } from 'os';
 import { execSync, spawnSync } from 'child_process';
 import { randomBytes } from 'crypto';
 import { verifyPtySpawn } from '../platform/pty-smoke.js';
+import { writeSecretFileSync } from '../platform/secret-permissions.js';
 
 const IS_WINDOWS = platform() === 'win32';
 const IS_MAC = platform() === 'darwin';
@@ -358,12 +359,11 @@ export const installCommand = new Command('install')
     // Instance .env
     const envPath = join(ctxRoot, '.env');
     if (!existsSync(envPath)) {
-      writeFileSync(envPath, [
+      writeSecretFileSync(envPath, [
         `CTX_INSTANCE_ID=${instanceId}`,
         `CTX_ROOT=${ctxRoot}`,
         '',
-      ].join('\n'), 'utf-8');
-      try { chmodSync(envPath, 0o600); } catch { /* ignore on Windows */ }
+      ].join('\n'));
       console.log('  Created .env');
     }
 
@@ -371,8 +371,7 @@ export const installCommand = new Command('install')
     const signingKeyPath = join(ctxRoot, 'config', 'bus-signing-key');
     if (!existsSync(signingKeyPath)) {
       const signingKey = randomBytes(32).toString('hex');
-      writeFileSync(signingKeyPath, signingKey, 'utf-8');
-      try { chmodSync(signingKeyPath, 0o600); } catch { /* ignore on Windows */ }
+      writeSecretFileSync(signingKeyPath, signingKey);
       console.log('  Generated bus-signing-key (HMAC-SHA256)');
     }
 
@@ -397,7 +396,7 @@ export const installCommand = new Command('install')
       adminPassword = randomBytes(12).toString('hex');
     }
 
-    writeFileSync(
+    writeSecretFileSync(
       dashEnvPath,
       [
         `AUTH_SECRET=${authSecret}`,
@@ -407,9 +406,7 @@ export const installCommand = new Command('install')
         `CTX_FRAMEWORK_ROOT=${process.cwd()}`,
         '',
       ].join('\n'),
-      'utf-8',
     );
-    try { chmodSync(dashEnvPath, 0o600); } catch { /* ignore on Windows */ }
     console.log(`  Generated dashboard credentials at ${dashEnvPath}`);
 
     // Register cortextos CLI globally so agent PTY sessions can find it

@@ -12,10 +12,11 @@
  * - Usage cache TTL = 3 minutes (API rate limit ~5 req/token)
  */
 
-import { existsSync, readFileSync, chmodSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
+import { restrictSecretFile } from '../platform/secret-permissions.js';
 
 // --- Types ---
 
@@ -124,7 +125,7 @@ function saveAccounts(ctxRoot: string, store: AccountsStore): void {
   ensureDir(oauthDir(ctxRoot));
   const path = accountsPath(ctxRoot);
   atomicWriteSync(path, JSON.stringify(store, null, 2));
-  try { chmodSync(path, 0o600); } catch { /* ignore */ }
+  restrictSecretFile(path);
 }
 
 export function getActiveAccount(ctxRoot: string): { name: string; account: OAuthAccount } | null {
@@ -479,7 +480,7 @@ function writeTokenToAgents(
       }
 
       atomicWriteSync(envPath, content);
-      try { chmodSync(envPath, 0o600); } catch { /* ignore */ }
+      restrictSecretFile(envPath);
     } catch { /* skip agents whose .env we can't write */ }
   }
 }
