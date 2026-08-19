@@ -218,14 +218,14 @@ function trustedGitExecutable(): string | null {
     try {
       const resolved = realpathSync(candidate);
       if (!statSync(resolved).isFile()) continue;
-      // Windows ACLs do not expose a POSIX executable bit. Requiring X_OK can
-      // reject an otherwise runnable Git-for-Windows binary under service and
-      // hosted-runner identities; file-ness plus readable Program Files
-      // placement is the native trust boundary there.
-      accessSync(
-        resolved,
-        process.platform === 'win32' ? constants.R_OK : constants.R_OK | constants.X_OK,
-      );
+      // Node's access() modes are POSIX-oriented and do not reliably predict
+      // whether CreateProcess can launch a file under Windows service ACLs.
+      // The candidates above are exact Program Files paths; canonicalization
+      // plus regular-file validation is the Windows trust boundary, and the
+      // bounded spawn below is the authoritative executability test.
+      if (process.platform !== 'win32') {
+        accessSync(resolved, constants.R_OK | constants.X_OK);
+      }
       return resolved;
     } catch {
       // A PATH lookup would let inherited process state select executable code.

@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { discoverProjectRoot, readEnabledAgents } from '../../../src/cli/enable-agent';
+import { discoverProjectRoot, readEnabledAgents, requiresTelegramCredentials } from '../../../src/cli/enable-agent';
 
 describe('BUG-035 + BUG-013: enable-agent validation', () => {
   let tmpHome: string;
@@ -139,6 +139,29 @@ describe('BUG-035 + BUG-013: enable-agent validation', () => {
       const backups = readdirSync(join(tmpHome, '.cortextos', 'default', 'config'))
         .filter(f => f.startsWith('enabled-agents.json.broken-'));
       expect(backups.length).toBe(0);
+    });
+  });
+
+  describe('Telegram preflight opt-out', () => {
+    it('keeps Telegram credentials required by default', () => {
+      const agentDir = join(tmpHome, 'agent-default');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, 'config.json'), JSON.stringify({ runtime: 'claude-code' }));
+      expect(requiresTelegramCredentials(agentDir)).toBe(true);
+    });
+
+    it('allows a deliberately bus-only agent to re-enable without Telegram', () => {
+      const agentDir = join(tmpHome, 'agent-bus-only');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, 'config.json'), JSON.stringify({ telegram_polling: false }));
+      expect(requiresTelegramCredentials(agentDir)).toBe(false);
+    });
+
+    it('fails closed when config is malformed', () => {
+      const agentDir = join(tmpHome, 'agent-malformed');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, 'config.json'), '{not-json');
+      expect(requiresTelegramCredentials(agentDir)).toBe(true);
     });
   });
 });

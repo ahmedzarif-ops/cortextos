@@ -46,6 +46,22 @@ function parseEnvFile(path: string): Record<string, string> {
   return vars;
 }
 
+/**
+ * Telegram credentials are mandatory unless the agent explicitly opts out of
+ * Telegram polling. Missing or malformed config stays fail-closed so existing
+ * Telegram users retain the preflight that prevents silently broken agents.
+ */
+export function requiresTelegramCredentials(agentDir: string): boolean {
+  try {
+    const config = JSON.parse(readFileSync(join(agentDir, 'config.json'), 'utf-8')) as {
+      telegram_polling?: unknown;
+    };
+    return config.telegram_polling !== false;
+  } catch {
+    return true;
+  }
+}
+
 function getEnabledAgentsPath(instanceId: string): string {
   return join(homedir(), '.cortextos', instanceId, 'config', 'enabled-agents.json');
 }
@@ -151,35 +167,52 @@ export const enableAgentCommand = new Command('enable')
 
     const orgDir = options.org ? join(projectRoot, 'orgs', options.org) : null;
 
-    // Locate agent dir — try org-scoped path first, then flat agents/ fallback
+    // Locate agent dir — try org-scoped path first, then flat agents/ fallback.
+    // A bus-only agent with telegram_polling:false does not need an .env file.
+    let agentDir: string | null = null;
     let agentEnvPath: string | null = null;
     if (orgDir) {
-      const candidate = join(orgDir, 'agents', agent, '.env');
-      if (existsSync(candidate)) agentEnvPath = candidate;
+      const candidateDir = join(orgDir, 'agents', agent);
+      if (existsSync(candidateDir)) {
+        agentDir = candidateDir;
+        const candidateEnv = join(candidateDir, '.env');
+        if (existsSync(candidateEnv)) agentEnvPath = candidateEnv;
+      }
     }
-    if (!agentEnvPath) {
-      const candidate = join(projectRoot, 'agents', agent, '.env');
-      if (existsSync(candidate)) agentEnvPath = candidate;
+    if (!agentDir) {
+      const candidateDir = join(projectRoot, 'agents', agent);
+      if (existsSync(candidateDir)) {
+        agentDir = candidateDir;
+        const candidateEnv = join(candidateDir, '.env');
+        if (existsSync(candidateEnv)) agentEnvPath = candidateEnv;
+      }
     }
 
-    if (!agentEnvPath) {
+    if (!agentDir) {
       // BUG-035 fix: list the paths we actually checked so users can debug
       // path-discovery failures without reading the source code.
-      console.error(`Error: No .env found for agent "${agent}". Checked:`);
-      if (orgDir) console.error(`  - ${join(orgDir, 'agents', agent, '.env')}`);
-      console.error(`  - ${join(projectRoot, 'agents', agent, '.env')}`);
+      console.error(`Error: Agent directory not found for "${agent}". Checked:`);
+      if (orgDir) console.error(`  - ${join(orgDir, 'agents', agent)}`);
+      console.error(`  - ${join(projectRoot, 'agents', agent)}`);
       console.error(`Project root: ${projectRoot}`);
       console.error(`(Set CTX_FRAMEWORK_ROOT to override path discovery, or run from inside ~/cortextos.)`);
-      console.error(`Create the .env with BOT_TOKEN and CHAT_ID before enabling.`);
       process.exit(1);
     }
 
-    const env = parseEnvFile(agentEnvPath);
-    const missing = (['BOT_TOKEN', 'CHAT_ID'] as const).filter(k => !env[k]);
-    if (missing.length > 0) {
-      console.error(`Error: .env for agent "${agent}" is missing required values: ${missing.join(', ')}`);
-      console.error(`Edit ${agentEnvPath} and set BOT_TOKEN and CHAT_ID before enabling.`);
-      process.exit(1);
+    const telegramRequired = requiresTelegramCredentials(agentDir);
+    const env = agentEnvPath ? parseEnvFile(agentEnvPath) : {};
+    if (telegramRequired) {
+      if (!agentEnvPath) {
+        console.error(`Error: No .env found for agent "${agent}".`);
+        console.error(`Create ${join(agentDir, '.env')} with BOT_TOKEN and CHAT_ID before enabling.`);
+        process.exit(1);
+      }
+      const missing = (['BOT_TOKEN', 'CHAT_ID'] as const).filter(k => !env[k]);
+      if (missing.length > 0) {
+        console.error(`Error: .env for agent "${agent}" is missing required values: ${missing.join(', ')}`);
+        console.error(`Edit ${agentEnvPath} and set BOT_TOKEN and CHAT_ID before enabling.`);
+        process.exit(1);
+      }
     }
 
     // self-chat trap preflight: validate BOT_TOKEN + CHAT_ID against the live
@@ -194,30 +227,32 @@ export const enableAgentCommand = new Command('enable')
     // bot_recipient, self_chat). Warns but does not block on transient
     // reasons (network_error, rate_limited) so offline enable and burst
     // enables during the morning cascade still succeed.
-    try {
-      const telegramApi = new TelegramAPI(env.BOT_TOKEN);
-      const validation = await telegramApi.validateCredentials(env.CHAT_ID);
-      if (validation.ok) {
-        const label = validation.chatTitle ? ` (${validation.chatTitle})` : '';
-        console.log(
-          `Telegram validated: bot=@${validation.botUsername} chat=${env.CHAT_ID} type=${validation.chatType}${label}`,
-        );
-      } else if (validation.reason === 'network_error' || validation.reason === 'rate_limited') {
-        console.error(`Warning: could not verify Telegram credentials (${validation.reason}).`);
-        console.error(`  ${formatValidateError(validation)}`);
-        console.error('  Continuing anyway — re-run enable after connectivity is restored to confirm.');
-      } else {
-        console.error(`Error: Telegram credentials for agent "${agent}" failed validation.`);
-        console.error(`  ${formatValidateError(validation)}`);
-        console.error(`  Edit ${agentEnvPath} and re-run: cortextos enable ${agent}`);
-        process.exit(1);
+    if (telegramRequired) {
+      try {
+        const telegramApi = new TelegramAPI(env.BOT_TOKEN);
+        const validation = await telegramApi.validateCredentials(env.CHAT_ID);
+        if (validation.ok) {
+          const label = validation.chatTitle ? ` (${validation.chatTitle})` : '';
+          console.log(
+            `Telegram validated: bot=@${validation.botUsername} chat=${env.CHAT_ID} type=${validation.chatType}${label}`,
+          );
+        } else if (validation.reason === 'network_error' || validation.reason === 'rate_limited') {
+          console.error(`Warning: could not verify Telegram credentials (${validation.reason}).`);
+          console.error(`  ${formatValidateError(validation)}`);
+          console.error('  Continuing anyway — re-run enable after connectivity is restored to confirm.');
+        } else {
+          console.error(`Error: Telegram credentials for agent "${agent}" failed validation.`);
+          console.error(`  ${formatValidateError(validation)}`);
+          console.error(`  Edit ${agentEnvPath} and re-run: cortextos enable ${agent}`);
+          process.exit(1);
+        }
+      } catch (err) {
+        // Defensive: validateCredentials should never throw, but if it does,
+        // fall through with a warning rather than blocking enable on a bug in
+        // the validator itself.
+        console.error(`Warning: Telegram credential validation crashed: ${err instanceof Error ? err.message : String(err)}`);
+        console.error('  Continuing enable. Investigate the validator if this recurs.');
       }
-    } catch (err) {
-      // Defensive: validateCredentials should never throw, but if it does,
-      // fall through with a warning rather than blocking enable on a bug in
-      // the validator itself.
-      console.error(`Warning: Telegram credential validation crashed: ${err instanceof Error ? err.message : String(err)}`);
-      console.error('  Continuing enable. Investigate the validator if this recurs.');
     }
 
     const agents = readEnabledAgents(options.instance);
