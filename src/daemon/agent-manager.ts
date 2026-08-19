@@ -658,7 +658,18 @@ export class AgentManager {
         } else if (status.status === 'halted') {
           tgApi.sendMessage(tgChatId, `Agent ${name} HALTED — exceeded crash limit. Restart manually with: cortextos start ${name}`).catch(() => {});
         } else if (status.status === 'running' && prevStatus === 'crashed') {
-          tgApi.sendMessage(tgChatId, `Agent ${name} recovered and is back online`).catch(() => {});
+          // A successful spawn is not yet a recovery. Windows command-shim and
+          // ConPTY failures can exit a few seconds later; announcing here made
+          // every crash-loop iteration claim it had recovered. Wait beyond the
+          // short-crash window and require both the same crash generation and
+          // runtime readiness before notifying the user.
+          const expectedCrashCount = status.crashCount ?? 0;
+          setTimeout(() => {
+            const current = agentProcess.getStatus();
+            if (shouldSendRecoveryNotification(current, expectedCrashCount, agentProcess.isBootstrapped())) {
+              tgApi.sendMessage(tgChatId, `Agent ${name} recovered and is back online`).catch(() => {});
+            }
+          }, 30_000);
         }
         prevStatus = status.status;
       });
@@ -2059,6 +2070,16 @@ export class AgentManager {
       return {};
     }
   }
+}
+
+export function shouldSendRecoveryNotification(
+  status: { status: string; crashCount?: number },
+  expectedCrashCount: number,
+  bootstrapped: boolean,
+): boolean {
+  return status.status === 'running'
+    && (status.crashCount ?? 0) === expectedCrashCount
+    && bootstrapped;
 }
 
 /**
