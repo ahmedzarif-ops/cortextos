@@ -26,6 +26,7 @@ Statuses: `new`, `reproduced`, `test-added`, `fixed`, `verified`, `deferred`, `n
 | WIN-014 | high | product/process lifecycle | fixed | Real Codex app-server can hang under Windows ConPTY with `AttachConsole failed` | Windows launches the headless protocol server without ConPTY; regression and live VM probe pass without leaked children |
 | WIN-015 | medium | test harness/path | fixed | Codex continuation fixture compares a POSIX literal to a native Windows thread-state path | Fixture derives the exact path with `path.join`; Windows and Unix lifecycle tests pass |
 | WIN-016 | medium | product/diagnostics | fixed | Trusted Git for Windows cannot start with the original minimal child environment | Preserve only required Windows profile/temp variables while still scrubbing PATH and all Git redirection/tracing variables |
+| WIN-017 | low | test harness/timing | fixed | Live Codex probe asserted turn completion as soon as the file and final text appeared, racing the later `turn/completed` event | Completion event is part of the bounded wait oracle; the live probe passes and leaves no child process |
 
 ## Adaptive notes
 

@@ -221,6 +221,7 @@ describe.runIf(process.env.CTX_LIVE_CODEX_APP_SERVER === '1')('live Codex app-se
         existsSync(proofPath)
         && readFileSync(proofPath, 'utf-8').trim() === runId
         && pty.getOutputBuffer().getRecent().includes(runId)
+        && pty.getOutputBuffer().getRecent().includes('[codex-app-server] turn completed')
       ), 120000, 100);
 
       expect(pty.isAlive()).toBe(true);
