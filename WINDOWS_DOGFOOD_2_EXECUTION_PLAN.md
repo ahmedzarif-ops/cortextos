@@ -41,7 +41,61 @@ Dogfood 1 is frozen as evidence and a rollback target. Main remains untouched.
 
 ## Phase 1 — implementation before the clean install
 
-### 1. Preserve already-completed fixes
+**Hard gate: Phase 2 is forbidden until Phase 1 is complete.** Dogfood 2 is not
+merely another test of the current branch. It is the clean-install validation of
+a newly remediated candidate branch. Every previously observed issue must first
+have an explicit disposition, and every Cortext product defect must have its
+implementation and automated regression on this branch before the VM is
+reinstalled.
+
+Create `WINDOWS_DOGFOOD_2_REMEDIATION_LEDGER.md` before editing code. Give every
+`WIN-001`–`WIN-037` and `DOG-001`–`DOG-012` item one of these dispositions:
+
+- `implemented-and-regressed`: the fix is present in the combined candidate and
+  its deterministic tests pass;
+- `implementation-pending`: code/docs/tests still need to change before install;
+- `live-validation-pending`: implementation and regressions pass, but the
+  original behavior can only be closed by the new clean Windows run;
+- `environment-orchestration-control`: not a Cortext defect, with the exact
+  procedure that prevents it from contaminating the normal-user result;
+- `external-unverified`: outside Cortext control and still honestly unverified.
+
+No product defect may be labeled deferred merely to reach the reinstall. If a
+critical/high product issue cannot be implemented safely, stop and report the
+branch as not ready rather than continuing to Phase 2.
+
+### 1. Remediation audit of every existing finding
+
+The implementation pass must cover the complete ledgers, not only the two most
+recent screenshots:
+
+| Finding set | Required work before reinstall |
+|---|---|
+| WIN-001–WIN-012, WIN-014–WIN-019, WIN-022–WIN-037 | Confirm every prior fix is present together on Dogfood 2, map it to its source commit and regression, rerun the focused suite, and repair any integration regression. “Fixed on an older branch” is not enough. |
+| WIN-013 | Replace the old Telegram-deferred status with the current two-bot evidence, while retaining any unperformed unauthorized-sender scenario as explicitly live-unverified. |
+| WIN-020 | Re-audit the dashboard production dependencies. Remediate compatible direct critical/high advisories and run dashboard regressions. Any advisory without a safe upstream resolution must be itemized as a release risk; the dashboard remains loopback-only and cannot be declared publicly deployable. |
+| WIN-021 | Implement a supported isolated-install path that avoids a host-global `npm link` for non-default/test instances, document its update behavior, add install/isolation regressions, and use that path for Dogfood 2. |
+| DOG-001 | Audit the root onboarding skill and every packaged first-boot copy for native Windows commands, fix every remaining Bash-only user instruction, and pass deterministic portability tests. Full conversational closure remains a Phase 4 live gate. |
+| DOG-002 | Encode serialized foreground dependency installation in the test procedure and add observer guards against overlapping installs; do not change product code unless one clean foreground run reproduces it. |
+| DOG-003 | Re-run all secret-writer/ACL tests and verify every writer uses the shared fail-closed adapter. The new instance receives a separate live ACL inspection. |
+| DOG-004 | No code fix. Record the already-proven bot separation/private-user flow and retain the fresh Telegram activation check in Phase 4. |
+| DOG-005 | Re-test clean native dependency installation and node-pty loading. If npm's warning corresponds to a broken artifact, fix installation; otherwise retain it as a documented toolchain observation. |
+| DOG-006 | Audit the complete setup wizard fix—masked entry, no token argv/logging, in-process discovery, sender authorization, terminal ownership, Windows PM2 invocation, and clean exit—and add/repair deterministic tests before its fresh Phase 3 run. |
+| DOG-007 | Regress every Windows CLI handoff string so no supported Windows path emits `cat`, Bash chaining, `pm2 startup`, or another untranslated Unix command. |
+| DOG-008 | Regress native Claude executable resolution for interactive and scheduled environments, including doctor/profile/runtime consistency and narrow fallback behavior. |
+| DOG-009 | Encode the Task Scheduler-owned PM2 launch as the VPS test path and prevent SSH-owned launch from being mistaken for product persistence. No product fix is required unless the supported scheduled path fails. |
+| DOG-010 | Keep the readiness-confirmed recovery implementation, add/retain generation and stability-window regressions, and verify it cannot emit “recovered” for a replacement that crashes during the window. |
+| DOG-011 | Complete structural one-question turn boundaries in every shipped onboarding role and add a regression that detects missing boundaries, as detailed below. |
+| DOG-012 | Reproduce, classify, and implement the native-shell correction before reinstall, as detailed below. It cannot remain merely “observed” when Phase 2 begins. |
+
+For fixes already present in the base, “implement” means audit the actual
+combined Dogfood 2 code, retain or improve its regression, and fix any conflict
+or coverage gap. It does not mean rewriting working fixes. For behavior that can
+only be proven live, the pre-install requirement is completed implementation
+plus a deterministic regression; the issue remains `live-validation-pending`
+until the exact clean-install scenario passes.
+
+### 2. Preserve and integrate already-completed fixes
 
 Dogfood 2 starts with all checkpoint fixes, including:
 
@@ -51,7 +105,7 @@ Dogfood 2 starts with all checkpoint fixes, including:
 - readiness-confirmed recovery notifications from `3ff763ce`;
 - the one-question onboarding gate from `0958d5d1`.
 
-### 2. Make the onboarding turn boundary structural
+### 3. Make the onboarding turn boundary structural
 
 The high-level one-question rule is necessary but still relies on model
 instruction-following. Before Dogfood 2 installation:
@@ -74,7 +128,7 @@ escalate to a product-level outbound gate tied to inbound-turn correlation. Do
 not add that mechanism preemptively without proving the instruction contract is
 insufficient.
 
-### 3. Resolve the native-shell behavioral observation
+### 4. Resolve the native-shell behavioral observation
 
 DOG-012 remains open because Claude emitted Bash-like commands on Windows even
 though the native-host rule existed. Before the fresh install:
@@ -92,9 +146,25 @@ though the native-host rule existed. Before the fresh install:
 5. Keep it classified as `UNVERIFIED` if provider internals prevent reliable
    attribution; do not call it fixed because a command happened to succeed.
 
-### 4. Pre-install verification gate
+### 5. Pre-install implementation-complete gate
 
-Run before any VM cutover:
+Phase 1 passes only when all of the following are true:
+
+- the remediation ledger contains all 49 existing IDs and no product item is
+  `implementation-pending`;
+- every code/documentation fix is committed on Dogfood 2 and mapped to at least
+  one focused regression or a documented reason deterministic coverage is
+  impossible;
+- DOG-011's structural turn-boundary check passes across every shipped role;
+- DOG-012 has a completed classification and implemented correction when it is
+  attributable to Cortext;
+- WIN-021's isolated install path is implemented and selected for Dogfood 2;
+- WIN-020 has a fresh audit and compatible critical/high dependency fixes are
+  applied; residual upstream-only risk is explicit and remains loopback-bound;
+- a review of the complete diff confirms no Windows fork of shared daemon,
+  poller, bus, scheduler, or agent logic was introduced.
+
+Then run, before any VM cutover:
 
 - focused onboarding, recovery, runtime resolver, secret-permission, ecosystem,
   and startup-helper tests;
@@ -105,6 +175,10 @@ Run before any VM cutover:
 - review that the unrelated pre-existing
   `tests/unit/lifecycle/legacy-status.test.ts` modification is not staged;
 - commit and push only Dogfood 2; never update main or rewrite Dogfood 1.
+
+Record the exact implementation-complete commit. Phase 3 must clone that commit
+from the remote branch; working-tree-only fixes or manual VM patches invalidate
+the normal-user simulation.
 
 ## Phase 2 — freeze Dogfood 1 and transfer Telegram ownership
 
