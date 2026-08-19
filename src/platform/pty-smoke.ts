@@ -22,7 +22,10 @@ export async function verifyPtySpawn(
 ): Promise<void> {
   const isWindows = platformName === 'win32';
   const command = isWindows ? 'cmd.exe' : '/bin/echo';
-  const args = isWindows ? ['/c', 'echo', 'pty-ok'] : ['pty-ok'];
+  // Keep the Windows shell alive after emitting the token. Closing a ConPTY
+  // only after `cmd /c` has already exited makes node-pty's cleanup helper try
+  // to attach to a vanished console, producing a spurious AttachConsole error.
+  const args = isWindows ? ['/q', '/k', 'echo', 'pty-ok'] : ['pty-ok'];
   const pty = ptyModule.spawn(command, args, {
     name: 'xterm-256color', cols: 80, rows: 24,
   });
@@ -30,6 +33,7 @@ export async function verifyPtySpawn(
   await new Promise<void>((resolve, reject) => {
     let output = '';
     let settled = false;
+    let closeRequested = false;
     let dataSubscription: Disposable | undefined;
     let exitSubscription: Disposable | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -40,21 +44,27 @@ export async function verifyPtySpawn(
       if (timer) clearTimeout(timer);
       try { dataSubscription?.dispose(); } catch { /* best-effort */ }
       try { exitSubscription?.dispose(); } catch { /* best-effort */ }
-      // node-pty's ConPTY output worker survives a normally exited child until
-      // the terminal itself is closed. Leaving it open keeps short-lived CLI
-      // commands such as `doctor` and `install` alive indefinitely on Windows.
-      // Unix PTYs close their own descriptor on child exit and must not be
-      // signalled again.
-      if (isWindows) {
+      // Best-effort fallback for setup failures before the success token. The
+      // normal Windows path closes the still-live shell from onData below.
+      if (isWindows && !closeRequested) {
+        closeRequested = true;
         try { pty.kill(); } catch { /* child/session may already be closed */ }
       }
       if (error) reject(error);
       else resolve();
     };
 
-    dataSubscription = pty.onData((data) => { output += data; });
+    dataSubscription = pty.onData((data) => {
+      output += data;
+      if (isWindows && output.includes('pty-ok') && !closeRequested) {
+        closeRequested = true;
+        try { pty.kill(); } catch (err) {
+          finish(err instanceof Error ? err : new Error(String(err)));
+        }
+      }
+    });
     exitSubscription = pty.onExit(({ exitCode }) => {
-      finish(exitCode === 0 && output.includes('pty-ok')
+      finish((isWindows || exitCode === 0) && output.includes('pty-ok')
         ? undefined
         : new Error(`spawn test failed (exit ${exitCode})`));
     });
