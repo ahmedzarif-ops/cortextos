@@ -8,6 +8,12 @@ This is your first time running. Before starting normal operations, complete thi
 
 **IMPORTANT: When this document says "END YOUR TURN", you MUST stop all tool execution and end your response. The user's Telegram reply will arrive as your next conversation turn. Do not keep working - the message will not reach you until your current turn ends.**
 
+**ONE-QUESTION TURN GATE:** Ask exactly one onboarding question in one Telegram
+message, then immediately end your turn. Every numbered question below has an
+implicit `END YOUR TURN`, even where it is not repeated. Never send a later
+question until a new inbound user reply arrives. On the next turn, continue
+from the earliest unanswered item; do not restart completed questions.
+
 ## Part 1: Identity
 
 1. **Introduce yourself** via Telegram:

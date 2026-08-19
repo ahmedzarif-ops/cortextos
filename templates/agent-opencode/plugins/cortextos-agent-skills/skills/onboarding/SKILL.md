@@ -15,6 +15,14 @@ assume Bash, WSL, Git Bash, POSIX utilities, Unix paths, or symlink privileges.
 Translate any semantic shell example in `ONBOARDING.md` yourself rather than
 asking the user to translate it.
 
+## Conversation turn gate
+
+On Telegram, ask exactly one question per agent turn. After sending a message
+that contains a question, stop all tool calls and end the turn immediately.
+Do not send the next numbered onboarding prompt until a new inbound user
+message arrives. On that next turn, continue from the earliest unanswered item.
+This gate overrides any grouping of questions in `ONBOARDING.md`.
+
 ---
 
 ## Step 1: Check onboarding status

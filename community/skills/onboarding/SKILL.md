@@ -19,6 +19,14 @@ Any shell examples in the role's `ONBOARDING.md` describe the intended
 operation: translate them yourself to native PowerShell/file tools and never
 ask the user to perform that translation.
 
+## Conversation turn gate
+
+On Telegram, ask exactly one question per agent turn. After sending a message
+that contains a question, stop all tool calls and end the turn immediately.
+Do not send the next numbered onboarding prompt until a new inbound user
+message arrives. On that next turn, continue from the earliest unanswered item.
+This gate overrides any grouping of questions in `ONBOARDING.md`.
+
 ---
 
 ## Step 0: Detect your runtime

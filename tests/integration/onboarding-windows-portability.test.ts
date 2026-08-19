@@ -28,10 +28,14 @@ describe('Windows onboarding portability contract', () => {
       'templates/agent-opencode/plugins/cortextos-agent-skills/skills/onboarding/SKILL.md',
       'templates/orchestrator/.claude/skills/onboarding/SKILL.md',
       'templates/analyst/.claude/skills/onboarding/SKILL.md',
+      'community/agents/research-agent/.claude/skills/onboarding/SKILL.md',
+      'community/agents/security/.claude/skills/onboarding/SKILL.md',
     ];
     for (const path of skills) {
       const content = read(path);
       expect(content, path).toContain('## Native host contract');
+      expect(content, path).toContain('## Conversation turn gate');
+      expect(content, path).toContain('exactly one question per agent turn');
       expect(content, path).toMatch(/Windows use (?:native )?PowerShell/);
       expect(content, path).not.toContain('[[ -f "${CTX_ROOT}');
       expect(content, path).not.toContain('touch "$CTX_ROOT');
@@ -48,6 +52,7 @@ describe('Windows onboarding portability contract', () => {
     ]) {
       const content = read(path);
       expect(content, path).toContain('**Native-shell rule:**');
+      expect(content, path).toContain('**ONE-QUESTION TURN GATE:**');
       expect(content, path).toContain('without asking the user');
     }
   });

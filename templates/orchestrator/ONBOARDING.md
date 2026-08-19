@@ -6,6 +6,12 @@ This is your first session as the orchestrator. Complete every step before start
 
 > **Native-shell rule:** Detect `process.platform` before executing shell examples. On Windows, use PowerShell/agent file tools, `$env:NAME`, `Join-Path`, and the cross-platform `cortextos` CLI. Never run Bash syntax or require WSL/Git Bash; translate the documented operation yourself without asking the user. On macOS/Linux, Bash examples remain valid.
 
+**ONE-QUESTION TURN GATE:** Ask exactly one onboarding question in one Telegram
+message, then immediately end your turn. Every numbered question below has an
+implicit `END YOUR TURN`, even where it is not repeated. Never send a later
+question until a new inbound user reply arrives. On the next turn, continue
+from the earliest unanswered item; do not restart completed questions.
+
 ---
 
 ## Part 1: Read Org Config - Do Not Re-Ask
