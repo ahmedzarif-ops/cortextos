@@ -1,14 +1,136 @@
 import { Command } from 'commander';
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import { existsSync, readFileSync, readdirSync, statSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
-interface Check {
+export interface Check {
   name: string;
   status: 'pass' | 'fail' | 'warn';
   message: string;
   fix?: string;
+}
+
+export interface RuntimeProbeResult {
+  ok: boolean;
+  stdout: string;
+}
+
+export type RuntimeProbe = (command: string, args: readonly string[]) => RuntimeProbeResult;
+
+/**
+ * Run a fixed diagnostic command without inheriting stdio. Windows global npm
+ * commands are .cmd shims, so they must be resolved through the native shell.
+ * Callers deliberately never include stdout from auth probes in user-visible
+ * output: provider output can contain account metadata and must stay private.
+ */
+export function runRuntimeProbe(command: string, args: readonly string[]): RuntimeProbeResult {
+  // These values come exclusively from the fixed table below. Keep this
+  // allowlist if more probes are added; it prevents shell metacharacters from
+  // ever reaching cmd.exe when resolving Windows npm .cmd shims.
+  if (![command, ...args].every((part) => /^[A-Za-z0-9._/-]+$/.test(part))) {
+    return { ok: false, stdout: '' };
+  }
+  const windows = process.platform === 'win32';
+  const result = spawnSync(windows ? [command, ...args].join(' ') : command, windows ? [] : [...args], {
+    encoding: 'utf-8',
+    stdio: 'pipe',
+    timeout: 10_000,
+    shell: windows,
+    windowsHide: true,
+  });
+  return {
+    ok: !result.error && result.status === 0,
+    // Some CLI versions write status to stderr. It is still captured and only
+    // interpreted in-memory; auth probe output is never displayed.
+    stdout: [result.stdout, result.stderr].filter((value): value is string => typeof value === 'string').join('\n'),
+  };
+}
+
+function singleLineVersion(output: string): string {
+  const firstLine = output.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/, 1)[0]?.trim();
+  return firstLine ? firstLine.slice(0, 160) : 'Installed';
+}
+
+function claudeIsAuthenticated(output: string): boolean {
+  return /["']?loggedIn["']?\s*:\s*true\b/i.test(output);
+}
+
+function codexIsAuthenticated(output: string): boolean {
+  return !/not\s+logged\s+in/i.test(output) && /logged\s+in/i.test(output);
+}
+
+function opencodeIsAuthenticated(output: string): boolean {
+  const plain = output.replace(/\x1b\[[0-9;]*m/g, '');
+  const match = plain.match(/\b(\d+)\s+credentials?\b/i);
+  return match !== null && Number(match[1]) > 0;
+}
+
+/** Pure, dependency-injected runtime diagnostics used by doctor and tests. */
+export function getAgentRuntimeChecks(probe: RuntimeProbe = runRuntimeProbe): Check[] {
+  const definitions = [
+    {
+      label: 'Claude Code',
+      command: 'claude',
+      versionArgs: ['--version'],
+      authArgs: ['auth', 'status'],
+      authenticated: claudeIsAuthenticated,
+      installFix: 'Install Claude Code: npm install -g @anthropic-ai/claude-code',
+      authFix: 'Run: claude login',
+      required: true,
+    },
+    {
+      label: 'Codex',
+      command: 'codex',
+      versionArgs: ['--version'],
+      authArgs: ['login', 'status'],
+      authenticated: codexIsAuthenticated,
+      installFix: 'Install Codex: npm install -g @openai/codex',
+      authFix: 'Run: codex login',
+      required: false,
+    },
+    {
+      label: 'OpenCode',
+      command: 'opencode',
+      versionArgs: ['--version'],
+      authArgs: ['auth', 'list'],
+      authenticated: opencodeIsAuthenticated,
+      installFix: 'Install OpenCode from https://opencode.ai/docs',
+      authFix: 'Run: opencode auth login',
+      required: false,
+    },
+  ] as const;
+
+  const checks: Check[] = [];
+  for (const runtime of definitions) {
+    const version = probe(runtime.command, runtime.versionArgs);
+    checks.push({
+      name: `${runtime.label} CLI`,
+      status: version.ok ? 'pass' : runtime.required ? 'fail' : 'warn',
+      message: version.ok ? singleLineVersion(version.stdout) : 'Not found or not executable',
+      fix: version.ok ? undefined : runtime.installFix,
+    });
+
+    if (!version.ok) {
+      checks.push({
+        name: `${runtime.label} auth`,
+        status: 'warn',
+        message: 'Unavailable (CLI not executable)',
+        fix: runtime.installFix,
+      });
+      continue;
+    }
+
+    const auth = probe(runtime.command, runtime.authArgs);
+    const ready = auth.ok && runtime.authenticated(auth.stdout);
+    checks.push({
+      name: `${runtime.label} auth`,
+      status: ready ? 'pass' : 'warn',
+      message: ready ? 'Ready' : 'Not authenticated or status could not be verified',
+      fix: ready ? undefined : runtime.authFix,
+    });
+  }
+  return checks;
 }
 
 export const doctorCommand = new Command('doctor')
@@ -46,22 +168,7 @@ export const doctorCommand = new Command('doctor')
       });
     }
 
-    // Check Claude Code CLI
-    try {
-      const claudeVersion = execSync('claude --version', { encoding: 'utf-8', timeout: 5000 }).trim();
-      checks.push({
-        name: 'Claude Code CLI',
-        status: 'pass',
-        message: claudeVersion,
-      });
-    } catch {
-      checks.push({
-        name: 'Claude Code CLI',
-        status: 'fail',
-        message: 'Not found',
-        fix: 'Install Claude Code: npm install -g @anthropic-ai/claude-code',
-      });
-    }
+    checks.push(...getAgentRuntimeChecks());
 
     // Check node-pty
     try {
@@ -155,19 +262,6 @@ export const doctorCommand = new Command('doctor')
       message: existsSync(ctxRoot) ? ctxRoot : 'Not found',
       fix: !existsSync(ctxRoot) ? 'Run: cortextos init <org-name>' : undefined,
     });
-
-    // Check Claude Code auth
-    try {
-      execSync('claude --version', { encoding: 'utf8', stdio: 'pipe' });
-      checks.push({ name: 'Claude Code auth', status: 'pass', message: 'Authenticated' });
-    } catch {
-      checks.push({
-        name: 'Claude Code auth',
-        status: 'warn',
-        message: 'Not authenticated',
-        fix: 'Run: claude login',
-      });
-    }
 
     // ── Tunnel checks (macOS only) ──────────────────────────────────────
     if (process.platform === 'darwin') {

@@ -1,8 +1,14 @@
 import { Command } from 'commander';
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
-import { join, dirname } from 'path';
+import { existsSync, readdirSync, writeFileSync } from 'fs';
+import { join } from 'path';
 import { homedir } from 'os';
-import { fileURLToPath } from 'url';
+
+/** Keep the historical default names while isolating disposable instances. */
+export function pm2ProcessName(base: string, instance: string): string {
+  if (instance === 'default') return base;
+  const safeInstance = instance.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+  return `${base}-${safeInstance || 'instance'}`;
+}
 
 export const ecosystemCommand = new Command('ecosystem')
   .option('--instance <id>', 'Instance ID', 'default')
@@ -56,14 +62,14 @@ export const ecosystemCommand = new Command('ecosystem')
     const distDir = join(projectRoot, 'dist');
     const daemonScript = join(distDir, 'daemon.js');
     const dashboardDir = join(projectRoot, 'dashboard');
-    // BUG-019 + cycle-2 finding: require BOTH package.json AND node_modules/.bin/next.
+    const nextBin = join(dashboardDir, 'node_modules', 'next', 'dist', 'bin', 'next');
+    // BUG-019 + cycle-2 finding: require BOTH package.json AND Next's Node entry point.
     // Without the second check, running `cortextos ecosystem` before
     // `npm install` in dashboard/ produces a crash-looped PM2 entry that the
     // user sees as "dashboard keeps restarting". Better to silently skip the
     // dashboard entry if its deps aren't installed yet — the user can re-run
     // `cortextos ecosystem` after `npm install` to add it.
-    const hasDashboard = existsSync(join(dashboardDir, 'package.json')) &&
-      existsSync(join(dashboardDir, 'node_modules', '.bin', 'next'));
+    const hasDashboard = existsSync(join(dashboardDir, 'package.json')) && existsSync(nextBin);
 
     // BUG-002 fix: emit ecosystem.config.js as raw JS that resolves
     // process.env.CTX_INSTANCE_ID at PM2-startup time, not at generation time.
@@ -90,10 +96,13 @@ export const ecosystemCommand = new Command('ecosystem')
     // PM2 at the local Next.js binary that `npm run dev` would run anyway.
     // The `next` entry resolves under dashboard/node_modules/next/dist/bin/next
     // and is just a Node script, so PM2 spawns it cleanly on every platform.
-    const isWindows = process.platform === 'win32';
-    const nextBin = join(dashboardDir, 'node_modules', 'next', 'dist', 'bin', 'next');
-    const dashboardScript = isWindows && existsSync(nextBin) ? nextBin : 'npm';
-    const dashboardArgs = isWindows && existsSync(nextBin) ? 'dev' : 'run dev';
+    // Launch Next's Node entry point directly on every OS. This avoids the
+    // platform-specific npm/npm.cmd shim distinction while keeping one PM2
+    // runner definition for Windows, macOS, and Linux.
+    const dashboardScript = nextBin;
+    const dashboardArgs = 'dev';
+    const daemonName = pm2ProcessName('cortextos-daemon', options.instance);
+    const dashboardName = pm2ProcessName('cortextos-dashboard', options.instance);
 
     // windowsHide: stops PM2 from attaching a visible "next-server" console
     // window to the dashboard process at boot on Windows. PM2's default
@@ -104,9 +113,10 @@ export const ecosystemCommand = new Command('ecosystem')
     const dashboardAppBlock = hasDashboard
       ? `,
     {
-      name: 'cortextos-dashboard',
+      name: ${JSON.stringify(dashboardName)},
       script: ${JSON.stringify(dashboardScript)},
       args: ${JSON.stringify(dashboardArgs)},
+      interpreter: process.execPath,
       cwd: ${JSON.stringify(dashboardDir)},
       env: {
         PORT: process.env.PORT || '3000',
@@ -129,7 +139,7 @@ export const ecosystemCommand = new Command('ecosystem')
 module.exports = {
   apps: [
     {
-      name: 'cortextos-daemon',
+      name: ${JSON.stringify(daemonName)},
       script: ${JSON.stringify(daemonScript)},
       args: '--instance ' + (process.env.CTX_INSTANCE_ID || ${JSON.stringify(options.instance)}),
       cwd: ${JSON.stringify(projectRoot)},
@@ -140,6 +150,7 @@ module.exports = {
         CTX_PROJECT_ROOT: ${JSON.stringify(projectRoot)},
         CTX_ORG: process.env.CTX_ORG || ${JSON.stringify(detectedOrg)},
       },
+      windowsHide: true,
       max_restarts: 50,
       restart_delay: 5000,
       autorestart: true,

@@ -87,7 +87,10 @@ ALLOWED_USER=<your-telegram-user-id>
 EOF
 
 cortextos ecosystem                        # Generate PM2 config
-pm2 start ecosystem.config.js && pm2 save && pm2 startup
+pm2 start ecosystem.config.js && pm2 save
+
+# macOS/Linux only:
+pm2 startup
 
 # Windows: pm2 startup is unsupported. Use Task Scheduler instead:
 #   powershell -ExecutionPolicy Bypass -File scripts\install-windows-pm2-startup.ps1
@@ -101,9 +104,49 @@ pm2 start ecosystem.config.js && pm2 save && pm2 startup
 |---|---|
 | Node.js 20+ | [nodejs.org](https://nodejs.org) |
 | macOS, Linux, or Windows 10/11 | Windows uses Task Scheduler for reboot persistence — see `scripts/install-windows-pm2-startup.ps1` |
-| Claude Code | `npm install -g @anthropic-ai/claude-code` + `claude login` |
+| Agent runtime | Claude Code, Codex, and OpenCode are supported; install and authenticate only the runtimes used by your agents |
 | PM2 | `npm install -g pm2` |
 | Telegram bot token | Create via @BotFather |
+
+---
+
+### Native Windows operation
+
+cortextOS runs directly in Windows with the same Node.js daemon used on macOS
+and Linux. Docker, WSL, and Windows Developer Mode are not required. Install
+Node.js and the agent CLIs in the same Windows user account that will run PM2,
+then verify executable and authentication readiness without printing credentials:
+
+```powershell
+cortextos doctor
+cortextos ecosystem
+pm2 start ecosystem.config.js
+pm2 save
+powershell -ExecutionPolicy Bypass -File scripts\install-windows-pm2-startup.ps1
+```
+
+The startup helper registers an idempotent, limited-privilege logon task named
+`PM2 Resurrect` (preserving the existing default). Re-running it updates that task. To test a
+disposable instance without touching the default PM2 process list, use a unique
+PM2 home and instance-scoped task:
+
+```powershell
+$env:CTX_INSTANCE_ID = 'windows-smoke'
+$env:PM2_HOME = "$env:USERPROFILE\.pm2-windows-smoke"
+cortextos ecosystem --instance windows-smoke --output ecosystem.windows-smoke.config.js
+pm2 start ecosystem.windows-smoke.config.js
+pm2 save
+powershell -ExecutionPolicy Bypass -File scripts\install-windows-pm2-startup.ps1 `
+  -InstanceId windows-smoke -Pm2Home $env:PM2_HOME
+
+# Remove only the disposable startup task when finished:
+powershell -ExecutionPolicy Bypass -File scripts\install-windows-pm2-startup.ps1 `
+  -Uninstall -InstanceId windows-smoke -Pm2Home $env:PM2_HOME
+```
+
+The helper triggers when that Windows user logs on. Run it from the same account
+that owns the authenticated agent CLIs and PM2 state. It does not install a
+system-wide service or open a network port.
 
 ---
 
