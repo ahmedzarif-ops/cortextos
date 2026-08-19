@@ -39,6 +39,7 @@ Statuses: `new`, `reproduced`, `test-added`, `fixed`, `verified`, `deferred`, `n
 | WIN-027 | high | product/Claude lifecycle | fixed | Authenticated Claude Code can remain stuck at its one-time theme/account-method screens on a fresh Windows profile, so bus messages are typed into the menu | Detect the prompt-specific multi-token screens and safely confirm their defaults before the existing trust/bypass handling; retain the bootstrap no-keystroke guard |
 | WIN-028 | high | product/terminal parsing | fixed | Claude's TUI cursor/private-mode escapes split visible first-run phrases, defeating the color-only ANSI stripper and leaving the agent falsely `running` | Centralize full synchronous CSI/OSC stripping for lifecycle polling, bootstrap detection, and first-run recognition |
 | WIN-029 | high | product/Claude lifecycle | fixed | First-run trust/bypass warnings contain lowercase `permissions`, so the generic bootstrap substring stops the auto-confirmer before the blocking screen is accepted | Require Claude's actual `permissions: <mode>` ready-status shape and regress the real warning text |
+| WIN-030 | high | product/Claude auth lifecycle | fixed | Windows Credential Manager auth can be ready while `~/.claude.json` lacks `hasCompletedOnboarding`, causing an authenticated headless launch to reopen OAuth | Only after captured `claude auth status` positively reports logged in, atomically merge non-secret onboarding/theme preferences while preserving all existing profile fields |
 
 ## Adaptive notes
 

@@ -4,6 +4,7 @@ import { platform } from 'os';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { OutputBuffer, stripAnsiSync } from './output-buffer.js';
 import { injectMessage as injectMessageIntoPty } from './inject.js';
+import { prepareClaudeHeadlessProfile } from './claude-profile.js';
 
 // node-pty types
 interface IPty {
@@ -163,6 +164,7 @@ export class AgentPTY {
     // node-pty's CreateProcess requires the exact wrapper name to resolve correctly.
     const claudeArgs = this.buildClaudeArgs(mode, prompt);
     const claudeCmd = this.getBinaryName();
+    prepareClaudeHeadlessProfile(claudeCmd);
 
     this.pty = this.spawnFn!(claudeCmd, claudeArgs, {
       name: 'xterm-256color',
