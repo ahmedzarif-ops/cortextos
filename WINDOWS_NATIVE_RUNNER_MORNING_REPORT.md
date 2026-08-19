@@ -93,6 +93,7 @@ Additional live results:
 - **PASS:** a controlled Windows reboot ran the S4U boot task after OS startup, restored exactly one daemon/dashboard, restored all three agents, kept the dashboard on `127.0.0.1`, and returned a signed post-reboot agent reply without manual resurrection.
 - **PASS:** the supported install and doctor commands returned exit code 0 without the prior lingering ConPTY worker.
 - **PASS:** dashboard HTTP reached the expected authentication redirect instead of the prior credential-related HTTP 500.
+- **PASS:** the final simultaneous three-runtime soak returned all three exact signed correlated replies in 6.5 seconds with no new anomaly.
 
 ## 5. Bugs fixed
 
@@ -130,8 +131,9 @@ No product defect was hidden with an unjustified Windows skip.
 - **PASS:** S4U startup persistence stores no Windows password and runs at limited privilege.
 - **PASS:** disposable acceptance crons were removed and PM2 state was saved afterward.
 - **PASS:** all fault injection targeted only run-scoped agent process trees and disposable files.
+- **PASS:** final cleanup uninstalled the run-scoped startup task, deleted the two scoped PM2 apps, saved the empty scoped PM2 state, stopped its PM2 daemon, confirmed all three captured agent processes were gone without forced cleanup, and confirmed zero dashboard listeners.
 
-The disposable VM instance remains available for continued bounded soak observation until final handoff. Run-scoped agents may be stopped and the scoped scheduled task uninstalled when no further live testing is desired.
+The disposable repository/state remains on disk as diagnostic evidence, but nothing in the run-scoped instance is running or registered to resurrect.
 
 ## 8. Compatibility
 
