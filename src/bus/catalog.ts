@@ -6,7 +6,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, cpSync, rmSync, chmodSync } from 'fs';
-import { join, resolve, relative } from 'path';
+import { isAbsolute, join, relative, resolve, sep } from 'path';
 import { execSync, execFileSync } from 'child_process';
 import { ensureDir } from '../utils/atomic.js';
 
@@ -89,6 +89,37 @@ const PII_PATTERNS = {
 
 function isValidItemName(name: string): boolean {
   return /^[a-zA-Z0-9_-]+$/.test(name);
+}
+
+/**
+ * Catalog paths are serialized data, so accept either separator regardless of
+ * the host that authored the catalog. Return safe relative path components or
+ * null when the value is absolute, contains traversal, or contains a NUL.
+ */
+function parseCatalogPath(rawPath: string): string[] | null {
+  if (typeof rawPath !== 'string') return null;
+  const portable = rawPath.replace(/\\/g, '/').replace(/^community\//, '');
+  if (
+    portable.includes('\0') ||
+    portable.startsWith('/') ||
+    /^[A-Za-z]:/.test(portable)
+  ) {
+    return null;
+  }
+
+  const parts = portable.split('/').filter((part) => part !== '' && part !== '.');
+  if (parts.length === 0 || parts.some((part) => part === '..')) return null;
+  return parts;
+}
+
+/** True when candidate resolves to base itself or one of its descendants. */
+function isWithinDirectory(base: string, candidate: string): boolean {
+  const rel = relative(resolve(base), resolve(candidate));
+  return rel === '' || (
+    !isAbsolute(rel) &&
+    rel !== '..' &&
+    !rel.startsWith(`..${sep}`)
+  );
 }
 
 function lockdownPermissions(targetDir: string): void {
@@ -229,23 +260,19 @@ export function installCommunityItem(
     return { status: 'error', name: itemName, error: 'item not found in catalog' };
   }
 
-  // Normalize install_path: strip an optional leading "community/" so entries
-  // authored as either "community/skills/X" (shipped catalog shape) or
-  // "skills/X" (submit-writes shape) both resolve correctly under communityBase.
-  const installPath = item.install_path.replace(/^community\//, '');
-
-  // Validate install_path to prevent path traversal
-  if (installPath.includes('..') || installPath.startsWith('/')) {
+  // Catalog entries may have been authored on another OS. Parse both slash
+  // styles as serialized path separators, then join using the current host.
+  const installPathParts = parseCatalogPath(item.install_path);
+  if (!installPathParts) {
     return { status: 'error', name: itemName, error: 'install_path contains path traversal' };
   }
 
   const communityBase = join(frameworkRoot, 'community');
-  const sourceDir = join(communityBase, installPath);
+  const sourceDir = join(communityBase, ...installPathParts);
 
-  // Verify resolved path is under community/
-  const resolvedSource = resolve(sourceDir);
-  const resolvedBase = resolve(communityBase);
-  if (!resolvedSource.startsWith(resolvedBase + '/') && resolvedSource !== resolvedBase) {
+  // Defense in depth: use path.relative rather than a separator-sensitive
+  // string prefix so this containment check is correct on every host.
+  if (!isWithinDirectory(communityBase, sourceDir)) {
     return { status: 'error', name: itemName, error: 'install_path resolves outside community directory' };
   }
 
@@ -341,9 +368,8 @@ export function prepareSubmission(
   const stagingDir = join(ctxRoot, 'community-staging', itemName);
 
   // Verify staging path is under community-staging/
-  const resolvedStaging = resolve(stagingDir);
-  const resolvedStagingBase = resolve(join(ctxRoot, 'community-staging'));
-  if (!resolvedStaging.startsWith(resolvedStagingBase + '/') && resolvedStaging !== resolvedStagingBase) {
+  const stagingBase = join(ctxRoot, 'community-staging');
+  if (!isWithinDirectory(stagingBase, stagingDir)) {
     return { status: 'error', name: itemName, type: itemType, staging_dir: '', file_count: 0, files: [], pii_detected: ['staging directory resolves outside expected path'] };
   }
 

@@ -238,19 +238,19 @@ describe('FM-1: Disk full — ENOSPC write failure, no data loss on recovery', (
     scheduler.stop();
   });
 
-  it('atomicWriteSync: ENOSPC on tmp write throws; subsequent write succeeds', () => {
-    // Direct unit test: atomicWriteSync propagates write errors correctly.
-    // We simulate ENOSPC by writing to a path in a non-writable directory.
+  it('atomicWriteSync: injected ENOSPC on tmp write throws; subsequent write succeeds', () => {
+    // Direct cross-platform test: inject the filesystem error instead of
+    // relying on chmod, whose write-denial semantics differ on Windows.
     const readOnlyDir = join(tmpRoot, 'readonly-dir');
     mkdirSync(readOnlyDir, { recursive: true });
-    const { chmodSync } = require('fs');
-    chmodSync(readOnlyDir, 0o555);
 
     const testPath = join(readOnlyDir, 'test.json');
-    expect(() => atomicWriteSync(testPath, '{"data":1}')).toThrow();
+    const enospc = Object.assign(new Error('simulated disk full'), { code: 'ENOSPC' });
+    expect(() => atomicWriteSync(testPath, '{"data":1}', false, {
+      writeFileSync: (() => { throw enospc; }) as typeof import('fs').writeFileSync,
+    })).toThrow(enospc);
 
-    // Restore and confirm write works
-    chmodSync(readOnlyDir, 0o755);
+    // Remove the injected fault and confirm a subsequent write recovers.
     expect(() => atomicWriteSync(testPath, '{"data":2}')).not.toThrow();
     expect(existsSync(testPath)).toBe(true);
   });

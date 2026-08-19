@@ -228,7 +228,7 @@ function trustedGitExecutable(): string | null {
 }
 
 function gitEnvironment(): NodeJS.ProcessEnv {
-  return {
+  const env: NodeJS.ProcessEnv = {
     LANG: 'C',
     LC_ALL: 'C',
     GIT_CONFIG_NOSYSTEM: '1',
@@ -237,6 +237,19 @@ function gitEnvironment(): NodeJS.ProcessEnv {
     GIT_OPTIONAL_LOCKS: '0',
     GIT_TERMINAL_PROMPT: '0',
   };
+
+  // Windows process creation and Git for Windows require a small set of host
+  // variables even when the child environment is otherwise intentionally
+  // scrubbed. Keep this an explicit allowlist: inheriting the full environment
+  // would re-introduce GIT_DIR/GIT_WORK_TREE/GIT_TRACE/PATH injection.
+  if (process.platform === 'win32') {
+    for (const key of ['SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT', 'TEMP', 'TMP']) {
+      const value = process.env[key];
+      if (value) env[key] = value;
+    }
+  }
+
+  return env;
 }
 
 function gitOutput(frameworkRoot: string, args: string[]): string | null {

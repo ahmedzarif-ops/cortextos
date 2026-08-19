@@ -32,6 +32,14 @@ describe('migrate-runtime-field', () => {
     return join(dir, 'config.json');
   }
 
+  function seedRaw(org: string, agent: string, raw: string) {
+    const dir = join(root, 'orgs', org, 'agents', agent);
+    mkdirSync(dir, { recursive: true });
+    const configPath = join(dir, 'config.json');
+    writeFileSync(configPath, raw, 'utf-8');
+    return configPath;
+  }
+
   it('adds runtime: claude-code to configs missing the field', () => {
     const path = seed('lifeos', 'donna', {
       agent_name: 'donna',
@@ -88,6 +96,23 @@ describe('migrate-runtime-field', () => {
 
     const after = readFileSync(path, 'utf-8');
     expect(after).toBe(before);
+  });
+
+  it('accepts a UTF-8 BOM and preserves CRLF when applying the migration', () => {
+    const path = seedRaw(
+      'lifeos',
+      'windows-agent',
+      '\uFEFF{\r\n  "agent_name": "windows-agent",\r\n  "enabled": true\r\n}\r\n',
+    );
+
+    const { summary } = runMigration({ root, dryRun: false });
+    expect(summary.willChange).toBe(1);
+
+    const migrated = readFileSync(path, 'utf-8');
+    expect(migrated.startsWith('\uFEFF')).toBe(false);
+    expect(migrated).toContain('\r\n  "runtime": "claude-code"');
+    expect(migrated.replace(/\r\n/g, '')).not.toContain('\n');
+    expect(JSON.parse(migrated).runtime).toBe('claude-code');
   });
 
   it('positions runtime right after enabled for visual parity with agent-codex template', () => {

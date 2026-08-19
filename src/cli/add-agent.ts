@@ -1,7 +1,8 @@
 import { Command } from 'commander';
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, chmodSync, symlinkSync, lstatSync, unlinkSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, chmodSync, lstatSync, unlinkSync } from 'fs';
 import { join, resolve } from 'path';
 import { homedir } from 'os';
+import { createDirectoryLink } from '../platform/filesystem.js';
 import { OrgContext } from '../types';
 import { validateAgentName, validateOrgName } from '../utils/validate';
 
@@ -409,7 +410,7 @@ function installCodexSkillSymlinks(agentDir: string, agentName: string): number 
           }
         } catch { /* path likely doesn't exist; continue to symlink */ }
       }
-      symlinkSync(skillSrc, linkPath, 'dir');
+      createDirectoryLink(skillSrc, linkPath);
       linked++;
     } catch (err) {
       // Don't abort the whole scaffold for one bad symlink.
@@ -443,7 +444,7 @@ function installOpencodeSkillSymlinks(agentDir: string): number {
           }
         } catch { /* path likely doesn't exist; continue to symlink */ }
       }
-      symlinkSync(skillSrc, linkPath, 'dir');
+      createDirectoryLink(skillSrc, linkPath);
       linked++;
     } catch (err) {
       console.error(`    Warning: failed to symlink ${linkPath}: ${(err as Error).message}`);

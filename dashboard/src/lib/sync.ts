@@ -357,22 +357,28 @@ export function syncCostsLazy(): void {
 // Single-file sync (called by file watcher)
 // ---------------------------------------------------------------------------
 
+/** Normalize a filesystem path for platform-neutral structural matching. */
+function normalizeSeparators(filePath: string): string {
+  return filePath.replace(/\\/g, '/');
+}
+
 export function syncFile(filePath: string): void {
-  if (filePath.includes('/tasks/') && filePath.endsWith('.json')) {
+  const normalized = normalizeSeparators(filePath);
+  if (normalized.includes('/tasks/') && normalized.endsWith('.json')) {
     const org = extractOrgFromPath(filePath);
     if (org) syncTasks(org);
-  } else if (filePath.includes('/approvals/') && filePath.endsWith('.json')) {
+  } else if (normalized.includes('/approvals/') && normalized.endsWith('.json')) {
     const org = extractOrgFromPath(filePath);
     if (org) syncApprovals(org);
   } else if (
-    filePath.includes('/analytics/events/') &&
-    filePath.endsWith('.jsonl')
+    normalized.includes('/analytics/events/') &&
+    normalized.endsWith('.jsonl')
   ) {
     const { org, agent } = extractOrgAndAgentFromEventPath(filePath);
     if (org && agent) syncEvents(org, agent);
   } else if (
-    filePath.includes('/state/') &&
-    filePath.endsWith('heartbeat.json')
+    normalized.includes('/state/') &&
+    normalized.endsWith('heartbeat.json')
   ) {
     const agent = extractAgentFromStatePath(filePath);
     if (agent) syncHeartbeat(agent);
@@ -384,20 +390,20 @@ export function syncFile(filePath: string): void {
 // ---------------------------------------------------------------------------
 
 export function extractOrgFromPath(filePath: string): string | null {
-  const match = filePath.match(/\/orgs\/([^/]+)\//);
+  const match = normalizeSeparators(filePath).match(/\/orgs\/([^/]+)\//);
   return match ? match[1] : null;
 }
 
 export function extractOrgAndAgentFromEventPath(
   filePath: string,
 ): { org: string | null; agent: string | null } {
-  const match = filePath.match(
+  const match = normalizeSeparators(filePath).match(
     /\/orgs\/([^/]+)\/analytics\/events\/([^/]+)\//,
   );
   return { org: match?.[1] ?? null, agent: match?.[2] ?? null };
 }
 
 export function extractAgentFromStatePath(filePath: string): string | null {
-  const match = filePath.match(/\/state\/([^/]+)\//);
+  const match = normalizeSeparators(filePath).match(/\/state\/([^/]+)\//);
   return match ? match[1] : null;
 }

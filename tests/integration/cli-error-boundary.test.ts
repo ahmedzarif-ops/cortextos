@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 
 // Regression test for the CLI error boundary. Before the fix, src/cli/index.ts
@@ -11,11 +12,14 @@ import { join } from 'node:path';
 // and exit(1). We run the real source via tsx so no prior build step is needed.
 
 const ROOT = join(__dirname, '..', '..');
-const TSX = join(ROOT, 'node_modules', '.bin', 'tsx');
+const require = createRequire(import.meta.url);
+const TSX = require.resolve('tsx/cli');
 const ENTRY = join(ROOT, 'src', 'cli', 'index.ts');
 
 function runCli(args: string[]) {
-  return spawnSync(TSX, [ENTRY, ...args], { encoding: 'utf8', cwd: ROOT });
+  // Invoke JavaScript through Node instead of relying on platform-specific npm
+  // shims (`tsx` on Unix, `tsx.cmd` on Windows).
+  return spawnSync(process.execPath, [TSX, ENTRY, ...args], { encoding: 'utf8', cwd: ROOT });
 }
 
 const NO_STACK = /^\s+at\s.+\(/m; // a JS stack frame line

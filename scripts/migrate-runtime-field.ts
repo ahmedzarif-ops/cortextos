@@ -23,7 +23,7 @@
  * planned change set so a human can sign off before any file is written.
  */
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from 'fs';
-import { join } from 'path';
+import { join, relative } from 'path';
 
 interface MigrationResult {
   path: string;
@@ -94,8 +94,10 @@ export function injectRuntimeField(cfg: Record<string, unknown>): Record<string,
 
 export function migrateConfig(path: string, root: string): MigrationResult {
   // org / agent are derived from the path so the dry-run output is human-scannable.
-  const rel = path.startsWith(root) ? path.slice(root.length + 1) : path;
-  const parts = rel.split('/');
+  // path.relative handles drive roots, casing, and the native separator; the
+  // regex also accepts a synthetic path authored on the other platform.
+  const rel = relative(root, path);
+  const parts = rel.split(/[\\/]/);
   const org = parts[1] ?? '?';
   const agent = parts[3] ?? '?';
 
@@ -108,7 +110,7 @@ export function migrateConfig(path: string, root: string): MigrationResult {
 
   let cfg: Record<string, unknown>;
   try {
-    cfg = JSON.parse(raw) as Record<string, unknown>;
+    cfg = JSON.parse(raw.replace(/^\uFEFF/, '')) as Record<string, unknown>;
   } catch {
     return { path, org, agent, action: 'skip-not-json' };
   }
@@ -121,9 +123,10 @@ export function migrateConfig(path: string, root: string): MigrationResult {
   }
 
   const next = injectRuntimeField(cfg);
+  const newline = raw.includes('\r\n') ? '\r\n' : '\n';
   return {
     path, org, agent, action: 'add-runtime',
-    after: JSON.stringify(next, null, 2) + '\n',
+    after: JSON.stringify(next, null, 2).replace(/\n/g, newline) + newline,
   };
 }
 
