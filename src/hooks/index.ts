@@ -4,7 +4,7 @@
  */
 
 import { readFileSync, existsSync, watch, statSync, unlinkSync, mkdirSync, realpathSync, lstatSync } from 'fs';
-import { join, resolve, sep, dirname, basename } from 'path';
+import { join, resolve, relative, isAbsolute, sep, dirname, basename } from 'path';
 import { homedir } from 'os';
 import * as crypto from 'crypto';
 
@@ -252,9 +252,21 @@ export function isClaudeDirOperation(
   // Canonicalize the agent dir first (resolves legitimate symlinks on the install
   // path, e.g. /tmp -> /private/tmp), so the .claude subtree below it is the only
   // thing left to vet.
-  const canonAgentDir = canonicalizePath(resolve(base));
+  const absoluteAgentDir = resolve(base);
+  const canonAgentDir = canonicalizePath(absoluteAgentDir);
   const claudeRoot = join(canonAgentDir, '.claude');
-  const target = resolve(canonAgentDir, filePath);
+  const absoluteTarget = resolve(absoluteAgentDir, filePath);
+
+  // Rebase a target expressed through the caller's (possibly symlinked)
+  // spelling of agentDir onto its canonical spelling. This matters on macOS,
+  // where temp paths commonly enter as /var/... but realpath to /private/var/...
+  // and on any platform where the agent directory itself is a symlink.
+  const relFromAgent = relative(absoluteAgentDir, absoluteTarget);
+  const lexicallyInsideAgent = relFromAgent === '' ||
+    (!relFromAgent.startsWith(`..${sep}`) && relFromAgent !== '..' && !isAbsolute(relFromAgent));
+  const target = lexicallyInsideAgent
+    ? resolve(canonAgentDir, relFromAgent)
+    : canonicalizePath(absoluteTarget);
 
   // Lexical containment within the agent's own .claude/.
   if (target !== claudeRoot && !target.startsWith(claudeRoot + sep)) return false;

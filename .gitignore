@@ -36,6 +36,7 @@ agents/*/memory/
 # Test artifacts
 test-results/
 *.log
+/.cortextOS/
 # Spurious directory created when ${APPDATA} env var unexpanded during npm link on Windows
 ${APPDATA}/
 

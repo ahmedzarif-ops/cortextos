@@ -16,6 +16,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const mockReadCrons  = vi.fn();
 const mockUpdateCron = vi.fn();
+const mockReadCronState = vi.fn();
 // readCronsWithStatus is what cron-scheduler actually calls (post-iter-9).
 // By default it mirrors mockReadCrons with corrupt:false so existing tests
 // keep working.  Tests that need to assert the corruption path can override
@@ -31,6 +32,14 @@ vi.mock('../../../src/bus/crons.js', () => ({
   readCronsWithStatus: (...args: unknown[]) => mockReadCronsWithStatus(...args),
   updateCron: (...args: unknown[]) => mockUpdateCron(...args),
   cronsFileMtimeMs: (...args: unknown[]) => mockCronsFileMtimeMs(...args),
+}));
+
+// CronScheduler also consults cron-state.json when calculating catch-up
+// timing. Keep that read inside the test boundary too: otherwise a developer's
+// real ~/.cortextos state for "test-agent" can change fake-timer outcomes.
+vi.mock('../../../src/bus/cron-state.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/bus/cron-state.js')>()),
+  readCronState: (...args: unknown[]) => mockReadCronState(...args),
 }));
 
 // ---------------------------------------------------------------------------
@@ -191,6 +200,7 @@ describe('CronScheduler', () => {
     fired  = [];
     mockReadCrons.mockReset();
     mockUpdateCron.mockReset();
+    mockReadCronState.mockReset();
     mockReadCronsWithStatus.mockReset();
     mockCronsFileMtimeMs.mockReset();
     // Default: readCronsWithStatus reflects whatever readCrons returns
@@ -202,6 +212,7 @@ describe('CronScheduler', () => {
     // Default: a stable crons.json mtime so existing tests never trigger the
     // tick loop's durable-edit reload.
     mockCronsFileMtimeMs.mockReturnValue(1000);
+    mockReadCronState.mockReturnValue({ version: 1, crons: [] });
 
     scheduler = new CronScheduler({
       agentName: 'test-agent',
