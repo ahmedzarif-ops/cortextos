@@ -312,22 +312,6 @@ function gitOutput(frameworkRoot: string, args: string[]): string | null {
   return result.stdout.trim();
 }
 
-function sameRealPath(first: string, second: string): boolean {
-  try {
-    const firstReal = realpathSync(first);
-    const secondReal = realpathSync(second);
-    // NTFS path identity is case-insensitive in the supported Windows setup.
-    // Git for Windows and Node can report the same drive/root with different
-    // casing (notably under hosted service accounts), so byte comparison
-    // rejects valid repository provenance there.
-    return process.platform === 'win32'
-      ? firstReal.toLowerCase() === secondReal.toLowerCase()
-      : firstReal === secondReal;
-  } catch {
-    return false;
-  }
-}
-
 function resolveFrameworkRoot(options: CollectLegacyStatusOptions): string | null {
   const home = options.homeDir ?? homedir();
   const cwd = options.cwd ?? process.cwd();
@@ -831,9 +815,16 @@ export async function collectLegacyStatus(
       });
     }
 
-    const repositoryRoot = gitOutput(frameworkRoot, ['rev-parse', '--show-toplevel']);
-    const repositoryBound = repositoryRoot !== null
-      && sameRealPath(repositoryRoot, frameworkRoot);
+    // Prove that the validated framework cwd itself is the repository root
+    // without comparing absolute path strings. On Windows, Git and Node can
+    // canonicalize the same hosted-runner temp junction through different
+    // aliases. An inside-work-tree result plus an empty repository-relative
+    // prefix is the native Git proof that cwd is exactly the work-tree root.
+    const insideWorkTree = gitOutput(frameworkRoot, ['rev-parse', '--is-inside-work-tree']);
+    const repositoryPrefix = insideWorkTree === 'true'
+      ? gitOutput(frameworkRoot, ['rev-parse', '--show-prefix'])
+      : null;
+    const repositoryBound = insideWorkTree === 'true' && repositoryPrefix === '';
     sourceCommit = repositoryBound ? gitOutput(frameworkRoot, ['rev-parse', 'HEAD']) : null;
     if (repositoryBound && sourceCommit && /^[a-f0-9]{40,64}$/i.test(sourceCommit)) {
       gitBacked = true;

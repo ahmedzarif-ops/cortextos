@@ -306,7 +306,7 @@ describe('legacy lifecycle status collector', () => {
   });
 
   it.runIf(process.platform === 'win32')(
-    'treats differently-cased Windows repository paths as the same canonical root',
+    'binds a differently-cased Windows cwd to the repository root without textual path comparison',
     async () => {
       const { frameworkRoot, ctxRoot } = makeFixture();
       execFileSync('git', ['init'], { cwd: frameworkRoot, stdio: 'ignore' });
