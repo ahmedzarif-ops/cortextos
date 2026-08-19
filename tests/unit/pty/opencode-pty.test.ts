@@ -281,6 +281,26 @@ describe('OpencodePTY', () => {
 
     pty.getOutputBuffer().push('Ask anything');
     expect(pty.getOutputBuffer().isBootstrapped()).toBe(true);
+
+    const currentTui = new OpencodePTY(mockEnv, {});
+    expect(currentTui.getOutputBuffer().isBootstrapped()).toBe(false);
+    currentTui.getOutputBuffer().push('ctrl+p commands');
+    expect(currentTui.getOutputBuffer().isBootstrapped()).toBe(true);
+  });
+
+  it('does not inherit Claude fallback readiness without OpenCode chat chrome', async () => {
+    vi.useFakeTimers();
+    try {
+      const pty = new OpencodePTY(mockEnv, {});
+      installSpawnMock(pty);
+      await pty.spawn('fresh', '');
+      pty.getOutputBuffer().push('OpenCode rendered frame\n');
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(pty.isReadyForMessages()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('injects the startup prompt only after real TUI output is quiescent', async () => {

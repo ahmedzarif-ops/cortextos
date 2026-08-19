@@ -148,6 +148,30 @@ describe('AgentPTY first-run wedge detection (awaiting interactive confirmation)
   });
 });
 
+describe('AgentPTY readiness fallback for current Claude terminal chrome', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+
+  it('becomes ready after bounded real output when no first-run gate is visible', async () => {
+    const pty = newPty({});
+    await pty.spawn('continue', 'P');
+    mockPty.onData.mock.calls.at(-1)?.[0]('Claude Code\nCrystallizing...');
+
+    expect(pty.isReadyForMessages()).toBe(false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(pty.isReadyForMessages()).toBe(true);
+  });
+
+  it('never uses the fallback while a recognized first-run gate is visible', async () => {
+    const pty = newPty({});
+    await pty.spawn('fresh', 'P');
+    mockPty.onData.mock.calls.at(-1)?.[0]('Bypass Permissions mode ... 2. Yes, I accept');
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(pty.isReadyForMessages()).toBe(false);
+  });
+});
+
 describe('AgentPTY broadened auto-accept token match (rec B)', () => {
   beforeEach(() => { vi.useFakeTimers(); mockPty.write.mockClear(); });
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });

@@ -36,9 +36,9 @@ export class OutputBuffer {
   private chunks: string[] = [];
   private maxChunks: number;
   private logPath: string | null;
-  private bootstrapPattern: string;
+  private bootstrapPattern: string | RegExp;
 
-  constructor(maxChunks: number = 1000, logPath?: string, bootstrapPattern?: string) {
+  constructor(maxChunks: number = 1000, logPath?: string, bootstrapPattern?: string | RegExp) {
     this.maxChunks = maxChunks;
     this.logPath = logPath || null;
     this.bootstrapPattern = bootstrapPattern || 'permissions';
@@ -123,6 +123,13 @@ export class OutputBuffer {
       // lowercase occurrence in the pre-approved tools explanation), so a
       // bare substring falsely marks those blocking screens as bootstrapped.
       return /permissions\s*:\s*[a-z-]+/i.test(cleaned);
+    }
+
+    if (this.bootstrapPattern instanceof RegExp) {
+      // Reset for deterministic repeated probes if an adapter ever supplies a
+      // stateful global expression.
+      this.bootstrapPattern.lastIndex = 0;
+      return this.bootstrapPattern.test(cleaned);
     }
 
     return cleaned.includes(this.bootstrapPattern);

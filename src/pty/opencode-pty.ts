@@ -8,7 +8,9 @@ import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { stripControlChars } from '../utils/validate.js';
 import { terminateProcessTree } from '../platform/process.js';
 
-const OPENCODE_BOOTSTRAP_PATTERN = 'Ask anything';
+// OpenCode has used both strings for the persistent chat input across recent
+// releases. Either one is the same native TUI readiness contract.
+const OPENCODE_BOOTSTRAP_PATTERN = /Ask anything|ctrl\+p commands/i;
 const OPENCODE_SESSION_MARKER = 'opencode-session.json';
 const OPENCODE_PROCESS_MARKER = 'opencode-process.json';
 const STARTUP_INJECT_MAX_ATTEMPTS = 60;

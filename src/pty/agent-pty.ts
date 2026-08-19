@@ -26,6 +26,13 @@ interface IPtySpawnOptions {
 
 type SpawnFn = (file: string, args: string[], options: IPtySpawnOptions) => IPty;
 
+// Claude's terminal chrome has changed across releases. The historical
+// `permissions: <mode>` status bar remains the strongest ready signal, but
+// current Windows builds can omit it entirely after a continued session. A
+// bounded fallback avoids holding the inbox for the full checker timeout once
+// the PTY is alive, producing output, and not displaying a first-run gate.
+const OUTPUT_READY_FALLBACK_MS = 10_000;
+
 /**
  * Manages a single Claude Code PTY session.
  * Replaces the tmux session management in agent-wrapper.sh.
@@ -41,11 +48,17 @@ export class AgentPTY {
   protected config: AgentConfig;
   private onExitHandler: ((exitCode: number, signal?: number) => void) | null = null;
   private spawnFn: SpawnFn | null = null;
+  private firstOutputAtMs = 0;
+  private allowOutputReadyFallback: boolean;
 
-  constructor(env: CtxEnv, config: AgentConfig, logPath?: string, bootstrapPattern?: string) {
+  constructor(env: CtxEnv, config: AgentConfig, logPath?: string, bootstrapPattern?: string | RegExp) {
     this.env = env;
     this.config = config;
     this.outputBuffer = new OutputBuffer(1000, logPath, bootstrapPattern);
+    // Only Claude uses the version-tolerant fallback. Other terminal adapters
+    // provide their own explicit marker (for example Hermes's prompt and
+    // OpenCode's chat chrome) and must not inherit Claude-specific semantics.
+    this.allowOutputReadyFallback = bootstrapPattern === undefined || bootstrapPattern === 'permissions';
   }
 
   /**
@@ -175,9 +188,13 @@ export class AgentPTY {
     });
 
     this._alive = true;
+    this.firstOutputAtMs = 0;
 
     // Set up output capture
     this.pty.onData((data: string) => {
+      if (this.firstOutputAtMs === 0 && data.length > 0) {
+        this.firstOutputAtMs = Date.now();
+      }
       this.outputBuffer.push(data);
     });
 
@@ -454,6 +471,25 @@ export class AgentPTY {
    */
   getOutputBuffer(): OutputBuffer {
     return this.outputBuffer;
+  }
+
+  /**
+   * Return whether an inbox/Telegram turn can safely be delivered.
+   *
+   * Prefer the runtime's explicit terminal marker. Claude releases that omit
+   * their old status bar get a conservative, bounded fallback only after real
+   * output has been observed and no known blocking first-run screen is visible.
+   */
+  isReadyForMessages(): boolean {
+    if (this.outputBuffer.isBootstrapped()) return true;
+    if (!this.allowOutputReadyFallback || !this._alive || this.firstOutputAtMs === 0 || this._awaitingInteractiveConfirmation) {
+      return false;
+    }
+
+    const recent = stripAnsiSync(this.outputBuffer.getRecent());
+    if (this.detectFirstRunPrompt(recent) !== null) return false;
+
+    return Date.now() - this.firstOutputAtMs >= OUTPUT_READY_FALLBACK_MS;
   }
 
   // first-run observability fix: true only while genuinely wedged — AND-gated with

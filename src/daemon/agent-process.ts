@@ -450,7 +450,11 @@ export class AgentProcess {
    * Check if the agent has bootstrapped (ready for messages).
    */
   isBootstrapped(): boolean {
-    return this.pty?.getOutputBuffer().isBootstrapped() ?? false;
+    if (!this.pty) return false;
+    if ('isReadyForMessages' in this.pty && typeof this.pty.isReadyForMessages === 'function') {
+      return this.pty.isReadyForMessages();
+    }
+    return this.pty.getOutputBuffer().isBootstrapped();
   }
 
   /**
