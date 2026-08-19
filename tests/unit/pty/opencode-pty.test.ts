@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { join } from 'path';
+import { homedir } from 'os';
 
 const fsMocks = {
   existsSync: vi.fn().mockReturnValue(false),
@@ -8,6 +9,8 @@ const fsMocks = {
   unlinkSync: vi.fn(),
   readFileSync: vi.fn(),
   readdirSync: vi.fn().mockReturnValue([]),
+  copyFileSync: vi.fn(),
+  chmodSync: vi.fn(),
 };
 
 let spawnCall: { file: string; args: string[]; options: any } | null = null;
@@ -30,6 +33,8 @@ vi.mock('fs', async () => {
     get unlinkSync() { return fsMocks.unlinkSync; },
     get readFileSync() { return fsMocks.readFileSync; },
     get readdirSync() { return fsMocks.readdirSync; },
+    get copyFileSync() { return fsMocks.copyFileSync; },
+    get chmodSync() { return fsMocks.chmodSync; },
   };
 });
 
@@ -40,7 +45,8 @@ vi.mock('node-pty', () => ({
   }),
 }));
 
-const { OpencodePTY, opencodeSessionExists } = await import('../../../src/pty/opencode-pty.js');
+const { OpencodePTY, opencodeSessionExists, resolveOpencodeBinary } = await import('../../../src/pty/opencode-pty.js');
+const { terminateProcessTree } = await import('../../../src/platform/process.js');
 
 const mockEnv = {
   instanceId: 'test',
@@ -51,6 +57,13 @@ const mockEnv = {
   org: 'acme',
   projectRoot: '/tmp/fw',
 };
+const expectedAgentConfigDir = join(mockEnv.agentDir, '.opencode');
+const expectedAgentEnv = join(mockEnv.agentDir, '.env');
+const expectedOrgSecrets = join(mockEnv.projectRoot, 'orgs', mockEnv.org, 'secrets.env');
+const expectedStateDir = join(mockEnv.ctxRoot, 'state', mockEnv.agentName);
+const expectedOpencodeRoot = join(expectedStateDir, 'opencode');
+const expectedProcessMarker = join(expectedStateDir, 'opencode-process.json');
+const expectedSessionMarker = join(expectedStateDir, 'opencode-session.json');
 
 beforeEach(() => {
   spawnCall = null;
@@ -64,6 +77,8 @@ beforeEach(() => {
   fsMocks.unlinkSync.mockReset();
   fsMocks.readFileSync.mockReset();
   fsMocks.readdirSync.mockReset().mockReturnValue([]);
+  fsMocks.copyFileSync.mockReset();
+  fsMocks.chmodSync.mockReset();
 });
 
 describe('OpencodePTY', () => {
@@ -79,6 +94,14 @@ describe('OpencodePTY', () => {
   it('returns opencode as the binary name', () => {
     const pty = new OpencodePTY(mockEnv, {});
     expect((pty as unknown as { getBinaryName(): string }).getBinaryName()).toBe('opencode');
+  });
+
+  it('resolves the official npm package native executable on Windows', () => {
+    const npmBin = 'C:\\ProgramData\\cortextos\\npm-global';
+    const nativeExe = `${npmBin}\\node_modules\\opencode-ai\\bin\\opencode.exe`;
+
+    expect(resolveOpencodeBinary('win32', npmBin, (candidate) => candidate === nativeExe))
+      .toBe(nativeExe);
   });
 
   it('builds fresh args with --model and --agent but no launch-time prompt', () => {
@@ -124,7 +147,7 @@ describe('OpencodePTY', () => {
 
     expect(spawnCall?.file).toBe('opencode');
     expect(spawnCall?.options.env.OPENCODE_CONFIG_DIR)
-      .toBe('/tmp/fw/orgs/acme/agents/opencode-agent/.opencode');
+      .toBe(expectedAgentConfigDir);
   });
 
   it('isolates OpenCode data, config, state, and cache under cortextOS agent state', async () => {
@@ -133,19 +156,45 @@ describe('OpencodePTY', () => {
     await pty.spawn('fresh', 'boot');
 
     expect(spawnCall?.options.env.XDG_DATA_HOME)
-      .toBe('/tmp/ctx/state/opencode-agent/opencode/data');
+      .toBe(join(expectedOpencodeRoot, 'data'));
     expect(spawnCall?.options.env.XDG_CONFIG_HOME)
-      .toBe('/tmp/ctx/state/opencode-agent/opencode/config');
+      .toBe(join(expectedOpencodeRoot, 'config'));
     expect(spawnCall?.options.env.XDG_STATE_HOME)
-      .toBe('/tmp/ctx/state/opencode-agent/opencode/state');
+      .toBe(join(expectedOpencodeRoot, 'state'));
     expect(spawnCall?.options.env.XDG_CACHE_HOME)
-      .toBe('/tmp/ctx/state/opencode-agent/opencode/cache');
+      .toBe(join(expectedOpencodeRoot, 'cache'));
+  });
+
+  it('seeds missing isolated OpenCode auth from the native user login without exposing it', async () => {
+    const homeAuth = join(homedir(), '.local', 'share', 'opencode', 'auth.json');
+    const isolatedAuth = join(expectedOpencodeRoot, 'data', 'opencode', 'auth.json');
+    fsMocks.existsSync.mockImplementation((path: string) => path === homeAuth);
+
+    const pty = new OpencodePTY(mockEnv, {});
+    installSpawnMock(pty);
+    await pty.spawn('fresh', '');
+
+    expect(fsMocks.copyFileSync).toHaveBeenCalledWith(homeAuth, isolatedAuth);
+    expect(fsMocks.chmodSync).toHaveBeenCalledWith(isolatedAuth, 0o600);
+  });
+
+  it('preserves an existing isolated OpenCode credential instead of overwriting it', async () => {
+    const homeAuth = join(homedir(), '.local', 'share', 'opencode', 'auth.json');
+    const isolatedAuth = join(expectedOpencodeRoot, 'data', 'opencode', 'auth.json');
+    fsMocks.existsSync.mockImplementation((path: string) =>
+      path === homeAuth || path === isolatedAuth);
+
+    const pty = new OpencodePTY(mockEnv, {});
+    installSpawnMock(pty);
+    await pty.spawn('fresh', '');
+
+    expect(fsMocks.copyFileSync).not.toHaveBeenCalled();
   });
 
   it('overrides inherited XDG roots so OpenCode state stays agent-isolated by default', async () => {
-    fsMocks.existsSync.mockImplementation((path: string) => path === '/tmp/fw/orgs/acme/agents/opencode-agent/.env');
+    fsMocks.existsSync.mockImplementation((path: string) => path === expectedAgentEnv);
     fsMocks.readFileSync.mockImplementation((path: string) => {
-      if (path === '/tmp/fw/orgs/acme/agents/opencode-agent/.env') {
+      if (path === expectedAgentEnv) {
         return [
           'XDG_DATA_HOME=/global/data',
           'XDG_CONFIG_HOME=/global/config',
@@ -162,19 +211,19 @@ describe('OpencodePTY', () => {
     await pty.spawn('fresh', 'boot');
 
     expect(spawnCall?.options.env.XDG_DATA_HOME)
-      .toBe('/tmp/ctx/state/opencode-agent/opencode/data');
+      .toBe(join(expectedOpencodeRoot, 'data'));
     expect(spawnCall?.options.env.XDG_CONFIG_HOME)
-      .toBe('/tmp/ctx/state/opencode-agent/opencode/config');
+      .toBe(join(expectedOpencodeRoot, 'config'));
     expect(spawnCall?.options.env.XDG_STATE_HOME)
-      .toBe('/tmp/ctx/state/opencode-agent/opencode/state');
+      .toBe(join(expectedOpencodeRoot, 'state'));
     expect(spawnCall?.options.env.XDG_CACHE_HOME)
-      .toBe('/tmp/ctx/state/opencode-agent/opencode/cache');
+      .toBe(join(expectedOpencodeRoot, 'cache'));
   });
 
   it('supports an explicit OPENCODE_XDG_ROOT override for custom isolated roots', async () => {
-    fsMocks.existsSync.mockImplementation((path: string) => path === '/tmp/fw/orgs/acme/agents/opencode-agent/.env');
+    fsMocks.existsSync.mockImplementation((path: string) => path === expectedAgentEnv);
     fsMocks.readFileSync.mockImplementation((path: string) => {
-      if (path === '/tmp/fw/orgs/acme/agents/opencode-agent/.env') {
+      if (path === expectedAgentEnv) {
         return 'OPENCODE_XDG_ROOT=/custom/opencode\n';
       }
       return '';
@@ -184,10 +233,10 @@ describe('OpencodePTY', () => {
     installSpawnMock(pty);
     await pty.spawn('fresh', 'boot');
 
-    expect(spawnCall?.options.env.XDG_DATA_HOME).toBe('/custom/opencode/data');
-    expect(spawnCall?.options.env.XDG_CONFIG_HOME).toBe('/custom/opencode/config');
-    expect(spawnCall?.options.env.XDG_STATE_HOME).toBe('/custom/opencode/state');
-    expect(spawnCall?.options.env.XDG_CACHE_HOME).toBe('/custom/opencode/cache');
+    expect(spawnCall?.options.env.XDG_DATA_HOME).toBe(join('/custom/opencode', 'data'));
+    expect(spawnCall?.options.env.XDG_CONFIG_HOME).toBe(join('/custom/opencode', 'config'));
+    expect(spawnCall?.options.env.XDG_STATE_HOME).toBe(join('/custom/opencode', 'state'));
+    expect(spawnCall?.options.env.XDG_CACHE_HOME).toBe(join('/custom/opencode', 'cache'));
   });
 
   it('keeps OPENCODE_CONFIG_DIR under the agent directory even when working_directory differs', async () => {
@@ -200,13 +249,13 @@ describe('OpencodePTY', () => {
 
     expect(spawnCall?.options.cwd).toBe('/tmp/project-checkout');
     expect(spawnCall?.options.env.OPENCODE_CONFIG_DIR)
-      .toBe('/tmp/fw/orgs/acme/agents/opencode-agent/.opencode');
+      .toBe(expectedAgentConfigDir);
   });
 
   it('maps GEMINI_API_KEY to OpenCode Google provider env name when needed', async () => {
-    fsMocks.existsSync.mockImplementation((path: string) => path === '/tmp/fw/orgs/acme/secrets.env');
+    fsMocks.existsSync.mockImplementation((path: string) => path === expectedOrgSecrets);
     fsMocks.readFileSync.mockImplementation((path: string) => {
-      if (path === '/tmp/fw/orgs/acme/secrets.env') return 'GEMINI_API_KEY=gemini-secret\n';
+      if (path === expectedOrgSecrets) return 'GEMINI_API_KEY=gemini-secret\n';
       return '';
     });
 
@@ -222,9 +271,9 @@ describe('OpencodePTY', () => {
     installSpawnMock(pty);
     await pty.spawn('fresh', 'boot');
 
-    expect(fsMocks.mkdirSync).toHaveBeenCalledWith('/tmp/ctx/state/opencode-agent', { recursive: true });
+    expect(fsMocks.mkdirSync).toHaveBeenCalledWith(expectedStateDir, { recursive: true });
     expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
-      '/tmp/ctx/state/opencode-agent/opencode-session.json',
+      expectedSessionMarker,
       expect.stringContaining('"runtime": "opencode"'),
       'utf-8',
     );
@@ -538,7 +587,8 @@ describe('OpencodePTY', () => {
     }
   });
 
-  it('SIGTERMs a stale recorded OpenCode process, confirms dead, and removes the marker', async () => {
+  it.skipIf(process.platform === 'win32')(
+    'SIGTERMs a stale recorded OpenCode process, confirms dead, and removes the marker', async () => {
     // Simulate a process that exits on SIGTERM: signal-0 probes report alive
     // until SIGTERM lands, then ESRCH (gone). No SIGKILL escalation is needed.
     let terminated = false;
@@ -554,10 +604,10 @@ describe('OpencodePTY', () => {
       }
       return true;
     }) as typeof process.kill);
-    fsMocks.existsSync.mockImplementation((path: string) =>
-      path === '/tmp/ctx/state/opencode-agent/opencode-process.json');
+    const markerPath = join(mockEnv.ctxRoot, 'state', mockEnv.agentName, 'opencode-process.json');
+    fsMocks.existsSync.mockImplementation((path: string) => path === markerPath);
     fsMocks.readFileSync.mockImplementation((path: string) => {
-      if (path === '/tmp/ctx/state/opencode-agent/opencode-process.json') {
+      if (path === markerPath) {
         return JSON.stringify({ pid: 24680 });
       }
       return '';
@@ -570,13 +620,14 @@ describe('OpencodePTY', () => {
 
       expect(killSpy).toHaveBeenCalledWith(24680, 'SIGTERM');
       expect(killSpy).not.toHaveBeenCalledWith(24680, 'SIGKILL');
-      expect(fsMocks.unlinkSync).toHaveBeenCalledWith('/tmp/ctx/state/opencode-agent/opencode-process.json');
+      expect(fsMocks.unlinkSync).toHaveBeenCalledWith(markerPath);
     } finally {
       killSpy.mockRestore();
     }
   });
 
-  it('escalates to SIGKILL when the stale process survives SIGTERM', async () => {
+  it.skipIf(process.platform === 'win32')(
+    'escalates to SIGKILL when the stale process survives SIGTERM', async () => {
     // signal-0 always reports alive until SIGKILL lands — the reap must escalate
     // and still remove the marker after confirming death.
     let killed = false;
@@ -592,10 +643,10 @@ describe('OpencodePTY', () => {
       }
       return true; // SIGTERM is a no-op for this process
     }) as typeof process.kill);
-    fsMocks.existsSync.mockImplementation((path: string) =>
-      path === '/tmp/ctx/state/opencode-agent/opencode-process.json');
+    const markerPath = join(mockEnv.ctxRoot, 'state', mockEnv.agentName, 'opencode-process.json');
+    fsMocks.existsSync.mockImplementation((path: string) => path === markerPath);
     fsMocks.readFileSync.mockImplementation((path: string) => {
-      if (path === '/tmp/ctx/state/opencode-agent/opencode-process.json') {
+      if (path === markerPath) {
         return JSON.stringify({ pid: 24680 });
       }
       return '';
@@ -608,11 +659,32 @@ describe('OpencodePTY', () => {
 
       expect(killSpy).toHaveBeenCalledWith(24680, 'SIGTERM');
       expect(killSpy).toHaveBeenCalledWith(24680, 'SIGKILL');
-      expect(fsMocks.unlinkSync).toHaveBeenCalledWith('/tmp/ctx/state/opencode-agent/opencode-process.json');
+      expect(fsMocks.unlinkSync).toHaveBeenCalledWith(markerPath);
     } finally {
       killSpy.mockRestore();
     }
   }, 10000);
+
+  it('removes a stale marker when the recorded process is already gone on this host', async () => {
+    const markerPath = join(mockEnv.ctxRoot, 'state', mockEnv.agentName, 'opencode-process.json');
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation((() => {
+      const err = new Error('gone') as NodeJS.ErrnoException;
+      err.code = 'ESRCH';
+      throw err;
+    }) as typeof process.kill);
+    fsMocks.existsSync.mockImplementation((path: string) => path === markerPath);
+    fsMocks.readFileSync.mockImplementation((path: string) =>
+      path === markerPath ? JSON.stringify({ runtime: 'opencode', pid: 24680 }) : '');
+
+    try {
+      const pty = new OpencodePTY(mockEnv, {});
+      installSpawnMock(pty);
+      await pty.spawn('fresh', '');
+      expect(fsMocks.unlinkSync).toHaveBeenCalledWith(markerPath);
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
 
   it('removes the recorded OpenCode process marker on explicit kill', async () => {
     const pty = new OpencodePTY(mockEnv, {});
@@ -622,7 +694,62 @@ describe('OpencodePTY', () => {
     pty.kill();
 
     expect(mockPty.kill).toHaveBeenCalled();
-    expect(fsMocks.unlinkSync).toHaveBeenCalledWith('/tmp/ctx/state/opencode-agent/opencode-process.json');
+    expect(fsMocks.unlinkSync).toHaveBeenCalledWith(
+      join(mockEnv.ctxRoot, 'state', mockEnv.agentName, 'opencode-process.json'),
+    );
+  });
+});
+
+describe('native process tree termination', () => {
+  it('uses Windows taskkill tree mode and escalates to forced termination', async () => {
+    let alive = true;
+    let clock = 0;
+    const taskkill = vi.fn(async (_pid: number, force: boolean) => {
+      if (force) alive = false;
+    });
+    const signal = vi.fn((_pid: number, sig: NodeJS.Signals | 0) => {
+      expect(sig).toBe(0);
+      if (!alive) {
+        const err = new Error('gone') as NodeJS.ErrnoException;
+        err.code = 'ESRCH';
+        throw err;
+      }
+    });
+
+    const result = await terminateProcessTree(24680, {
+      termGraceMs: 20,
+      killGraceMs: 20,
+      pollIntervalMs: 5,
+    }, {
+      platform: 'win32',
+      signal,
+      runTaskkill: taskkill,
+      sleep: async (ms: number) => { clock += ms; },
+      now: () => clock,
+    });
+
+    expect(taskkill.mock.calls).toEqual([
+      [24680, false],
+      [24680, true],
+    ]);
+    expect(result).toEqual({ terminated: true, forced: true });
+  });
+
+  it('retains a truthful failure result when forced Windows tree termination cannot kill the pid', async () => {
+    let clock = 0;
+    const result = await terminateProcessTree(24680, {
+      termGraceMs: 10,
+      killGraceMs: 10,
+      pollIntervalMs: 5,
+    }, {
+      platform: 'win32',
+      signal: () => {},
+      runTaskkill: async () => {},
+      sleep: async (ms: number) => { clock += ms; },
+      now: () => clock,
+    });
+
+    expect(result).toEqual({ terminated: false, forced: true });
   });
 });
 

@@ -1,11 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
-import { join } from 'path';
-import { platform } from 'os';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
+import { join, win32 as win32Path } from 'path';
+import { homedir, platform } from 'os';
 import { AgentPTY } from './agent-pty.js';
 import { KEYS } from './inject.js';
 import { OpencodeContextReporter } from './opencode-context-reporter.js';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { stripControlChars } from '../utils/validate.js';
+import { terminateProcessTree } from '../platform/process.js';
 
 const OPENCODE_BOOTSTRAP_PATTERN = 'Ask anything';
 const OPENCODE_SESSION_MARKER = 'opencode-session.json';
@@ -34,25 +35,30 @@ const TELEGRAM_HEADER_PATTERN = /^=== TELEGRAM(?:\s+\w+)?\s+from[^\n]*\(chat_id:
 // so a wedged prior session could survive and keep re-holding its --continue
 // state. We now poll for exit, escalate to SIGKILL, and confirm-dead before
 // treating the process as reaped.
-const REAP_POLL_INTERVAL_MS = 200;
-const REAP_SIGTERM_GRACE_MS = 2000;
-const REAP_SIGKILL_GRACE_MS = 2000;
+export function resolveOpencodeBinary(
+  platformName: NodeJS.Platform,
+  pathValue: string | undefined,
+  fileExists: (path: string) => boolean = existsSync,
+): string {
+  if (platformName !== 'win32') return 'opencode';
 
-const reapSleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+  const pathDirs = (pathValue || '').split(';').filter(Boolean);
+  for (const dir of pathDirs) {
+    const directExe = win32Path.join(dir, 'opencode.exe');
+    if (fileExists(directExe)) return directExe;
 
-// OS-level pid liveness probe using the signal-0 idiom (mirrors the isPidAlive
-// helper in src/daemon/agent-manager.ts): signal 0 sends nothing, it only tests
-// existence + our permission to signal. ESRCH => the process is gone (dead);
-// EPERM => it exists but is owned elsewhere (alive). These are our own child
-// processes, so EPERM is not expected, but we honor the same semantics.
-function isReapTargetAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
+    // The official opencode-ai npm package installs a small opencode.cmd
+    // shim beside node_modules/opencode-ai/bin/opencode.exe. ConPTY launches
+    // native executables reliably; selecting the real binary also avoids a
+    // cmd.exe layer whose descendants are harder to stop as one process tree.
+    const npmPackageExe = win32Path.join(dir, 'node_modules', 'opencode-ai', 'bin', 'opencode.exe');
+    if (fileExists(npmPackageExe)) return npmPackageExe;
   }
+
+  for (const dir of pathDirs) {
+    if (fileExists(win32Path.join(dir, 'opencode.cmd'))) return 'opencode.cmd';
+  }
+  return 'opencode';
 }
 
 /**
@@ -92,17 +98,7 @@ export class OpencodePTY extends AgentPTY {
   }
 
   protected getBinaryName(): string {
-    if (platform() !== 'win32') return 'opencode';
-
-    const pathDirs = (process.env.PATH || '').split(';').filter(Boolean);
-    for (const ext of ['.exe', '.cmd']) {
-      for (const dir of pathDirs) {
-        if (existsSync(join(dir, `opencode${ext}`))) {
-          return `opencode${ext}`;
-        }
-      }
-    }
-    return 'opencode';
+    return resolveOpencodeBinary(platform(), process.env.PATH);
   }
 
   protected buildClaudeArgs(mode: 'fresh' | 'continue', prompt: string): string[] {
@@ -136,6 +132,7 @@ export class OpencodePTY extends AgentPTY {
       mkdirSync(dir, { recursive: true });
       env[key] = dir;
     }
+    this.seedHostAuthentication(xdgDirs.XDG_DATA_HOME);
 
     if (!env['OPENCODE_CONFIG_DIR']) {
       const configDir = join(this.agentDir, '.opencode');
@@ -145,6 +142,36 @@ export class OpencodePTY extends AgentPTY {
 
     if (!env['GOOGLE_GENERATIVE_AI_API_KEY'] && env['GEMINI_API_KEY']) {
       env['GOOGLE_GENERATIVE_AI_API_KEY'] = env['GEMINI_API_KEY'];
+    }
+  }
+
+  /**
+   * OpenCode stores OAuth credentials below XDG_DATA_HOME. Since cortextOS
+   * deliberately gives each agent an isolated XDG tree, a normal host-level
+   * `opencode auth login` would otherwise disappear inside the daemon PTY.
+   * Seed only a missing isolated credential from the user's native OpenCode
+   * location; never overwrite agent-local credentials or log their contents.
+   */
+  private seedHostAuthentication(isolatedDataHome: string): void {
+    const hostAuthPath = join(homedir(), '.local', 'share', 'opencode', 'auth.json');
+    const isolatedAuthDir = join(isolatedDataHome, 'opencode');
+    const isolatedAuthPath = join(isolatedAuthDir, 'auth.json');
+    if (hostAuthPath === isolatedAuthPath || !existsSync(hostAuthPath) || existsSync(isolatedAuthPath)) {
+      return;
+    }
+
+    try {
+      mkdirSync(isolatedAuthDir, { recursive: true });
+      copyFileSync(hostAuthPath, isolatedAuthPath);
+      try {
+        chmodSync(isolatedAuthPath, 0o600);
+      } catch {
+        // Windows ACLs inherit from the user-owned state directory; chmod may
+        // be unsupported or only partially implemented there.
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`[opencode-pty] failed to seed isolated host authentication: ${message}`);
     }
   }
 
@@ -435,59 +462,34 @@ If it instructs you to send Telegram or bus output, run the required terminal co
   }
 
   private async cleanupStaleProcessMarker(): Promise<void> {
+    const markerPath = this.processMarkerPath();
+    if (!existsSync(markerPath)) return;
+
+    let parsed: { pid?: unknown };
     try {
-      const markerPath = this.processMarkerPath();
-      if (!existsSync(markerPath)) return;
-      const parsed = JSON.parse(readFileSync(markerPath, 'utf-8')) as { pid?: unknown };
-      const pid = typeof parsed.pid === 'number' ? parsed.pid : null;
-      if (pid && pid > 0 && pid !== process.pid) {
-        await this.terminateStaleProcess(pid);
+      parsed = JSON.parse(readFileSync(markerPath, 'utf-8')) as { pid?: unknown };
+    } catch {
+      // A corrupt marker cannot identify a process safely. Remove only the
+      // unusable marker; do not guess at a target.
+      try { unlinkSync(markerPath); } catch { /* already gone */ }
+      return;
+    }
+
+    const pid = typeof parsed.pid === 'number' ? parsed.pid : null;
+    if (pid && pid > 0 && pid !== process.pid) {
+      const result = await terminateProcessTree(pid);
+      if (!result.terminated) {
+        // Never erase the only recovery breadcrumb and start a duplicate PTY
+        // when the native OS confirms the old process is still alive.
+        throw new Error(`[opencode-pty] stale process tree ${pid} survived forced termination`);
       }
+    }
+
+    try {
       unlinkSync(markerPath);
-    } catch {
-      // A corrupt marker must not block the agent from starting.
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
-  }
-
-  /**
-   * Terminate a recorded stale OpenCode process and CONFIRM it is dead before
-   * returning: SIGTERM -> poll for exit -> SIGKILL escalation -> poll again.
-   * A bare fire-and-forget SIGTERM could leave a wedged prior session alive
-   * while its marker was already unlinked, so the next spawn ran alongside an
-   * orphan still holding the agent's session/state root. Bounded and best-effort:
-   * a target that survives even SIGKILL is logged, not allowed to block boot.
-   */
-  private async terminateStaleProcess(pid: number): Promise<void> {
-    if (!isReapTargetAlive(pid)) return;
-    try {
-      process.kill(pid, 'SIGTERM');
-    } catch {
-      // ESRCH (already gone) or EPERM — nothing more we can do; treat as reaped.
-      return;
-    }
-    if (await this.waitForProcessExit(pid, REAP_SIGTERM_GRACE_MS)) return;
-
-    try {
-      process.kill(pid, 'SIGKILL');
-    } catch {
-      return;
-    }
-    if (await this.waitForProcessExit(pid, REAP_SIGKILL_GRACE_MS)) return;
-
-    // Still alive after SIGKILL — do not block boot, but leave a breadcrumb.
-    this.getOutputBuffer().push(
-      `[opencode-pty] stale process ${pid} survived SIGKILL during reap; continuing boot\n`,
-    );
-  }
-
-  /** Poll until the pid is gone or the grace window elapses. Returns true if dead. */
-  private async waitForProcessExit(pid: number, graceMs: number): Promise<boolean> {
-    const deadline = Date.now() + graceMs;
-    while (Date.now() < deadline) {
-      if (!isReapTargetAlive(pid)) return true;
-      await reapSleep(REAP_POLL_INTERVAL_MS);
-    }
-    return !isReapTargetAlive(pid);
   }
 }
 

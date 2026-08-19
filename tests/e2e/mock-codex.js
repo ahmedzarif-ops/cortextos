@@ -2,15 +2,15 @@
 /**
  * Mock codex-app-server for E2E testing.
  *
- * Speaks the same WebSocket-over-Unix-socket JSON-RPC protocol as the real
- * `codex app-server` binary, but uses a deterministic in-memory state machine
+ * Speaks the same WebSocket JSON-RPC protocol as the real `codex app-server`
+ * binary over either a Unix socket or loopback TCP, but uses a deterministic in-memory state machine
  * so tests can drive lifecycle transitions without depending on a real codex
  * install. Mirrors `tests/e2e/mock-claude.js` for the codex runtime.
  *
  * Two usage modes:
  *
  *   1. Library: `const { startMockCodexServer } = require('./mock-codex.js');`
- *      Creates a server bound to a unix socket; tests connect with the real
+ *      Creates a server bound to a Unix socket or loopback TCP; tests connect with the real
  *      `WsUnixJsonRpcClient` and exercise the protocol end-to-end.
  *
  *   2. Binary: `node mock-codex.js app-server --listen unix://./codex.sock`
@@ -43,6 +43,8 @@ const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 class MockCodexServer {
   constructor(options = {}) {
     this.socketPath = options.socketPath;
+    this.host = options.host || '127.0.0.1';
+    this.port = options.port;
     this.skills = options.skills || [];
     this.tokenUsage = options.tokenUsage || {
       cachedInputTokens: 0,
@@ -65,16 +67,25 @@ class MockCodexServer {
 
   async listen() {
     if (this.server) return;
-    try { await unlink(this.socketPath); } catch { /* ok */ }
+    if (this.socketPath) {
+      try { await unlink(this.socketPath); } catch { /* ok */ }
+    }
 
     const server = net.createServer((socket) => this._handleConnection(socket));
     this.server = server;
     await new Promise((resolve, reject) => {
       server.once('error', reject);
-      server.listen(this.socketPath, () => {
+      const onListening = () => {
         server.off('error', reject);
+        const address = server.address();
+        if (address && typeof address === 'object') this.port = address.port;
         resolve();
-      });
+      };
+      if (this.socketPath) {
+        server.listen(this.socketPath, onListening);
+      } else {
+        server.listen({ host: this.host, port: this.port ?? 0 }, onListening);
+      }
     });
   }
 
@@ -89,7 +100,9 @@ class MockCodexServer {
       this.server = null;
       await new Promise((resolve) => server.close(() => resolve()));
     }
-    try { await unlink(this.socketPath); } catch { /* ok */ }
+    if (this.socketPath) {
+      try { await unlink(this.socketPath); } catch { /* ok */ }
+    }
   }
 
   /** Force the next inbound request (any method) to respond with a JSON-RPC error. */
@@ -343,26 +356,40 @@ if (require.main === module) {
     console.error('mock-codex: only `app-server` subcommand is supported');
     process.exit(1);
   }
-  let socketPath = null;
+  let listenArg = null;
   for (let i = 1; i < args.length; i += 1) {
     if (args[i] === '--listen' && args[i + 1]) {
-      const value = args[i + 1];
-      const match = value.match(/^unix:\/\/(?:\.\/)?(.+)$/);
-      socketPath = match ? match[1] : value;
+      listenArg = args[i + 1];
       i += 1;
     }
   }
-  if (!socketPath) {
-    console.error('mock-codex: --listen unix://./<socket> is required');
+  if (!listenArg) {
+    console.error('mock-codex: --listen unix://./<socket> or ws://127.0.0.1:<port> is required');
     process.exit(1);
   }
   const cwd = process.cwd();
   const path = require('path');
-  const resolved = path.isAbsolute(socketPath) ? socketPath : path.join(cwd, socketPath);
+  let serverOptions;
+  if (listenArg.startsWith('unix://')) {
+    const socketPath = listenArg.replace(/^unix:\/\/(?:\.\/)?/, '');
+    const resolved = path.isAbsolute(socketPath) ? socketPath : path.join(cwd, socketPath);
+    serverOptions = { socketPath: resolved };
+  } else {
+    const endpoint = new URL(listenArg);
+    if (endpoint.protocol !== 'ws:' || endpoint.hostname !== '127.0.0.1') {
+      console.error('mock-codex: only loopback ws://127.0.0.1:<port> is supported');
+      process.exit(1);
+    }
+    serverOptions = { host: endpoint.hostname, port: Number(endpoint.port) };
+  }
 
-  const server = new MockCodexServer({ socketPath: resolved });
+  const server = new MockCodexServer(serverOptions);
   server.listen().then(() => {
-    process.stdout.write(`[codex-app-server] ready socket=${resolved}\n`);
+    if (server.socketPath) {
+      process.stdout.write(`[codex-app-server] ready socket=${server.socketPath}\n`);
+    } else {
+      process.stdout.write(`codex app-server (WebSockets)\n  listening on: ws://${server.host}:${server.port}\n`);
+    }
   }).catch((err) => {
     console.error(`mock-codex: listen failed: ${err.message}`);
     process.exit(1);

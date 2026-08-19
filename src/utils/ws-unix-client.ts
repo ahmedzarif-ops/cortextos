@@ -1,6 +1,13 @@
 import { randomBytes, createHash } from 'crypto';
 import { Socket, createConnection } from 'net';
 
+export interface WsTcpEndpoint {
+  host: string;
+  port: number;
+}
+
+export type WsConnectTarget = string | WsTcpEndpoint;
+
 export interface JsonRpcRequest {
   id: number | string;
   method: string;
@@ -32,12 +39,13 @@ interface PendingRequest {
 }
 
 /**
- * Minimal WebSocket-over-Unix JSON-RPC client.
+ * Minimal WebSocket-over-stream JSON-RPC client.
  *
- * Codex app-server's `unix://` transport is WebSocket-framed. The JSON-RPC
- * payloads inside text frames are newline-delimited, matching the stdio
- * transport after the WebSocket layer is removed. This helper intentionally
- * uses Node built-ins only so the app-server adapter adds no runtime deps.
+ * Codex app-server's `unix://` and `ws://` transports use the same WebSocket
+ * framing. The JSON-RPC payloads inside text frames are newline-delimited,
+ * matching the stdio transport after the WebSocket layer is removed. This
+ * helper intentionally uses Node built-ins only so the app-server adapter adds
+ * no runtime deps. The historical class name is retained for API compatibility.
  */
 export class WsUnixJsonRpcClient {
   private socket: Socket | null = null;
@@ -46,12 +54,14 @@ export class WsUnixJsonRpcClient {
   private pending = new Map<number | string, PendingRequest>();
   private handlers: MessageHandler[] = [];
 
-  constructor(private readonly socketPath: string) {}
+  constructor(private readonly target: WsConnectTarget) {}
 
   async connect(): Promise<void> {
     if (this.socket) return;
 
-    const socket = createConnection(this.socketPath);
+    const socket = typeof this.target === 'string'
+      ? createConnection(this.target)
+      : createConnection(this.target);
     await new Promise<void>((resolve, reject) => {
       socket.once('connect', resolve);
       socket.once('error', reject);
@@ -88,7 +98,7 @@ export class WsUnixJsonRpcClient {
     socket.on('data', (chunk) => this.parseFrames(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
     socket.on('error', (err) => this.rejectAll(err));
     socket.on('close', () => {
-      this.rejectAll(new Error('WebSocket Unix socket closed'));
+      this.rejectAll(new Error('WebSocket transport closed'));
       this.socket = null;
     });
 
@@ -107,7 +117,7 @@ export class WsUnixJsonRpcClient {
         socket.destroy();
       }
     }
-    this.rejectAll(new Error('WebSocket Unix socket closed'));
+    this.rejectAll(new Error('WebSocket transport closed'));
   }
 
   onMessage(handler: MessageHandler): () => void {
@@ -119,7 +129,7 @@ export class WsUnixJsonRpcClient {
 
   request<T = unknown>(method: string, params?: unknown, timeoutMs = 30000): Promise<JsonRpcResponse<T>> {
     if (!this.socket || this.socket.destroyed) {
-      return Promise.reject(new Error('WebSocket Unix socket is not connected'));
+      return Promise.reject(new Error('WebSocket transport is not connected'));
     }
 
     const id = this.nextId++;
@@ -152,7 +162,7 @@ export class WsUnixJsonRpcClient {
 
   private send(message: JsonRpcMessage): void {
     if (!this.socket || this.socket.destroyed) {
-      throw new Error('WebSocket Unix socket is not connected');
+      throw new Error('WebSocket transport is not connected');
     }
     this.socket.write(this.encodeFrame(`${JSON.stringify(message)}\n`));
   }

@@ -1,7 +1,6 @@
 import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
-import { randomBytes } from 'crypto';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { OutputBuffer } from './output-buffer.js';
 import type { TelegramAPI } from '../telegram/api.js';
@@ -9,6 +8,13 @@ import { ensureDir, atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
 import { logEvent } from '../bus/event.js';
 import { WsUnixJsonRpcClient, type JsonRpcResponse } from '../utils/ws-unix-client.js';
+import { spawnHeadlessProcess } from '../platform/headless-process.js';
+import {
+  parseCodexLoopbackEndpoint,
+  resolveCodexAppServerCommand,
+  resolveCodexAppServerEndpoint,
+  type CodexAppServerEndpoint,
+} from './codex-app-server-endpoint.js';
 
 interface IPty {
   pid: number;
@@ -77,8 +83,6 @@ const TURN_PERMISSION_OVERRIDES = {
   sandboxPolicy: { type: 'dangerFullAccess' },
 } as const;
 
-const SOCKET_BASENAME = 'codex.sock';
-const SOCKET_PATH_WARN_BYTES = 100;
 const BOOTSTRAP_PATTERN = '[codex-app-server] ready';
 
 const SLASH_REWRITE_RE = /^\/([a-z][a-z0-9_-]*)(?:\s+([\s\S]*))?$/i;
@@ -88,10 +92,9 @@ const LOCAL_SLASH_COMMANDS = new Set(['goal']);
  * Codex app-server PTY adapter for cortextOS.
  *
  * Uses a persistent `codex app-server` process and speaks JSON-RPC over the
- * app-server's WebSocket-framed Unix socket transport. The approved default
- * socket is `$CTX_ROOT/state/<agent>/codex.sock`; if that resolved path is
- * longer than the conservative 100-byte Unix socket threshold, the adapter
- * falls back to `/tmp/cas-<short-uuid>.sock` and writes a state-dir pointer.
+ * app-server's WebSocket-framed transport. Unix hosts retain the established
+ * state-directory socket (with the short-path fallback); Windows uses Codex's
+ * native loopback WebSocket listener on an OS-assigned port.
  */
 export class CodexAppServerPTY {
   private _alive = false;
@@ -113,7 +116,8 @@ export class CodexAppServerPTY {
   private _config: AgentConfig;
   private _stateDir: string;
   private _cwd: string;
-  private _socketPath: string;
+  private _endpoint: CodexAppServerEndpoint;
+  private _socketPath: string | null;
   private _socketListenArg: string;
   private _socketCwd: string;
   private _threadStatePath: string;
@@ -130,10 +134,24 @@ export class CodexAppServerPTY {
     this._stateDir = join(env.ctxRoot, 'state', env.agentName);
     this._threadStatePath = join(this._stateDir, 'codex-app-server-thread.json');
     this._socketPointerPath = join(this._stateDir, 'codex-app-server-socket.json');
-    const socket = this.resolveSocketPath();
-    this._socketPath = socket.path;
-    this._socketListenArg = socket.listenArg;
-    this._socketCwd = socket.cwd;
+    this._endpoint = resolveCodexAppServerEndpoint(this._stateDir);
+    this._socketPath = this._endpoint.kind === 'unix' ? this._endpoint.socketPath : null;
+    this._socketListenArg = this._endpoint.listenArg;
+    this._socketCwd = this._endpoint.cwd;
+    if (this._endpoint.kind === 'unix' && this._endpoint.fallbackReason) {
+      const pointer: SocketPointer = {
+        socketPath: this._endpoint.socketPath,
+        fallback: true,
+        reason: this._endpoint.fallbackReason,
+        updatedAt: new Date().toISOString(),
+      };
+      try {
+        ensureDir(this._stateDir);
+        writeFileSync(this._socketPointerPath, `${JSON.stringify(pointer, null, 2)}\n`, 'utf-8');
+      } catch {
+        // Non-fatal; spawn will still use the fallback path.
+      }
+    }
     this._outputBuffer = new OutputBuffer(1000, logPath, BOOTSTRAP_PATTERN);
   }
 
@@ -416,12 +434,39 @@ export class CodexAppServerPTY {
   private startAppServer(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       if (!this._spawnFn) {
-        const nodePty = require('node-pty');
-        this._spawnFn = nodePty.spawn;
+        if (process.platform === 'win32') {
+          // app-server is a headless WebSocket service. Avoid ConPTY on Windows:
+          // it can fail AttachConsole in SSH, PM2, and Task Scheduler sessions.
+          this._spawnFn = spawnHeadlessProcess;
+        } else {
+          const nodePty = require('node-pty');
+          this._spawnFn = nodePty.spawn;
+        }
       }
 
+      if (this._endpoint.kind === 'loopback') {
+        this._endpoint.connectTarget = null;
+      }
+
+      let settled = false;
+      let startupOutput = '';
+      let endpointTimer: ReturnType<typeof setTimeout> | null = null;
+      const resolveEndpoint = () => {
+        if (settled) return;
+        settled = true;
+        if (endpointTimer) clearTimeout(endpointTimer);
+        resolve();
+      };
+      const rejectEndpoint = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        if (endpointTimer) clearTimeout(endpointTimer);
+        reject(err);
+      };
+
       const spawnFn = this._spawnFn!;
-      const pty = spawnFn('codex', [
+      const command = resolveCodexAppServerCommand();
+      const pty = spawnFn(command.file, [...command.argsPrefix,
         'app-server',
         '--enable', 'goals',
         '--listen', this._socketListenArg,
@@ -437,7 +482,16 @@ export class CodexAppServerPTY {
       pty.onData((data) => {
         this._outputBuffer.push(data);
         if (data.includes('Error:')) {
-          reject(new Error(data.trim()));
+          rejectEndpoint(new Error(data.trim()));
+          return;
+        }
+        if (this._endpoint.kind === 'loopback') {
+          startupOutput = `${startupOutput}${data}`.slice(-4096);
+          const connectTarget = parseCodexLoopbackEndpoint(startupOutput);
+          if (connectTarget) {
+            this._endpoint.connectTarget = connectTarget;
+            resolveEndpoint();
+          }
         }
       });
       pty.onExit(({ exitCode, signal }) => {
@@ -445,14 +499,24 @@ export class CodexAppServerPTY {
         this._appServerPty = null;
         this._alive = false;
         this.rejectTurnCompletion(new Error('Codex app-server exited'));
+        rejectEndpoint(new Error(`Codex app-server exited before transport readiness (code ${exitCode})`));
         this._onExitHandler?.(exitCode, signal);
       });
 
-      this.waitForSocket().then(resolve, reject);
+      if (this._endpoint.kind === 'unix') {
+        this.waitForSocket().then(resolveEndpoint, rejectEndpoint);
+      } else {
+        endpointTimer = setTimeout(() => {
+          rejectEndpoint(new Error('Timed out waiting for Codex app-server loopback endpoint'));
+        }, 10000);
+      }
     });
   }
 
   private async waitForSocket(timeoutMs = 10000): Promise<void> {
+    if (!this._socketPath) {
+      throw new Error('Codex app-server Unix socket path is unavailable');
+    }
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       if (existsSync(this._socketPath)) return;
@@ -462,7 +526,13 @@ export class CodexAppServerPTY {
   }
 
   private async connectRpc(): Promise<void> {
-    this._rpc = new WsUnixJsonRpcClient(this._socketPath);
+    const target = this._endpoint.kind === 'unix'
+      ? this._endpoint.socketPath
+      : this._endpoint.connectTarget;
+    if (!target) {
+      throw new Error('Codex app-server transport endpoint is unavailable');
+    }
+    this._rpc = new WsUnixJsonRpcClient(target);
     this._rpc.onMessage((message) => this.handleRpcMessage(message));
     await this._rpc.connect();
   }
@@ -925,30 +995,8 @@ export class CodexAppServerPTY {
     }
   }
 
-  private resolveSocketPath(): { path: string; listenArg: string; cwd: string } {
-    const defaultPath = join(this._stateDir, SOCKET_BASENAME);
-    if (Buffer.byteLength(defaultPath) < SOCKET_PATH_WARN_BYTES) {
-      return { path: defaultPath, listenArg: `unix://./${SOCKET_BASENAME}`, cwd: this._stateDir };
-    }
-
-    const fallbackBasename = `cas-${randomBytes(4).toString('hex')}.sock`;
-    const fallback = join('/tmp', fallbackBasename);
-    const pointer: SocketPointer = {
-      socketPath: fallback,
-      fallback: true,
-      reason: 'state socket path exceeded 100 bytes',
-      updatedAt: new Date().toISOString(),
-    };
-    try {
-      ensureDir(this._stateDir);
-      writeFileSync(this._socketPointerPath, `${JSON.stringify(pointer, null, 2)}\n`, 'utf-8');
-    } catch {
-      // Non-fatal; spawn will still use fallback path.
-    }
-    return { path: fallback, listenArg: `unix://./${fallbackBasename}`, cwd: '/tmp' };
-  }
-
   private removeSocket(): void {
+    if (!this._socketPath) return;
     try {
       if (existsSync(this._socketPath)) unlinkSync(this._socketPath);
     } catch {
@@ -989,6 +1037,15 @@ export class CodexAppServerPTY {
     const env: Record<string, string> = {};
 
     const keepVars = ['PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG', 'LC_ALL', 'TMPDIR'];
+    if (process.platform === 'win32') {
+      keepVars.push(
+        'SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT',
+        'TEMP', 'TMP', 'USERPROFILE', 'USERNAME', 'HOMEDRIVE', 'HOMEPATH',
+        'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA',
+        'PROGRAMFILES', 'PROGRAMFILES(X86)',
+        'PROCESSOR_ARCHITECTURE', 'NUMBER_OF_PROCESSORS', 'OS',
+      );
+    }
     for (const key of keepVars) {
       if (process.env[key]) env[key] = process.env[key]!;
     }

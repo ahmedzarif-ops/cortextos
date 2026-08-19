@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { join, win32 } from 'path';
 
 const fsMocks = {
   existsSync: vi.fn().mockReturnValue(false),
@@ -42,10 +43,12 @@ const notifyMock = vi.fn();
 const closeMock = vi.fn();
 const respondErrorMock = vi.fn();
 const logEventMock = vi.fn();
+const rpcConstructorTargets: unknown[] = [];
 let messageHandler: ((message: unknown) => void) | null = null;
 
 vi.mock('../../../src/utils/ws-unix-client.js', () => ({
-  WsUnixJsonRpcClient: vi.fn().mockImplementation(function WsUnixJsonRpcClient() {
+  WsUnixJsonRpcClient: vi.fn().mockImplementation(function WsUnixJsonRpcClient(target: unknown) {
+    rpcConstructorTargets.push(target);
     return {
       connect: vi.fn().mockResolvedValue(undefined),
       close: closeMock,
@@ -65,6 +68,7 @@ vi.mock('../../../src/bus/event.js', () => ({
 }));
 
 const { CodexAppServerPTY } = await import('../../../src/pty/codex-app-server-pty.js');
+const { resolveCodexAppServerCommand } = await import('../../../src/pty/codex-app-server-endpoint.js');
 
 const mockEnv = {
   instanceId: 'test',
@@ -88,31 +92,117 @@ beforeEach(() => {
   respondErrorMock.mockReset();
   logEventMock.mockReset();
   atomicWriteSyncMock.mockReset();
+  rpcConstructorTargets.length = 0;
   messageHandler = null;
 });
 
 describe('CodexAppServerPTY socket path policy', () => {
-  it('uses codex.sock in the agent state dir by default', () => {
-    const pty = new CodexAppServerPTY(mockEnv, {});
-    expect((pty as unknown as { _socketPath: string })._socketPath).toBe('/tmp/ctx/state/codex-app-agent/codex.sock');
-    expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toBe('unix://./codex.sock');
+  it('prefers the packaged native Codex executable on Windows', () => {
+    const npmPrefix = 'C:\\npm-global';
+    const expected = win32.join(
+      npmPrefix,
+      'node_modules', '@openai', 'codex', 'node_modules', '@openai', 'codex-win32-x64',
+      'vendor', 'x86_64-pc-windows-msvc', 'bin', 'codex.exe',
+    );
+    const command = resolveCodexAppServerCommand(
+      'win32',
+      { PATH: `${npmPrefix};D:\\other-bin` },
+      'x64',
+      (candidate: string) => candidate === expected,
+    );
+    expect(command).toEqual({ file: expected, argsPrefix: [] });
   });
 
-  it('falls back to /tmp/cas-*.sock when the state socket path is too long', () => {
+  it('uses codex.sock in the agent state dir on Unix', () => {
+    const platform = vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
+    try {
+      const pty = new CodexAppServerPTY(mockEnv, {});
+      expect((pty as unknown as { _socketPath: string })._socketPath).toBe(
+        join('/tmp/ctx', 'state', 'codex-app-agent', 'codex.sock'),
+      );
+      expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toBe('unix://./codex.sock');
+    } finally {
+      platform.mockRestore();
+    }
+  });
+
+  it('falls back to /tmp/cas-*.sock when the Unix state socket path is too long', () => {
+    const platform = vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     const longEnv = {
       ...mockEnv,
       ctxRoot: `/tmp/${'x'.repeat(120)}`,
     };
-    const pty = new CodexAppServerPTY(longEnv, {});
-    const socketPath = (pty as unknown as { _socketPath: string })._socketPath;
-    expect(socketPath).toMatch(/\/cas-[a-f0-9]{8}\.sock$/);
-    expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toMatch(/^unix:\/\/\.\/cas-[a-f0-9]{8}\.sock$/);
-    expect((pty as unknown as { _socketCwd: string })._socketCwd).toBe('/tmp');
-    expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
-      expect.stringContaining('codex-app-server-socket.json'),
-      expect.stringContaining('"fallback": true'),
-      'utf-8',
-    );
+    try {
+      const pty = new CodexAppServerPTY(longEnv, {});
+      const socketPath = (pty as unknown as { _socketPath: string })._socketPath;
+      expect(socketPath).toMatch(/[\\/]cas-[a-f0-9]{8}\.sock$/);
+      expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toMatch(/^unix:\/\/\.\/cas-[a-f0-9]{8}\.sock$/);
+      expect((pty as unknown as { _socketCwd: string })._socketCwd).toBe('/tmp');
+      expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('codex-app-server-socket.json'),
+        expect.stringContaining('"fallback": true'),
+        'utf-8',
+      );
+    } finally {
+      platform.mockRestore();
+    }
+  });
+
+  it('selects a loopback WebSocket with an OS-assigned port on Windows', () => {
+    const platform = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    try {
+      const pty = new CodexAppServerPTY(mockEnv, {});
+      expect((pty as unknown as { _endpoint: { kind: string } })._endpoint.kind).toBe('loopback');
+      expect((pty as unknown as { _socketPath: string | null })._socketPath).toBeNull();
+      expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toBe('ws://127.0.0.1:0');
+      expect((pty as unknown as { _socketCwd: string })._socketCwd).toBe(
+        join('/tmp/ctx', 'state', 'codex-app-agent'),
+      );
+      expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    } finally {
+      platform.mockRestore();
+    }
+  });
+
+  it('learns the Windows loopback port from a split startup banner and connects over TCP', async () => {
+    const platform = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    let emitData: ((data: string) => void) | null = null;
+    const spawnedPty = {
+      pid: 88,
+      write: vi.fn(),
+      onData: vi.fn((handler: (data: string) => void) => {
+        emitData = handler;
+        return { dispose: vi.fn() };
+      }),
+      onExit: vi.fn(() => ({ dispose: vi.fn() })),
+      kill: vi.fn(),
+    };
+    const spawnFn = vi.fn(() => spawnedPty);
+    requestMock.mockImplementation(async (method: string) => {
+      if (method === 'thread/start') return { result: { thread: { id: 'windows-thread' } } };
+      return { result: {} };
+    });
+
+    try {
+      const pty = new CodexAppServerPTY(mockEnv, {});
+      (pty as unknown as { _spawnFn: typeof spawnFn })._spawnFn = spawnFn;
+      const spawning = pty.spawn('fresh', '');
+      expect(emitData).not.toBeNull();
+      emitData!('codex app-server (WebSockets)\r\n  listening on: ws://127.');
+      emitData!('0.0.1:55099\r\n  readyz: http://127.0.0.1:55099/readyz\r\n');
+      await spawning;
+
+      expect(spawnFn).toHaveBeenCalledWith(
+        process.env.ComSpec || process.env.COMSPEC || 'cmd.exe',
+        ['/d', '/s', '/c', 'codex', 'app-server', '--enable', 'goals', '--listen', 'ws://127.0.0.1:0'],
+        expect.objectContaining({ cwd: join('/tmp/ctx', 'state', 'codex-app-agent') }),
+      );
+      expect(rpcConstructorTargets).toEqual([{ host: '127.0.0.1', port: 55099 }]);
+      expect(pty.isAlive()).toBe(true);
+      pty.kill();
+    } finally {
+      platform.mockRestore();
+    }
   });
 });
 
@@ -1098,6 +1188,12 @@ describe('CodexAppServerPTY event handling', () => {
 
   it('registers a message handler when connecting RPC', async () => {
     const pty = new CodexAppServerPTY(mockEnv, {});
+    const endpoint = (pty as unknown as {
+      _endpoint: { kind: 'unix' } | { kind: 'loopback'; connectTarget: { host: string; port: number } | null };
+    })._endpoint;
+    if (endpoint.kind === 'loopback') {
+      endpoint.connectTarget = { host: '127.0.0.1', port: 55099 };
+    }
     await (pty as unknown as { connectRpc(): Promise<void> }).connectRpc();
     expect(messageHandler).not.toBeNull();
   });
@@ -1128,7 +1224,7 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → context_status.json', 
 
     expect(atomicWriteSyncMock).toHaveBeenCalledTimes(1);
     const [path] = atomicWriteSyncMock.mock.calls[0];
-    expect(path).toBe('/tmp/ctx/state/codex-app-agent/context_status.json');
+    expect(path).toBe(join('/tmp/ctx', 'state', 'codex-app-agent', 'context_status.json'));
     const payload = lastWrittenPayload()!;
     expect(payload.used_percentage).toBeCloseTo(35, 5);
     expect(payload.context_window_size).toBe(200000);
@@ -1310,7 +1406,7 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
 
     expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
     const [path, line] = fsMocks.appendFileSync.mock.calls[0] as [string, string];
-    expect(path).toBe('/tmp/ctx/logs/codex-app-agent/codex-tokens.jsonl');
+    expect(path).toBe(join('/tmp/ctx', 'logs', 'codex-app-agent', 'codex-tokens.jsonl'));
     expect(line.endsWith('\n')).toBe(true);
 
     const entry = lastAppendedEntry()!;

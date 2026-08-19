@@ -5,7 +5,7 @@
  * server and asserts the wire-level contract that the codex-app-server PTY
  * adapter relies on. Covers (per PR 09 §1 minimum):
  *
- *   - WS handshake + JSON-RPC framing
+ *   - loopback TCP WS handshake + JSON-RPC framing (the Windows-native path)
  *   - `initialize` → capabilities response
  *   - `thread/start` → thread.id + `thread/started` notification
  *   - `turn/start` → `turn/started`, `item/agentMessage/delta`, `item/completed`,
@@ -18,14 +18,16 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { WsUnixJsonRpcClient } from '../../src/utils/ws-unix-client.js';
+import { CodexAppServerPTY } from '../../src/pty/codex-app-server-pty.js';
 
 const { MockCodexServer } = require('./mock-codex.js') as {
   MockCodexServer: new (options: {
-    socketPath: string;
+    host?: string;
+    port?: number;
     skills?: Array<{ name: string; path: string; enabled?: boolean }>;
     turnDeltaText?: string;
     tokenUsage?: Record<string, number>;
@@ -34,6 +36,8 @@ const { MockCodexServer } = require('./mock-codex.js') as {
 };
 
 interface MockCodexServerInstance {
+  host: string;
+  port: number;
   listen(): Promise<void>;
   close(): Promise<void>;
   failNextWith(code: number, message: string): void;
@@ -41,24 +45,21 @@ interface MockCodexServerInstance {
   requestLog: Array<{ method: string; params: unknown; notification?: boolean }>;
 }
 
-describe('E2E codex lifecycle (mock-codex.js + WsUnixJsonRpcClient)', () => {
-  let testDir: string;
-  let socketPath: string;
+describe('E2E codex lifecycle over native loopback WebSocket', () => {
   let server: MockCodexServerInstance;
   let client: WsUnixJsonRpcClient;
   let notifications: Array<{ method: string; params: unknown }>;
 
   beforeEach(async () => {
-    testDir = mkdtempSync(join(tmpdir(), 'lifecycle-codex-'));
-    socketPath = join(testDir, 'codex.sock');
     server = new MockCodexServer({
-      socketPath,
+      host: '127.0.0.1',
+      port: 0,
       skills: [{ name: 'review-pr', path: '/skills/review-pr', enabled: true }],
       turnDeltaText: 'hello world',
     });
     await server.listen();
     notifications = [];
-    client = new WsUnixJsonRpcClient(socketPath);
+    client = new WsUnixJsonRpcClient({ host: server.host, port: server.port });
     client.onMessage((message) => {
       if (typeof message === 'object' && message !== null && 'method' in message && !('id' in message)) {
         notifications.push({ method: (message as { method: string }).method, params: (message as { params: unknown }).params });
@@ -70,7 +71,6 @@ describe('E2E codex lifecycle (mock-codex.js + WsUnixJsonRpcClient)', () => {
   afterEach(async () => {
     client.close();
     await server.close();
-    rmSync(testDir, { recursive: true, force: true });
   });
 
   it('completes the WS handshake and accepts initialize/initialized', async () => {
@@ -192,6 +192,51 @@ describe('E2E codex lifecycle (mock-codex.js + WsUnixJsonRpcClient)', () => {
   it('unknown methods return JSON-RPC -32601', async () => {
     await expect(client.request('not/a/method', {})).rejects.toThrow(/Method not found/);
   });
+});
+
+describe.runIf(process.env.CTX_LIVE_CODEX_APP_SERVER === '1')('live Codex app-server lifecycle', () => {
+  it('boots, executes a native shell write, and completes a turn through the selected transport', async () => {
+    const testDir = mkdtempSync(join(tmpdir(), 'cortextos-live-codex-'));
+    const runId = `CODEX_NATIVE_${Date.now()}`;
+    const proofPath = join(testDir, 'native-shell-proof.txt');
+    const pty = new CodexAppServerPTY({
+      instanceId: 'live-codex-transport',
+      ctxRoot: testDir,
+      frameworkRoot: testDir,
+      agentName: 'codex-live',
+      agentDir: testDir,
+      org: 'test',
+      projectRoot: testDir,
+    }, {
+      working_directory: testDir,
+    });
+
+    try {
+      await pty.spawn('fresh', [
+        `Use the native shell to write exactly ${runId} to this file: ${proofPath}`,
+        'Read the file back to verify it.',
+        `End your response with exactly: ${runId}`,
+      ].join('\n'));
+      await waitFor(() => (
+        existsSync(proofPath)
+        && readFileSync(proofPath, 'utf-8').trim() === runId
+        && pty.getOutputBuffer().getRecent().includes(runId)
+      ), 120000, 100);
+
+      expect(pty.isAlive()).toBe(true);
+      expect(readFileSync(proofPath, 'utf-8').trim()).toBe(runId);
+      expect(pty.getOutputBuffer().getRecent()).toContain('[codex-app-server] turn completed');
+    } catch (err) {
+      throw new Error(`${err instanceof Error ? err.message : String(err)}\n${pty.getOutputBuffer().getRecent()}`);
+    } finally {
+      pty.kill();
+      try {
+        rmSync(testDir, { recursive: true, force: true });
+      } catch {
+        // ConPTY teardown can briefly retain the test directory on Windows.
+      }
+    }
+  }, 150000);
 });
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2000, stepMs = 10): Promise<void> {

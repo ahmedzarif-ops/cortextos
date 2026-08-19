@@ -12,6 +12,7 @@ import { ensureDir } from '../utils/atomic.js';
 import { writeCortextosEnv } from '../utils/env.js';
 import { getOverdueReminders } from '../bus/reminders.js';
 import { resolvePaths } from '../utils/paths.js';
+import { terminateProcessTree } from '../platform/process.js';
 
 type LogFn = (msg: string) => void;
 
@@ -349,20 +350,17 @@ export class AgentProcess {
       // ONLY when the child survived the graceful window, so a normal fast exit
       // adds ZERO latency and never sees a SIGKILL (no false kills).
       if (childPid && isChildAlive(childPid)) {
-        this.log(`Graceful stop timed out — escalating to SIGKILL (pid ${childPid})`);
-        try {
-          process.kill(childPid, 'SIGKILL');
-        } catch {
-          // ESRCH: exited between the liveness check and the kill — fine.
-        }
-        // Bounded poll: 5s deadline / 100ms interval (hardcoded — a stop must
-        // not block the daemon indefinitely on a wedged, unkillable child).
-        const deadline = Date.now() + 5000;
-        while (isChildAlive(childPid) && Date.now() < deadline) {
-          await sleep(100);
-        }
-        if (isChildAlive(childPid)) {
-          this.log(`WARNING: pid ${childPid} still alive 5s after SIGKILL — proceeding anyway`);
+        this.log(`Graceful stop timed out — escalating native process tree termination (pid ${childPid})`);
+        const result = await terminateProcessTree(childPid, {
+          // The PTY already had the full graceful window above. Go straight
+          // through the adapter's forced phase while retaining its tree-aware
+          // Windows taskkill behavior and bounded death confirmation.
+          termGraceMs: 0,
+          killGraceMs: 5000,
+          pollIntervalMs: 100,
+        });
+        if (!result.terminated) {
+          this.log(`WARNING: process tree ${childPid} still alive after forced termination — proceeding anyway`);
         }
       }
     }
