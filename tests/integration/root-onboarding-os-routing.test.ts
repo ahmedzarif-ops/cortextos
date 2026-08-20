@@ -8,7 +8,9 @@ const ROOT_ONBOARDING = '.claude/commands/onboarding.md';
 const WINDOWS_REFERENCE = 'references/onboarding-windows.md';
 
 function read(relative: string): string {
-  return readFileSync(join(ROOT, relative), 'utf-8');
+  // Git may materialize Markdown with CRLF on Windows. The onboarding contract
+  // is about the document's content, not the checkout's newline convention.
+  return readFileSync(join(ROOT, relative), 'utf-8').replace(/\r\n?/g, '\n');
 }
 
 function sha256(value: string): string {

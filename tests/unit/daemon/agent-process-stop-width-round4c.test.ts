@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { performance } from 'node:perf_hooks';
 
 // ⚠ RUN THIS FILE WITH `--reporter=verbose`.
 // THE DEFAULT REPORTER SWALLOWS THE MEASURED TABLE ENTIRELY: the run prints
@@ -118,6 +119,11 @@ const CASES: RuntimeCase[] = [
   },
 ];
 
+// Windows timer delivery and Date.now() can disagree by one millisecond at a
+// timeout boundary. Measure on the monotonic clock and allow only a tiny clock
+// resolution margin; PTY writes and explicit ceilings still prove the branch.
+const TIMER_RESOLUTION_MARGIN_MS = 5;
+
 function buildProcess(runtime: string) {
   const env = { agentName: 'alice', org: 'acme' } as never;
   const config = { name: 'alice', runtime } as never;
@@ -149,9 +155,9 @@ describe('AgentProcess.stop() — teardown width is a property of config.runtime
         // whole table would agree for the wrong reason.
         expect((proc as unknown as { pty: unknown }).pty).not.toBeNull();
 
-        const t0 = Date.now();
+        const t0 = performance.now();
         await proc.stop();
-        const elapsed = Date.now() - t0;
+        const elapsed = performance.now() - t0;
 
         // The branch taken is OBSERVED from what it wrote, not inferred from the
         // config we handed in. If a future refactor changes the dispatch, this
@@ -170,7 +176,9 @@ describe('AgentProcess.stop() — teardown width is a property of config.runtime
         // Floor, not equality: the branch must take AT LEAST its sleeps.
         // ⚠ For a row whose floor is 0 this assertion CANNOT FAIL — that row's only
         // real bound is the explicit ceiling below, and its `notDiscriminable` label.
-        expect(elapsed).toBeGreaterThanOrEqual(c.expectedFloorMs);
+        expect(elapsed).toBeGreaterThanOrEqual(
+          Math.max(0, c.expectedFloorMs - TIMER_RESOLUTION_MARGIN_MS),
+        );
         // Explicit per-case ceiling rather than floor+4000, so the zero-floor row
         // gets a bound that actually separates it from the multi-second branches
         // instead of inheriting a 4s allowance that overlaps three of them.
@@ -197,9 +205,9 @@ describe('AgentProcess.stop() — teardown width is a property of config.runtime
       const config = { name: 'alice', runtime: c.runtime } as never;
       const proc = new AgentProcess('alice', env, config, () => { /* silence */ });
       // pty left null — the `if (pty)` guard at :228 is false.
-      const t0 = Date.now();
+      const t0 = performance.now();
       await proc.stop();
-      const elapsed = Date.now() - t0;
+      const elapsed = performance.now() - t0;
       expect(elapsed).toBeLessThan(250);
     }
   }, 15_000);

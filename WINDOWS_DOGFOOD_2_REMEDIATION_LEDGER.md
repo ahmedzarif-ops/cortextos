@@ -87,6 +87,10 @@ at the final exact commit before VM cleanup.
 | DOG2-001 | high | product/install/prerequisite | fixed; live validation pending | The global Windows `claude.ps1` shim points at a missing legacy package path while the authenticated executable lives in the architecture-specific optional dependency | Shared resolver now selects `claude-code-win32-<arch>/claude.exe`; stale-shim regression plus resolver/profile/doctor/PTY run passed 4 files, 34 tests; clean daemon boot must prove the native path |
 | DOG2-002 | critical | product/installer portability | fixed; live validation pending | The prior `install.mjs` declared WSL required, pre-blocked on compiler tools, treated jq as core, and could continue after a failed pull | Native argument-array runner, PowerShell 5.1 file bootstrap, selected-remote/branch enforcement, conditional compiler guidance, fail-closed stages, and Windows optional-tool deferral pass 20 focused installer/core-install tests; clean public-command run remains |
 | DOG2-003 | high | product/runtime dispatch | fixed; candidate-wide regression pending | `AgentPTY.spawn()` ignored the runtime adapter's `getBinaryName()` and always used the Claude resolver, so an OpenCode agent launched `claude` despite its native adapter | Existing failing OpenCode binary assertion plus AgentPTY/Hermes/Claude/lifecycle focused run: 5 files, 76 tests passed |
+| DOG2-004 | critical | product/security/Windows ACL | fixed; candidate-wide regression pending | Windows Server 2025 CI exposed that `$acl.Access` translates every existing ACE to an account name; a stale image-provisioning SID can therefore abort secret restriction before the DACL is replaced | ACL replacement now enumerates raw `SecurityIdentifier` rules, removes every existing ACE, then retains only current-user and LocalSystem access; the focused secret writer and cascade run is included in the 8-file, 96-test green repair set |
+| DOG2-005 | medium | invalid cross-platform test assumptions | fixed; candidate-wide regression pending | Root-onboarding hashes assumed LF checkout text and the OpenCode auth-seed test asserted POSIX `chmod` rather than the shared secret restriction contract | Contract text is newline-normalized and the auth-seed test asserts `restrictSecretFile`; the focused repair set passes |
+| DOG2-006 | medium | test-harness portability | fixed; candidate-wide regression pending | Vitest's Windows transform path attempted to parse the executable installer after CRLF materialization and failed before collecting tests | The test imports the executable module through a native file URL with Vite transformation disabled; exact Windows CI remains the proof gate |
+| DOG2-007 | low | test-clock resolution | fixed; candidate-wide regression pending | A teardown floor measured 2,999 ms against an exact 3,000 ms assertion on Windows | The test uses the monotonic clock with a bounded 5 ms resolution margin while retaining explicit per-runtime ceilings and PTY-write observations |
 
 ## Gate A baseline evidence
 
@@ -111,6 +115,17 @@ at the final exact commit before VM cleanup.
   111/111; root typecheck/build passed after each implementation stream.
 - Candidate-wide rerun remains Gate C work after all bounded implementation
   streams integrate.
+- Exact candidate `e179d862` passed the full local suite (155 files passed,
+  1 skipped; 2,375 tests passed, 5 skipped), root typecheck/build, dashboard
+  typecheck/build, leak guard, tree leak guard, diff check, and targeted added-line
+  secret scan. Its GitHub Actions build/typecheck jobs passed on Ubuntu, macOS,
+  and Windows; dashboard and the Ubuntu/macOS unit jobs also passed.
+- Windows unit CI at `e179d862` failed in eight files. Triage classified one
+  production security/ACL compatibility defect (DOG2-004) and three bounded
+  test-contract defects (DOG2-005 through DOG2-007). The integrated local
+  repair run passes all eight affected files (96 tests), root typecheck/build,
+  and diff check. A new exact three-OS CI candidate is required before Gate C
+  can close or the VM can be mutated.
 
 ## Candidate acceptance evidence
 

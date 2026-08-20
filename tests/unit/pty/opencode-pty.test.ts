@@ -10,7 +10,9 @@ const fsMocks = {
   readFileSync: vi.fn(),
   readdirSync: vi.fn().mockReturnValue([]),
   copyFileSync: vi.fn(),
-  chmodSync: vi.fn(),
+};
+const secretPermissionMocks = {
+  restrictSecretFile: vi.fn(),
 };
 
 let spawnCall: { file: string; args: string[]; options: any } | null = null;
@@ -34,7 +36,6 @@ vi.mock('fs', async () => {
     get readFileSync() { return fsMocks.readFileSync; },
     get readdirSync() { return fsMocks.readdirSync; },
     get copyFileSync() { return fsMocks.copyFileSync; },
-    get chmodSync() { return fsMocks.chmodSync; },
   };
 });
 
@@ -43,6 +44,10 @@ vi.mock('node-pty', () => ({
     spawnCall = { file, args, options };
     return mockPty;
   }),
+}));
+
+vi.mock('../../../src/platform/secret-permissions.js', () => ({
+  restrictSecretFile: secretPermissionMocks.restrictSecretFile,
 }));
 
 const { OpencodePTY, opencodeSessionExists, resolveOpencodeBinary } = await import('../../../src/pty/opencode-pty.js');
@@ -78,7 +83,7 @@ beforeEach(() => {
   fsMocks.readFileSync.mockReset();
   fsMocks.readdirSync.mockReset().mockReturnValue([]);
   fsMocks.copyFileSync.mockReset();
-  fsMocks.chmodSync.mockReset();
+  secretPermissionMocks.restrictSecretFile.mockReset();
 });
 
 describe('OpencodePTY', () => {
@@ -175,7 +180,7 @@ describe('OpencodePTY', () => {
     await pty.spawn('fresh', '');
 
     expect(fsMocks.copyFileSync).toHaveBeenCalledWith(homeAuth, isolatedAuth);
-    expect(fsMocks.chmodSync).toHaveBeenCalledWith(isolatedAuth, 0o600);
+    expect(secretPermissionMocks.restrictSecretFile).toHaveBeenCalledWith(isolatedAuth);
   });
 
   it('preserves an existing isolated OpenCode credential instead of overwriting it', async () => {

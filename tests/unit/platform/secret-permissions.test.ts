@@ -45,9 +45,11 @@ describe('restrictSecretFile', () => {
   it('replaces inherited rules and grants only current-user and SYSTEM SIDs', () => {
     const script = secretPermissionInternals.WINDOWS_ACL_SCRIPT;
     expect(script).toContain('SetAccessRuleProtection($true, $false)');
+    expect(script).toContain('GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])');
     expect(script).toContain('RemoveAccessRuleSpecific');
     expect(script).toContain('WindowsIdentity]::GetCurrent().User');
     expect(script).toContain("SecurityIdentifier('S-1-5-18')");
+    expect(script).not.toContain('$acl.Access');
   });
 
   it('writes contents only after establishing restricted permissions', () => {

@@ -3,8 +3,13 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
+import { pathToFileURL } from 'url';
 
-const installer = await import('../../../install.mjs');
+// Let Node load the executable module directly. Vite's transform path can leave
+// a CRLF shebang behind on Windows, causing a file-level SyntaxError before any
+// tests are collected; Node itself supports the installer's shebang correctly.
+const installerUrl = pathToFileURL(join(process.cwd(), 'install.mjs')).href;
+const installer = await import(/* @vite-ignore */ installerUrl);
 
 type Call = { kind: 'capture' | 'visible' | 'logged'; command: string; args: string[]; cwd?: string };
 
