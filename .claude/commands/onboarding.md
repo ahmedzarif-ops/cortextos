@@ -219,8 +219,10 @@ Ask these questions one at a time. Follow up on interesting answers. Let the use
 
 4. "What are the top 1-3 goals right now to move toward that?"
 5. "What's the single most important thing to get done this week? One sentence." (this becomes `daily_focus`)
-6. "What's your timezone?" (auto-detect with the runtime via
-   `node -p "Intl.DateTimeFormat().resolvedOptions().timeZone"`)
+6. "What's your timezone?" (auto-detect with the runtime. On Windows, use the
+   exact native timezone operation in the loaded Windows reference and do not
+   submit the command through the Bash-labeled terminal surface. On macOS/Linux,
+   use `node -p "Intl.DateTimeFormat().resolvedOptions().timeZone"`.)
 7. "What are your working hours? This sets when agents are in day mode (responsive, follows your direction) vs night mode (proactive, works autonomously). For example: 8am to midnight, 9am to 6pm." Default to 08:00-00:00 if they don't have a preference.
 8. "What communication style should your agents have? Casual / professional / technical?"
 

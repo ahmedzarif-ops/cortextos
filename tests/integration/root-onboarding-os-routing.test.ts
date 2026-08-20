@@ -8,6 +8,7 @@ const ROOT_ONBOARDING = '.claude/commands/onboarding.md';
 const WINDOWS_REFERENCE = 'references/onboarding-windows.md';
 const WINDOWS_INSTALL_SCRIPT = 'scripts/onboarding-windows-install.ps1';
 const WINDOWS_INSTANCE_SCRIPT = 'scripts/onboarding-windows-select-instance.ps1';
+const WINDOWS_TIMEZONE_SCRIPT = 'scripts/onboarding-windows-timezone.ps1';
 
 function read(relative: string): string {
   // Git may materialize Markdown with CRLF on Windows. The onboarding contract
@@ -68,6 +69,7 @@ describe('canonical root onboarding OS routing', () => {
       'node --version',
       'onboarding-windows-install.ps1',
       'onboarding-windows-select-instance.ps1',
+      'onboarding-windows-timezone.ps1',
       'enabled-agents.json',
       'Invoke-RestMethod',
       'npm run build',
@@ -150,6 +152,20 @@ describe('canonical root onboarding OS routing', () => {
     expect(script).toContain("@($EnabledAgents.PSObject.Properties).Count -eq 0");
     expect(script).toContain("$Candidate = 'cortextos' + $Index");
     expect(script).not.toContain('$env:USERPROFILE');
+  });
+
+  it('routes timezone detection through one checked-in native command', () => {
+    const root = read(ROOT_ONBOARDING);
+    const windows = read(WINDOWS_REFERENCE);
+    const script = read(WINDOWS_TIMEZONE_SCRIPT);
+
+    expect(root).toContain('exact native timezone operation in the loaded Windows reference');
+    expect(root).toContain('On macOS/Linux');
+    expect(windows).toContain('-File ./scripts/onboarding-windows-timezone.ps1');
+    expect(windows).toContain('do not run the\ncanonical `node -p` example directly');
+    expect(windows).toContain('Read the `timezone` field');
+    expect(script).toContain("& node.exe -p 'Intl.DateTimeFormat().resolvedOptions().timeZone'");
+    expect(script).toContain('ConvertTo-Json -Compress');
   });
 
   it('keeps Windows failure diagnosis on native tools', () => {

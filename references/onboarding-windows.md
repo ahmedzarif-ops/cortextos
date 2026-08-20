@@ -94,6 +94,19 @@ returns the first absent `cortextosN` directory. Do not reimplement or verify
 this decision with shell commands, `$env:USERPROFILE`, path text parsing, or a
 second profile inspection.
 
+Detect the timezone with one fail-closed native operation when canonical Phase
+4 reaches its timezone question. Submit this exact line once; do not run the
+canonical `node -p` example directly through Claude Code's Bash-labeled command
+surface:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./scripts/onboarding-windows-timezone.ps1
+```
+
+Read the `timezone` field from its small JSON result, show that detected IANA
+timezone to the user, and retain the confirmed literal value in onboarding
+state. Do not reimplement or verify this probe through another shell command.
+
 All Cortext CLI calls are native Node commands. Use explicit literal routing:
 
 ```powershell
