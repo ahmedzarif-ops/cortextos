@@ -17,7 +17,7 @@ $UseDefault = $false
 if (Test-Path -LiteralPath $DefaultEnabledAgents -PathType Leaf) {
   try {
     $EnabledAgents = Get-Content -LiteralPath $DefaultEnabledAgents -Raw | ConvertFrom-Json
-    $UseDefault = $EnabledAgents -is [PSCustomObject] -and $EnabledAgents.PSObject.Properties.Count -eq 0
+    $UseDefault = $EnabledAgents -is [PSCustomObject] -and @($EnabledAgents.PSObject.Properties).Count -eq 0
   } catch {
     $UseDefault = $false
   }

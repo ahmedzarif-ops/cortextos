@@ -147,7 +147,7 @@ describe('canonical root onboarding OS routing', () => {
     expect(windows).not.toContain('Use harness file and JSON tools to select the instance');
     expect(script).toContain("[Environment]::GetFolderPath('UserProfile')");
     expect(script).toContain('ConvertFrom-Json');
-    expect(script).toContain("$EnabledAgents -is [PSCustomObject]");
+    expect(script).toContain("@($EnabledAgents.PSObject.Properties).Count -eq 0");
     expect(script).toContain("$Candidate = 'cortextos' + $Index");
     expect(script).not.toContain('$env:USERPROFILE');
   });
