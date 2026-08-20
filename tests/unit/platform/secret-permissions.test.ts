@@ -42,6 +42,17 @@ describe('restrictSecretFile', () => {
       .toThrow('Could not restrict Windows permissions for secret file');
   });
 
+  it('bounds and redacts PowerShell ACL diagnostics', () => {
+    const path = 'C:\\Users\\example\\secret.env';
+    const detail = secretPermissionInternals.boundedWindowsAclDiagnostic(
+      `Set-Acl failed for ${path}\r\n${'x'.repeat(800)}`,
+      path,
+    );
+    expect(detail).toContain('<secret-file>');
+    expect(detail).not.toContain(path);
+    expect(detail.length).toBeLessThanOrEqual(502);
+  });
+
   it('replaces inherited rules and grants only current-user and SYSTEM SIDs', () => {
     const script = secretPermissionInternals.WINDOWS_ACL_SCRIPT;
     expect(script).toContain('New-Object System.Security.AccessControl.FileSecurity');

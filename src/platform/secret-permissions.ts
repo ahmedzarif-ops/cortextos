@@ -5,6 +5,7 @@ import { spawnSync } from 'child_process';
 export interface SecretPermissionCommandResult {
   status: number | null;
   error?: Error;
+  stderr?: string;
 }
 
 export interface SecretPermissionDependencies {
@@ -49,7 +50,17 @@ function secureWindowsAcl(path: string): SecretPermissionCommandResult {
       windowsHide: true,
     },
   );
-  return { status: result.status, error: result.error };
+  return { status: result.status, error: result.error, stderr: String(result.stderr || '') };
+}
+
+function boundedWindowsAclDiagnostic(stderr: string | undefined, path: string): string {
+  if (!stderr) return '';
+  const redacted = stderr
+    .replaceAll(path, '<secret-file>')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return redacted ? `: ${redacted.slice(0, 500)}` : '';
 }
 
 const defaultDependencies: SecretPermissionDependencies = {
@@ -78,7 +89,8 @@ export function restrictSecretFile(
 
   const result = deps.secureWindowsAcl(path);
   if (result.error || result.status !== 0) {
-    const reason = result.error?.message || `PowerShell exited ${String(result.status)}`;
+    const reason = result.error?.message ||
+      `PowerShell exited ${String(result.status)}${boundedWindowsAclDiagnostic(result.stderr, path)}`;
     throw new Error(`Could not restrict Windows permissions for secret file: ${reason}`);
   }
 }
@@ -97,4 +109,5 @@ export function writeSecretFileSync(path: string, content: string): void {
 
 export const secretPermissionInternals = {
   WINDOWS_ACL_SCRIPT,
+  boundedWindowsAclDiagnostic,
 };
