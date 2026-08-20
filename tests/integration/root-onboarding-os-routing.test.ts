@@ -123,7 +123,8 @@ describe('canonical root onboarding OS routing', () => {
     const build = script.indexOf("Invoke-NativeStage 'CLI build'");
     const coreInstall = script.indexOf("Invoke-NativeStage 'Core state installation'");
 
-    expect(windows).toContain('-File .\\scripts\\onboarding-windows-install.ps1');
+    expect(windows).toContain('-File ./scripts/onboarding-windows-install.ps1');
+    expect(windows).not.toContain('-File .\\scripts\\onboarding-windows-install.ps1');
     expect(windows).toContain('do not split or rewrite this command');
     expect(rootInstall).toBeGreaterThanOrEqual(0);
     expect(dashboardInstall).toBeGreaterThanOrEqual(0);

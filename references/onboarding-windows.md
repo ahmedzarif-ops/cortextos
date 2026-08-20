@@ -77,7 +77,7 @@ line once; the checked-in script installs both locked dependency trees before
 the full suite, then tests, builds, and installs core state in order:
 
 ```powershell
-powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\onboarding-windows-install.ps1
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./scripts/onboarding-windows-install.ps1
 ```
 
 Use harness file and JSON tools to select the instance under
