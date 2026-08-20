@@ -124,6 +124,16 @@ describe('public cross-platform installer', () => {
       .toEqual(expect.arrayContaining([expect.stringContaining('Install Python 3')]));
   });
 
+  it('approves only Claude Code install scripts for a native Windows global install', () => {
+    expect(installer.globalInstallArgs('@anthropic-ai/claude-code', 'win32')).toEqual([
+      'install', '-g', '--allow-scripts=@anthropic-ai/claude-code', '@anthropic-ai/claude-code',
+    ]);
+    expect(installer.globalInstallArgs('pm2', 'win32')).toEqual(['install', '-g', 'pm2']);
+    expect(installer.globalInstallArgs('@anthropic-ai/claude-code', 'linux')).toEqual([
+      'install', '-g', '@anthropic-ai/claude-code',
+    ]);
+  });
+
   it('uses the selected branch for fresh clone and remote configuration', () => {
     const runner = fakeRunner();
     installer.cloneCheckout({

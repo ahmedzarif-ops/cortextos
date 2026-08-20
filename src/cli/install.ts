@@ -19,13 +19,27 @@ export function shouldInstallLegacyOptionalDependencies(hostPlatform: NodeJS.Pla
 // possible. spawnSync with array args also prevents shell parsing.
 const SAFE_NAME = /^[@a-z0-9._/-]+$/i;
 
+export function globalInstallArgs(pkg: string, hostPlatform: NodeJS.Platform): string[] {
+  if (!SAFE_NAME.test(pkg)) return [];
+  const args = ['install', '-g'];
+  // npm 11.16+ blocks unapproved lifecycle scripts. Claude's Windows
+  // postinstall materializes claude.exe, so status 0 without this approval can
+  // leave only broken npm shims behind.
+  if (hostPlatform === 'win32' && pkg === '@anthropic-ai/claude-code') {
+    args.push(`--allow-scripts=${pkg}`);
+  }
+  args.push(pkg);
+  return args;
+}
+
 function tryInstallGlobal(pkg: string): boolean {
-  if (!SAFE_NAME.test(pkg)) return false;
+  const args = globalInstallArgs(pkg, platform());
+  if (args.length === 0) return false;
   // On Windows, 'npm' is a .cmd wrapper; use shell to resolve it.
-  // Pass as single string to avoid DEP0190 deprecation warning.
+  // Every token is generated above from a validated package name.
   const result = IS_WINDOWS
-    ? spawnSync(`npm install -g ${pkg}`, { stdio: 'inherit', timeout: 120000, shell: true })
-    : spawnSync('npm', ['install', '-g', pkg], { stdio: 'inherit', timeout: 120000 });
+    ? spawnSync(`npm ${args.join(' ')}`, { stdio: 'inherit', timeout: 120000, shell: true })
+    : spawnSync('npm', args, { stdio: 'inherit', timeout: 120000 });
   return result.status === 0;
 }
 

@@ -53,6 +53,20 @@ export function quotePowerShellLiteral(value) {
   return `'${text.replaceAll("'", "''")}'`;
 }
 
+/**
+ * npm 11.16+ blocks unapproved lifecycle scripts. Claude Code's Windows
+ * package materializes its native executable in postinstall, so a successful
+ * global install is not usable unless that one package is explicitly trusted.
+ */
+export function globalInstallArgs(pkg, os) {
+  const args = ['install', '-g'];
+  if (os === 'win32' && pkg === '@anthropic-ai/claude-code') {
+    args.push(`--allow-scripts=${pkg}`);
+  }
+  args.push(pkg);
+  return args;
+}
+
 /** Build the source encoded for Windows PowerShell when invoking npm .cmd shims. */
 export function buildWindowsShimAction(executable, args) {
   const literals = args.map(quotePowerShellLiteral).join(', ');
@@ -309,7 +323,7 @@ export function install(options = {}) {
   log('Checking Claude Code...');
   if (!runner.exists('claude')) {
     warn('Claude Code is not installed. Installing...');
-    runner.visible('npm', ['install', '-g', '@anthropic-ai/claude-code']);
+    runner.visible('npm', globalInstallArgs('@anthropic-ai/claude-code', os));
   }
   if (!runner.exists('claude')) throw new Error('Claude Code installation completed but the claude command is not available on PATH.');
   try { ok(`Claude Code ${runner.capture('claude', ['--version']).split(/\r?\n/)[0]}`); }

@@ -37,6 +37,10 @@
   "engines": {
     "node": ">=20.0.0"
   },
+  "allowScripts": {
+    "esbuild": true,
+    "node-pty": true
+  },
   "files": [
     "dist/",
     "schemas/",
