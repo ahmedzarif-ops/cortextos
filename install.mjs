@@ -195,6 +195,28 @@ export function createProcessRunner({ isWindows = platform() === 'win32', env = 
   };
 }
 
+/**
+ * PM2's Windows CLI starts its background daemon even for `--version`. When
+ * invoked through a captured PowerShell shim, that daemon inherits the pipe
+ * handles and prevents the installer from ever observing EOF. Read npm's
+ * installed-package metadata on Windows instead; POSIX keeps its existing CLI
+ * probe because PM2 detaches there without retaining the captured descriptors.
+ */
+export function detectPm2Version(runner, isWindows) {
+  if (!isWindows) return runner.capture('pm2', ['--version']);
+  let metadata;
+  try {
+    metadata = JSON.parse(runner.capture('npm', ['list', '-g', 'pm2', '--depth=0', '--json']));
+  } catch {
+    throw new Error('PM2 is on PATH but its installed package metadata could not be verified.');
+  }
+  const version = metadata?.dependencies?.pm2?.version;
+  if (typeof version !== 'string' || !/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(version)) {
+    throw new Error('PM2 is on PATH but its installed package metadata is invalid.');
+  }
+  return version;
+}
+
 function remoteExists(runner, installDir, name) {
   try {
     runner.capture('git', ['remote', 'get-url', name], { cwd: installDir });
@@ -439,7 +461,7 @@ export function install(options = {}) {
   log('Checking PM2 (process manager)...');
   if (!runner.exists('pm2')) runner.visible('npm', ['install', '-g', 'pm2']);
   if (!runner.exists('pm2')) throw new Error('PM2 installation completed but pm2 is not available on PATH.');
-  ok(`PM2 ${runner.capture('pm2', ['--version'])}`);
+  ok(`PM2 ${detectPm2Version(runner, isWindows)}`);
 
   log('Running cortextos install...');
   runner.visible(process.execPath, [join(installDir, 'dist', 'cli.js'), 'install'], { cwd: installDir });
