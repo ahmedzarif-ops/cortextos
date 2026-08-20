@@ -235,7 +235,8 @@ describe('public cross-platform installer', () => {
     ['dependency install', (call: Call) => call.command === 'npm' && call.kind === 'logged' && call.args.join(' ') === 'install'],
     ['build', (call: Call) => call.command === 'npm' && call.args.join(' ') === 'run build'],
     ['global link and fallback', (call: Call) => call.command === 'npm' && (call.args.join(' ') === 'link' || call.args.join(' ') === 'install -g .')],
-    ['core install', (call: Call) => call.args.at(-1) === 'install' && call.args.some((arg) => arg.endsWith('dist/cli.js'))],
+    ['core install', (call: Call) => call.args.at(-1) === 'install' &&
+      call.args.some((arg) => arg.replaceAll('\\', '/').endsWith('dist/cli.js'))],
   ])('fails closed without a success message when %s fails', (_label, shouldFail) => {
     const root = mkdtempSync(join(tmpdir(), 'installer-failure-'));
     tempRoots.push(root);
