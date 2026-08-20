@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { spawn, type ChildProcess } from 'child_process';
+import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -26,6 +26,33 @@ function isAlive(pid: number): boolean {
 
 function stateDir(): string { return join(ctxRoot, 'state', AGENT); }
 function markerPath(): string { return join(stateDir(), 'opencode-process.json'); }
+
+async function spawnLongLived(ignoreSigterm = false): Promise<ChildProcess> {
+  const signalHandler = ignoreSigterm ? 'process.on("SIGTERM", () => {});' : '';
+  const child = spawn(
+    process.execPath,
+    ['-e', `${signalHandler} setInterval(() => {}, 1e9);`],
+    { stdio: 'ignore' },
+  );
+  await new Promise<void>((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+  children.push(child);
+  return child;
+}
+
+function forceKillTestChild(child: ChildProcess): void {
+  if (!child.pid || !isAlive(child.pid)) return;
+  if (process.platform === 'win32') {
+    spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    return;
+  }
+  try { process.kill(child.pid, 'SIGKILL'); } catch { /* already gone */ }
+}
 
 function writeProcessMarker(pid: number): void {
   mkdirSync(stateDir(), { recursive: true });
@@ -65,9 +92,7 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const c of children) {
-    if (c.pid && isAlive(c.pid)) {
-      try { process.kill(c.pid, 'SIGKILL'); } catch { /* already gone */ }
-    }
+    forceKillTestChild(c);
   }
   children.length = 0;
   try { rmSync(ctxRoot, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -75,9 +100,9 @@ afterEach(() => {
 
 describe('OpencodePTY.cleanupStaleProcessMarker confirm-dead reap', () => {
   it('SIGTERMs a stale process, confirms it is dead, and removes the marker', async () => {
-    // A plain sleep dies on SIGTERM (default disposition).
-    const child = spawn('sleep', ['30'], { stdio: 'ignore' });
-    children.push(child);
+    // A plain Node child dies on SIGTERM (default disposition) and is available
+    // on every supported host without relying on a Unix `sleep` executable.
+    const child = await spawnLongLived();
     const pid = child.pid!;
     expect(isAlive(pid)).toBe(true);
     writeProcessMarker(pid);
@@ -94,12 +119,7 @@ describe('OpencodePTY.cleanupStaleProcessMarker confirm-dead reap', () => {
     // This child installs a no-op SIGTERM handler, so only SIGKILL can end it —
     // proving the escalation path actually confirms death rather than giving up
     // after the ignored SIGTERM.
-    const child = spawn(
-      process.execPath,
-      ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1e9);'],
-      { stdio: 'ignore' },
-    );
-    children.push(child);
+    const child = await spawnLongLived(true);
     const pid = child.pid!;
     // Give node a moment to install the handler before we reap.
     await new Promise((r) => setTimeout(r, 300));
@@ -114,9 +134,9 @@ describe('OpencodePTY.cleanupStaleProcessMarker confirm-dead reap', () => {
   }, 10000);
 
   it('removes a marker for an already-dead pid without error', async () => {
-    const child = spawn('sleep', ['30'], { stdio: 'ignore' });
+    const child = await spawnLongLived();
     const pid = child.pid!;
-    child.kill('SIGKILL');
+    forceKillTestChild(child);
     expect(await waitDead(pid)).toBe(true);
     writeProcessMarker(pid);
 

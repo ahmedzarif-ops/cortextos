@@ -167,7 +167,9 @@ npm test
 **VERIFY**: All tests must pass before proceeding. If any fail, surface the failures:
 > "Some tests failed. This usually means a dependency issue or a platform incompatibility. Let's fix it before moving on."
 
-Diagnose and fix any failures, then re-run until clean.
+Diagnose and fix any failures, then re-run until clean. On Windows, remain on
+the loaded Windows reference's native failure-diagnosis route; do not propose
+or execute Bash, Git Bash, WSL, or POSIX inspection commands.
 
 Then run install:
 ```text

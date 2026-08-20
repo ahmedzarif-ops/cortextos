@@ -9,6 +9,11 @@ Run shell commands in native PowerShell from the repository root unless a step
 says otherwise. These commands are complete; do not ask the user to translate a
 macOS/Linux example. Never invoke WSL or Git Bash.
 
+If a Windows command or verification fails, remain on this Windows route while
+diagnosing it. Use the harness Read/JSON tools and the native PowerShell commands
+in this reference. Never fall back to Bash or POSIX utilities such as `cat`,
+`head`, `grep`, `find`, `ls`, or shell redirection to inspect the failure.
+
 Retain the selected instance ID, organization, repository root, and agent names
 in onboarding state. Put literal values into every CLI call; do not assume a
 PowerShell variable survives a later agent-tool invocation.
@@ -70,6 +75,9 @@ Check the build artifact, install dependencies, test, build, and install:
 ```powershell
 Test-Path -LiteralPath .\dist\cli.js
 npm ci
+Push-Location -LiteralPath (Join-Path (Get-Location).Path 'dashboard')
+npm ci
+Pop-Location
 npm test
 npm run build
 node .\dist\cli.js install

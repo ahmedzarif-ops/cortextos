@@ -64,6 +64,7 @@ describe('canonical root onboarding OS routing', () => {
 
     for (const required of [
       'node --version',
+      "Push-Location -LiteralPath (Join-Path (Get-Location).Path 'dashboard')",
       'node .\\dist\\cli.js install',
       'enabled-agents.json',
       'Invoke-RestMethod',
@@ -106,5 +107,28 @@ describe('canonical root onboarding OS routing', () => {
     expect(windows).toContain('Never invoke WSL or Git Bash');
     expect(windows).toContain('Successful execution of this active `/onboarding` session proves');
     expect(windows).toContain('false unauthenticated result');
+    expect(windows).toContain('Never fall back to Bash or POSIX utilities');
+  });
+
+  it('installs dashboard dependencies before the Windows full-suite gate', () => {
+    const windows = read(WINDOWS_REFERENCE);
+    const commands = fencedBlocks(windows, 'powershell').join('\n');
+    const dashboardInstall = commands.indexOf("Push-Location -LiteralPath (Join-Path (Get-Location).Path 'dashboard')");
+    const fullSuite = commands.indexOf('npm test');
+
+    expect(dashboardInstall).toBeGreaterThanOrEqual(0);
+    expect(commands.indexOf('npm ci', dashboardInstall)).toBeGreaterThan(dashboardInstall);
+    expect(commands.indexOf('Pop-Location', dashboardInstall)).toBeGreaterThan(dashboardInstall);
+    expect(fullSuite).toBeGreaterThan(dashboardInstall);
+  });
+
+  it('keeps Windows failure diagnosis on native tools', () => {
+    const root = read(ROOT_ONBOARDING);
+    const windows = read(WINDOWS_REFERENCE);
+
+    expect(root).toContain("loaded Windows reference's native failure-diagnosis route");
+    expect(root).toContain('do not propose');
+    expect(windows).toContain('Use the harness Read/JSON tools');
+    expect(windows).toContain('Never fall back to Bash or POSIX utilities');
   });
 });
