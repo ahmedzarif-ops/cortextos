@@ -60,14 +60,14 @@ at the final exact commit before VM cleanup.
 | WIN-033 | live-validation-pending | Current runtime readiness marker tolerance (`2f61cb8f`) | Claude/OpenCode readiness suites | Initial Claude crosses readiness without timeout |
 | WIN-034 | integrated-and-regressed | Ignore transient private Git maintenance state (`776b919f`) | immutability stress/three-OS CI | Candidate three-OS CI must remain green |
 | WIN-035 | integrated-and-regressed | Preserve queue until replacement readiness (`3c1f256b`) | agent-process recovery suites | Crash-boundary live message is outside initial handoff scope |
-| WIN-036 | implementation-pending | Existing portability work (`0d466f37`) must be completed with installer and OS references | onboarding portability suite to be strengthened | Public installer → root onboarding → first managed question, no translation |
+| WIN-036 | live-validation-pending | Public installer (`13c8dbe3`, `ca28afaa`), canonical OS routing (`9833f23a`), optional Windows dependency deferral (`a94b514a`), and managed Windows reference (`35a82685`) | installer 18 tests; root routing 5 tests; managed portability plus adjacent templates 111 tests | Public installer → root onboarding → first managed question, no translation |
 | WIN-037 | live-validation-pending | Shared Windows ACL adapter (`0d466f37`) | secret-permissions and CLI writer suites | All new secret files pass live `Get-Acl` inspection |
 
 ## Prior Telegram dogfood findings
 
 | ID | Disposition | Candidate implementation / source | Deterministic evidence | Dogfood 2 live gate or residual |
 |---|---|---|---|---|
-| DOG-001 | implementation-pending | Complete public installer plus root/managed Windows reference work | installer/onboarding portability tests | Full clean initial Windows path required |
+| DOG-001 | live-validation-pending | Public installer, root Windows operational reference, and managed reference are integrated at `ca28afaa` | installer/root/managed focused suites pass | Full clean initial Windows path required |
 | DOG-002 | environment-orchestration-control | Use one foreground dependency install; never overlap observer retries | Serialized execution runbook | A single clean install failure would reopen as product |
 | DOG-003 | live-validation-pending | Shared fail-closed Windows ACL adapter (`0d466f37`) | secret-permissions tests | Inspect installer, org, agent, dashboard secrets live |
 | DOG-004 | live-validation-pending | Two bots valid; current run activates Claude bot only | Telegram routing/poller suites | User sends fresh `hi`; exactly one authorized route |
@@ -77,16 +77,16 @@ at the final exact commit before VM cleanup.
 | DOG-008 | live-validation-pending | Native Claude resolver (`bbdd8f35`) | Claude command/profile/doctor tests | Fresh scheduled Claude stays stable and answers |
 | DOG-009 | environment-orchestration-control | Task Scheduler owns PM2; SSH-owned PM2 is not acceptance | startup helper/ecosystem tests | New admin session must not kill daemon/dashboard |
 | DOG-010 | live-validation-pending | Generation/bootstrap/stability recovery notice (`3ff763ce`) | recovery-notification suite | No false recovered/crashed burst during initial soak |
-| DOG-011 | implementation-pending | Global rule (`0958d5d1`) needs explicit structural boundaries/reference | managed onboarding structural tests | Exactly one first Telegram question live |
-| DOG-012 | implementation-pending | Replace “translate it yourself” with selected Windows operational reference | static portability and live command observation | No Bash/WSL/manual translation in initial managed turn |
+| DOG-011 | live-validation-pending | Every shipped managed role/skill now requires one question, one answer, one outbound message, then `END YOUR TURN` (`35a82685`) | deterministic inventory/turn-boundary suite plus adjacent template suites: 111 tests | Exactly one first Telegram question live |
+| DOG-012 | live-validation-pending | One operations-only Windows managed reference is selected after `process.platform`; shared conversation remains canonical (`35a82685`) | managed portability/reference contract passes | No Bash/WSL/manual translation in initial managed turn |
 
 ## Dogfood 2 findings
 
 | ID | Severity | Classification | Status | Observation | Closure evidence |
 |---|---|---|---|---|---|
-| DOG2-001 | high | product/install/prerequisite | fixed; live validation pending | The global Windows `claude.ps1` shim points at a missing legacy package path while the authenticated executable lives in the architecture-specific optional dependency | Shared resolver now selects `claude-code-win32-<arch>/claude.exe`; stale-shim regression plus resolver/profile/doctor/PTY run passed 4 files, 34 tests; installer handoff still must consume the resolver or repair the command |
-| DOG2-002 | critical | product/installer portability | implementation-pending | `install.mjs` still declares WSL required, pre-blocks on compiler tools, treats jq as core, and can continue after a failed pull | Native minimal prerequisites, fail-closed branch-aware installer tests, exact PowerShell 5.1 command, clean live run |
-| DOG2-003 | high | product/runtime dispatch | fixed; candidate regression pending | `AgentPTY.spawn()` ignored the runtime adapter's `getBinaryName()` and always used the Claude resolver, so an OpenCode agent launched `claude` despite its native adapter | Existing failing OpenCode binary assertion plus AgentPTY/Hermes/Claude/lifecycle focused run: 5 files, 76 tests passed |
+| DOG2-001 | high | product/install/prerequisite | fixed; live validation pending | The global Windows `claude.ps1` shim points at a missing legacy package path while the authenticated executable lives in the architecture-specific optional dependency | Shared resolver now selects `claude-code-win32-<arch>/claude.exe`; stale-shim regression plus resolver/profile/doctor/PTY run passed 4 files, 34 tests; clean daemon boot must prove the native path |
+| DOG2-002 | critical | product/installer portability | fixed; live validation pending | The prior `install.mjs` declared WSL required, pre-blocked on compiler tools, treated jq as core, and could continue after a failed pull | Native argument-array runner, PowerShell 5.1 file bootstrap, selected-remote/branch enforcement, conditional compiler guidance, fail-closed stages, and Windows optional-tool deferral pass 20 focused installer/core-install tests; clean public-command run remains |
+| DOG2-003 | high | product/runtime dispatch | fixed; candidate-wide regression pending | `AgentPTY.spawn()` ignored the runtime adapter's `getBinaryName()` and always used the Claude resolver, so an OpenCode agent launched `claude` despite its native adapter | Existing failing OpenCode binary assertion plus AgentPTY/Hermes/Claude/lifecycle focused run: 5 files, 76 tests passed |
 
 ## Gate A baseline evidence
 
@@ -100,6 +100,15 @@ at the final exact commit before VM cleanup.
 - Narrow shared fix now respects runtime `getBinaryName()` while retaining
   Claude command-prefix/profile preparation only for the base Claude command.
   Adjacent verification passed: 5 files, 76 tests.
+- Dashboard baseline checks passed: `npx tsc --noEmit` and `npm run build`.
+  Existing Next.js workspace-root, middleware, dynamic-spawn, and viewport
+  warnings were classified as unrelated/non-functional for this run.
+- `bash tests/leak-guard.test.sh` passed before integration.
+- Gate B implementation commits through `ca28afaa` contain no in-scope
+  `implementation-pending` disposition. Focused installer/core-install tests
+  passed 20/20; canonical root routing passed 5/5 plus the pre-existing root
+  route contract; managed onboarding and adjacent template suites passed
+  111/111; root typecheck/build passed after each implementation stream.
 - Candidate-wide rerun remains Gate C work after all bounded implementation
   streams integrate.
 
