@@ -10,6 +10,10 @@ import { writeSecretFileSync } from '../platform/secret-permissions.js';
 const IS_WINDOWS = platform() === 'win32';
 const IS_MAC = platform() === 'darwin';
 
+export function shouldInstallLegacyOptionalDependencies(hostPlatform: NodeJS.Platform): boolean {
+  return hostPlatform !== 'win32';
+}
+
 // Defense in depth: only allow well-formed package and command names so that
 // even if a future caller passes user-controlled input, no shell injection is
 // possible. spawnSync with array args also prevents shell parsing.
@@ -222,7 +226,13 @@ export const installCommand = new Command('install')
       }
     }
 
-    // jq — required for bus scripts
+    // The native Windows runtime and Node bus do not require the historical
+    // POSIX helper stack. Keep optional media/KB setup out of the core Windows
+    // install; guided onboarding installs those components only if selected.
+    if (!shouldInstallLegacyOptionalDependencies(platform())) {
+      console.log('  - optional media, jq, and Knowledge Base dependencies: deferred to guided onboarding');
+    } else {
+    // jq — required by legacy POSIX helper scripts
     if (!commandExists('jq')) {
       console.log('  - jq: not found. Installing...');
       const installed = tryInstallJq();
@@ -320,8 +330,8 @@ export const installCommand = new Command('install')
       }
     } else {
       console.log(`  ! ${python3Cmd}: not found. Knowledge Base requires Python 3.`);
-      if (IS_WINDOWS) console.log('    Install from: https://www.python.org/downloads/');
-      else console.log('    Install with: sudo apt-get install -y python3 python3-venv');
+      console.log('    Install with: sudo apt-get install -y python3 python3-venv');
+    }
     }
 
     console.log('');

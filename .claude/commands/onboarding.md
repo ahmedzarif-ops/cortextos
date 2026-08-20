@@ -458,9 +458,10 @@ If yes:
    permissions established by `cortextos init`. Never put the key in a shell
    command or report.
 
-3. The cross-platform `cortextos install` step already creates the Python venv
-   and installs KB dependencies when Python is available. Verify the venv and
-   run a real ingest/query through the Node bus CLI.
+3. On Windows, use W5 to install the optional KB environment only after this
+   opt-in. On macOS/Linux, `cortextos install` creates the Python venv and
+   installs KB dependencies when Python is available. Verify the venv and run a
+   real ingest/query through the Node bus CLI.
 
 4. Verify the core imports, ChromaDB directory, and one bounded query. If Python
    or the optional KB dependencies are unavailable, explain the remediation and

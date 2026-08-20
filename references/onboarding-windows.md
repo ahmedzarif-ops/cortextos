@@ -136,9 +136,16 @@ Keep `127.0.0.1:3000` and use the existing authenticated administration tunnel.
 
 ## W5. Optional knowledge base
 
-Python and knowledge-base dependencies are optional. When the user opts in,
-verify the installer-created virtual environment and run the Node bus contract.
-Set the Gemini key with the harness Edit tool, never a command line.
+Python and knowledge-base dependencies are optional and the native Windows core
+install deliberately defers them. When the user opts in, verify Python 3, create
+the virtual environment, install its locked requirements, and then run the Node
+bus contract. Set the Gemini key with the harness Edit tool, never a command
+line.
+
+```powershell
+python -m venv .\knowledge-base\venv
+.\knowledge-base\venv\Scripts\python.exe -m pip install --requirement .\knowledge-base\scripts\requirements.txt
+```
 
 ```powershell
 $env:CTX_INSTANCE_ID = '<instance-id>'
