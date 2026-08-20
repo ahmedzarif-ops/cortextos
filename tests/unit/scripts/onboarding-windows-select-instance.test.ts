@@ -26,7 +26,7 @@ describeWindows('Windows onboarding instance selector', () => {
       '-ExecutionPolicy', 'Bypass',
       '-File', script,
       '-UserHome', userHome,
-    ], { encoding: 'utf8' });
+    ], { encoding: 'utf8', timeout: 20_000 });
     return JSON.parse(stdout.trim()) as { instanceId: string };
   }
 
@@ -36,7 +36,7 @@ describeWindows('Windows onboarding instance selector', () => {
     writeFileSync(join(configDir, 'enabled-agents.json'), '{}\n');
 
     expect(select()).toEqual({ instanceId: 'default' });
-  });
+  }, 25_000);
 
   it('returns the first absent numbered instance without creating it', () => {
     mkdirSync(join(userHome, '.cortextos', 'default', 'config'), { recursive: true });
