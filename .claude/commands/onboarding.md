@@ -18,9 +18,12 @@ other command, detect the host exactly once with:
 node -p "process.platform"
 ```
 
-If the result is `win32`, read
-`references/onboarding-windows.md` completely before Phase 2
-and use it as the operational implementation for every OS-specific step. Keep
+If the result is `win32`, use the Read tool directly on the exact
+repository-relative path `references/onboarding-windows.md` and read it
+completely before Phase 2. If the tool requires an absolute path, prepend the
+current workspace root. Do not use Glob, `find`, or any shell command to locate
+this known file. Use it as the operational implementation for every OS-specific
+step. Keep
 this file as the single conversational flow: preserve its questions, verbatim
 text, ordering, pacing, validation, and completion gates. Do not execute or
 show the macOS/Linux command blocks and do not ask the user to translate them.

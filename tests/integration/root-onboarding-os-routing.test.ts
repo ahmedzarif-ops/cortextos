@@ -27,8 +27,10 @@ describe('canonical root onboarding OS routing', () => {
     const root = read(ROOT_ONBOARDING);
 
     expect(root).toContain('node -p "process.platform"');
-    expect(root).toContain('If the result is `win32`, read');
+    expect(root).toContain('If the result is `win32`, use');
     expect(root).toContain(WINDOWS_REFERENCE);
+    expect(root).toContain('use the Read tool directly');
+    expect(root).toContain('Do not use Glob, `find`, or any shell command');
     expect(root).toContain('do not load the Windows reference');
     expect(root).toContain('do not ask the user to translate them');
     expect(fencedBlocks(root, 'powershell')).toHaveLength(0);
