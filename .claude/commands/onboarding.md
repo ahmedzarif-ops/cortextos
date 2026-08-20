@@ -12,29 +12,29 @@ You are guiding the user through a complete interactive onboarding for cortextOS
 ## Cross-platform execution contract
 
 This onboarding supports native Windows, macOS, and Linux. Before running any
-command, detect the host with:
+other command, detect the host exactly once with:
 
 ```text
 node -p "process.platform"
 ```
 
-Treat `win32` as native Windows. On Windows:
+If the result is `win32`, read
+`references/onboarding-windows.md` completely before Phase 2
+and use it as the operational implementation for every OS-specific step. Keep
+this file as the single conversational flow: preserve its questions, verbatim
+text, ordering, pacing, validation, and completion gates. Do not execute or
+show the macOS/Linux command blocks and do not ask the user to translate them.
+The reference owns the Windows operations `Start-Process http://localhost:3000`,
+`Get-NetTCPConnection -LocalPort 3000`, and
+`scripts\install-windows-pm2-startup.ps1`, including its rule to
+never run `pm2 startup` on Windows; their presence here is routing metadata, not a second
+implementation.
 
-- use PowerShell and Windows paths;
-- do not require Bash, WSL, Git Bash, Unix utilities, symlink privileges, or
-  Windows Developer Mode;
-- use `Get-Command`, `Test-Path`, `Get-Content`, `Set-Content`, `Copy-Item`,
-  `New-Item`, `Start-Process`, and `Get-NetTCPConnection` when a shell operation
-  is genuinely needed;
-- use the repository's Node CLI for Cortext operations and the Windows startup
-  helper for persistence;
-- never run `pm2 startup`, `sudo`, `chmod`, `which`, `uname`, `grep`, `sed`,
-  `touch`, `cat`, `tail`, `lsof`, or a background `&` command.
+For `darwin` or `linux`, do not load the Windows reference. The existing
+macOS/Linux commands and behavior below remain authoritative.
 
-On macOS/Linux, the Bash examples remain valid. Commands below that are marked
-`macOS/Linux` must never be given to a Windows user. Prefer the Read, Write,
-Edit, Glob, and JSON-aware tools of the active agent harness over shell text
-processing on every platform.
+Prefer the Read, Write, Edit, Glob, and JSON-aware tools of the active agent
+harness over shell text processing on every platform.
 
 Shell variables do not reliably persist between agent tool calls. Retain
 `INSTANCE_ID`, `CTX_ROOT`, `ORG_NAME`, and agent names in the onboarding state,
@@ -97,9 +97,12 @@ If the command fails or shows an auth error:
 
 Do not proceed until Claude Code is authenticated.
 
-Check each dependency by running its native version/status command. On Windows,
-use `Get-Command <name> -ErrorAction SilentlyContinue` if a command is missing;
-on macOS/Linux use `command -v <name>`.
+**Windows:** perform the dependency checks and remediation in W1 of the loaded
+Windows reference, then resume at Phase 3. W1 defines the actual native core
+prerequisites; do not substitute the macOS/Linux list below.
+
+**macOS/Linux:** check each dependency with its native version/status command
+and use `command -v <name>` if a command is missing.
 
 ```text
 node --version
@@ -120,11 +123,7 @@ For any missing dependency, install using the appropriate package manager:
 - `node` / `npm`: `curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt-get install -y nodejs`
 - `jq`: `sudo apt-get install -y jq`
 
-**Windows (PowerShell - run as Administrator):**
-- `node` / `npm`: `winget install OpenJS.NodeJS` or `choco install nodejs`
-- `jq`: `winget install jqlang.jq` or `choco install jq`
-
-**All platforms:**
+**macOS/Linux:**
 - `pm2`: `npm install -g pm2`
 - `claude`: Tell user to install from https://docs.anthropic.com/en/docs/claude-code - cannot be auto-installed
 
@@ -142,9 +141,12 @@ npm install -g pm2
 
 ## Phase 3: Install
 
-Check if already installed by inspecting `dist/cli.js` with the harness file
-tools (`Test-Path .\dist\cli.js` in PowerShell). Do not use a Unix `ls` probe on
-Windows.
+**Windows:** use W2 of the loaded Windows reference for build inspection,
+install/test/build, native instance paths, and state/JSON operations. Continue
+to apply every shared verification and failure gate in this phase.
+
+**macOS/Linux:** check if already installed by inspecting `dist/cli.js` with
+the harness file tools.
 
 If not built:
 ```text
@@ -174,12 +176,10 @@ cortextos install
 
 **Do not ask the user about instance names.** Auto-assign one silently:
 
-Use the harness file/JSON tools to inspect the native user-home `.cortextos`
-directory. Reuse `default` only when its `config/enabled-agents.json` is an
-empty object. Otherwise choose the first absent `cortextosN` directory. On
-Windows the base is `%USERPROFILE%\.cortextos`; on macOS/Linux it is
-`$HOME/.cortextos`. Do not make the user choose the ID and do not implement
-this selection with OS-specific shell parsing.
+Use the harness file/JSON tools to inspect `$HOME/.cortextos`. Reuse `default`
+only when its `config/enabled-agents.json` is an empty object. Otherwise choose
+the first absent `cortextosN` directory. Do not make the user choose the ID and
+do not implement this selection with shell parsing.
 
 **IMPORTANT:** Every `node dist/cli.js <subcommand>` call below MUST include
 `--instance "${INSTANCE_ID}"` (and `--org "${ORG_NAME}"` where the command
@@ -190,8 +190,7 @@ across multiple `~/.cortextos/<instance>/` trees. Always pass the flags.
 
 Do not rely on exported variables surviving between tool calls. Pass the
 instance explicitly on every CLI command. When PM2 is started in Phase 9, set
-`CTX_INSTANCE_ID`, `CTX_ROOT`, and the scoped `PM2_HOME` in that same native
-shell invocation.
+`CTX_INSTANCE_ID`, `CTX_ROOT`, and `PM2_HOME` in that same shell invocation.
 
 ---
 
@@ -219,6 +218,11 @@ Ask these questions one at a time. Follow up on interesting answers. Let the use
 8. "What communication style should your agents have? Casual / professional / technical?"
 
 ### 4c. Create Organization
+
+**Windows:** use the explicit native CLI form in W2 of the loaded Windows
+reference and the harness JSON operations described there.
+
+**macOS/Linux:**
 
 ```bash
 ORG_NAME="<validated org name>"
@@ -325,20 +329,9 @@ Then tell the user: "Now send any message to your new bot on Telegram (just 'hi'
 
 Use long polling (timeout=30) so Telegram holds the connection open until a message arrives instead of returning empty immediately. Read the token from the restricted `.env`; do not interpolate it into the logged command.
 
-**Windows PowerShell:**
-
-```powershell
-$AgentEnv = Join-Path $PWD "orgs\<org-name>\agents\<orchestrator-name>\.env"
-$OrchBotToken = ((Get-Content -LiteralPath $AgentEnv | Where-Object { $_ -like 'BOT_TOKEN=*' } | Select-Object -First 1) -split '=', 2)[1]
-$OrchChatId = $null
-$OrchUserId = $null
-for ($i = 0; $i -lt 3 -and -not $OrchChatId; $i++) {
-  $ChatInfo = Invoke-RestMethod -Method Get -Uri ("https://api.telegram.org/bot" + $OrchBotToken + "/getUpdates?timeout=30")
-  $Message = @($ChatInfo.result | Where-Object { $_.message -and $_.message.chat.type -eq 'private' } | Select-Object -Last 1).message
-  if ($Message) { $OrchChatId = [string]$Message.chat.id; $OrchUserId = [string]$Message.from.id }
-  if (-not $OrchChatId -and $i -lt 2) { Start-Sleep -Seconds 5 }
-}
-```
+**Windows:** use W3 of the loaded Windows reference. It implements this exact
+long-poll timing and credential boundary natively; do not translate the block
+below.
 
 **macOS/Linux:**
 
@@ -385,7 +378,7 @@ node dist/cli.js enable <orchestrator-name> --org <org-name> --instance <instanc
 
 Verify:
 read the selected instance's `config/enabled-agents.json` as JSON and verify the
-orchestrator entry is enabled. Do not use `cat | jq` on Windows.
+orchestrator entry is enabled.
 
 ---
 
@@ -396,6 +389,11 @@ orchestrator entry is enabled. Do not use `cat | jq` on Windows.
 > "Let's prepare the web dashboard - this is your real-time view of all agents, tasks, approvals, costs, and analytics. It will start with the agents under the same supervised process configuration."
 
 ### 7b. Install and configure
+
+**Windows:** use W4 of the loaded Windows reference for native directory,
+install/build, supervision, listener, and browser/VPS operations.
+
+**macOS/Linux:**
 
 ```text
 cd <absolute-framework-root>/dashboard
@@ -421,14 +419,13 @@ permissions and keeps secrets out of PM2 configuration.
 
 ### 7c. Build and start
 
-Do not launch `npm run dev &`; it creates an unsupervised process and is not a
-native PowerShell backgrounding contract. Phase 9 starts the generated
-dashboard entry under PM2. After it is healthy, open it with:
+Do not launch `npm run dev &`; it creates an unsupervised process. Phase 9
+starts the generated dashboard entry under PM2. After it is healthy, open it
+with:
 
 - macOS: `open http://localhost:3000`
 - Linux: `xdg-open http://localhost:3000`
-- Windows desktop: `Start-Process http://localhost:3000`
-- Windows/Linux VPS: keep it bound to `127.0.0.1` and use the existing secure
+- Linux VPS: keep it bound to `127.0.0.1` and use the existing secure
   administration tunnel; never open a public dashboard port during onboarding.
 
 Walk the user through the dashboard pages:
@@ -463,8 +460,7 @@ If yes:
 
 3. The cross-platform `cortextos install` step already creates the Python venv
    and installs KB dependencies when Python is available. Verify the venv and
-   run a real ingest/query through the Node bus CLI. Do not require
-   `bash bus/kb-setup.sh` on Windows.
+   run a real ingest/query through the Node bus CLI.
 
 4. Verify the core imports, ChromaDB directory, and one bounded query. If Python
    or the optional KB dependencies are unavailable, explain the remediation and
@@ -473,16 +469,7 @@ If yes:
 5. Offer to ingest initial docs:
    > "The knowledge base is ready. Want to seed it with any files now? Drop a file path or URL - docs, PDFs, images, anything. You can always add more later, and your agents will ingest their own findings as they work."
 
-   For each file:
-   Windows PowerShell:
-
-   ```powershell
-   $env:CTX_INSTANCE_ID = '<instance-id>'
-   $env:CTX_FRAMEWORK_ROOT = (Get-Location).Path
-   node dist/cli.js bus kb-ingest <path> --org <org-name> --scope shared
-   ```
-
-   macOS/Linux:
+   For each file, use W5 of the loaded reference on Windows. On macOS/Linux:
 
    ```bash
    CTX_INSTANCE_ID='<instance-id>' CTX_FRAMEWORK_ROOT="$PWD" node dist/cli.js bus kb-ingest <path> --org <org-name> --scope shared
@@ -503,23 +490,9 @@ Use an instance-specific output filename. On a VPS, generate a loopback-only
 dashboard with `--dashboard-host 127.0.0.1`; on a normal desktop, preserve the
 documented local default unless the user asks for a different bind.
 
-**Windows PowerShell:**
-
-```powershell
-$InstanceId = '<instance-id>'
-$OrgName = '<org-name>'
-$env:CTX_INSTANCE_ID = $InstanceId
-$env:CTX_ROOT = Join-Path $env:USERPROFILE ".cortextos\$InstanceId"
-$env:PM2_HOME = if ($InstanceId -eq 'default') { Join-Path $env:USERPROFILE '.pm2' } else { Join-Path $env:USERPROFILE ".pm2-$InstanceId" }
-$Ecosystem = "ecosystem.$InstanceId.config.js"
-node dist/cli.js ecosystem --instance $InstanceId --org $OrgName --output $Ecosystem --dashboard-host 127.0.0.1
-pm2 start $Ecosystem
-pm2 save
-```
-
-For a Windows desktop where other devices do not need dashboard access, the
-loopback bind is still the safe default. Do not open a firewall/NSG port during
-onboarding.
+**Windows:** use W6 of the loaded Windows reference. It sets the instance,
+state root, scoped PM2 home, ecosystem, and loopback dashboard in one native
+PowerShell invocation.
 
 **macOS/Linux:**
 
@@ -537,18 +510,8 @@ Do not equate a PM2 `online` row with an agent that is ready to accept messages.
 
 ### 9b. Configure reboot survival by platform
 
-**Windows:** never run `pm2 startup`. Register the repository's idempotent,
-limited-privilege Task Scheduler helper from the same authenticated Windows
-account that owns the runtime credentials and PM2 state:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install-windows-pm2-startup.ps1 -InstanceId $InstanceId -Pm2Home $env:PM2_HOME
-```
-
-Use the default Logon trigger for a desktop. On a headless Windows VPS use
-`-TriggerMode Startup` so recovery does not depend on RDP/login. Run the helper
-twice and confirm it updates one scoped task rather than creating duplicates.
-It stores no Windows password.
+**Windows:** use W7 of the loaded Windows reference for native, idempotent,
+instance-scoped reboot persistence.
 
 **macOS/Linux:** run `pm2 startup`, capture its recommended privileged command,
 and defer that optional human step to Phase 10. Do not execute a generated sudo
@@ -563,8 +526,8 @@ node dist/cli.js status --instance <instance-id>
 ```
 
 Confirm the dashboard responds only on its intended interface and the enabled
-agent has crossed its runtime-readiness gate. Then open the local dashboard and
-say:
+agent has crossed its runtime-readiness gate. On Windows use W8 for diagnostics,
+logs, port health, and browser/VPS handoff. Then open the local dashboard and say:
 
 > "Daemon and dashboard are running. Your Orchestrator is completing first boot and will message you on Telegram when onboarding is ready to continue."
 
@@ -585,9 +548,8 @@ Deliver verbatim:
 
 ### Optional reboot survival (deferred — non-blocking)
 
-On Windows, report whether the scoped Task Scheduler registration succeeded and
-whether it uses Logon (desktop) or Startup (headless VPS). Do not show Mac/sudo
-instructions.
+On Windows, use W9 of the loaded Windows reference for the native completion
+report and stop before the macOS/Linux block below.
 
 On macOS/Linux, if `PM2_SUDO_CMD` from Phase 9b is non-empty, deliver this
 verbatim AT THE END (not mid-flow):
@@ -613,8 +575,7 @@ If `PM2_SUDO_CMD` is empty (PM2 startup is already configured, or the system doe
 **Agent not messaging on Telegram:**
 1. Run `node dist/cli.js doctor --instance <instance>` and `node dist/cli.js status --instance <instance>`.
 2. Inspect the selected instance's agent `stdout.log`, `activity.log`, and
-   `fast-checker.log` with the harness Read tool. On Windows PowerShell,
-   `Get-Content -LiteralPath <path> -Tail 50` is the native fallback.
+   `fast-checker.log` with the harness Read tool.
 3. Verify `.env` has non-empty BOT_TOKEN, CHAT_ID, and ALLOWED_USER without
    printing their values.
 4. Check for one poller per token and a Telegram 409 conflict. Never start a
@@ -622,9 +583,9 @@ If `PM2_SUDO_CMD` is empty (PM2 startup is already configured, or the system doe
 
 **Daemon not starting:**
 1. Check `pm2 logs <instance-scoped-daemon-name> --lines 30`.
-2. Verify `dist/daemon.js` with `Test-Path` on PowerShell or the harness file tool.
+2. Verify `dist/daemon.js` with the harness file tool.
 3. Parse the selected instance's `config/enabled-agents.json` with a JSON-aware
-   tool; do not use `cat | jq` on Windows.
+   tool.
 
 **Agent crashing immediately:**
 1. Check stdout.log for errors
@@ -633,6 +594,8 @@ If `PM2_SUDO_CMD` is empty (PM2 startup is already configured, or the system doe
 
 **Dashboard not loading:**
 1. Check `dashboard/.env.local` has correct absolute paths (no `~`)
-2. On Windows, inspect `Get-NetTCPConnection -LocalPort 3000`; on macOS/Linux,
-   use `lsof -i :3000`
+2. On macOS/Linux, use `lsof -i :3000`
 3. Check dashboard npm logs
+
+On Windows, use the W9 troubleshooting overlay instead of translating these
+macOS/Linux shell diagnostics.
