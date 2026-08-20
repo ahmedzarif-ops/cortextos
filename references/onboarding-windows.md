@@ -70,17 +70,14 @@ user, and never claim readiness from the existence of an unrelated
 
 ## W2. Repository install and instance state
 
-Check the build artifact, install dependencies, test, build, and install:
+The repository verification is one fail-closed native operation. Do not inspect
+artifacts or dependency directories first, do not skip a stage because one is
+already present, and do not split or rewrite this command. Submit this exact
+line once; the checked-in script installs both locked dependency trees before
+the full suite, then tests, builds, and installs core state in order:
 
 ```powershell
-Test-Path -LiteralPath .\dist\cli.js
-npm ci
-Push-Location -LiteralPath (Join-Path (Get-Location).Path 'dashboard')
-npm ci
-Pop-Location
-npm test
-npm run build
-node .\dist\cli.js install
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\onboarding-windows-install.ps1
 ```
 
 Use harness file and JSON tools to select the instance under

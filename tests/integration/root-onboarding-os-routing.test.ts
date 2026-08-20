@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 const ROOT = join(__dirname, '..', '..');
 const ROOT_ONBOARDING = '.claude/commands/onboarding.md';
 const WINDOWS_REFERENCE = 'references/onboarding-windows.md';
+const WINDOWS_INSTALL_SCRIPT = 'scripts/onboarding-windows-install.ps1';
 
 function read(relative: string): string {
   // Git may materialize Markdown with CRLF on Windows. The onboarding contract
@@ -64,8 +65,7 @@ describe('canonical root onboarding OS routing', () => {
 
     for (const required of [
       'node --version',
-      "Push-Location -LiteralPath (Join-Path (Get-Location).Path 'dashboard')",
-      'node .\\dist\\cli.js install',
+      'onboarding-windows-install.ps1',
       'enabled-agents.json',
       'Invoke-RestMethod',
       'npm run build',
@@ -116,14 +116,22 @@ describe('canonical root onboarding OS routing', () => {
 
   it('installs dashboard dependencies before the Windows full-suite gate', () => {
     const windows = read(WINDOWS_REFERENCE);
-    const commands = fencedBlocks(windows, 'powershell').join('\n');
-    const dashboardInstall = commands.indexOf("Push-Location -LiteralPath (Join-Path (Get-Location).Path 'dashboard')");
-    const fullSuite = commands.indexOf('npm test');
+    const script = read(WINDOWS_INSTALL_SCRIPT);
+    const rootInstall = script.indexOf("Invoke-NativeStage 'Root dependency installation'");
+    const dashboardInstall = script.indexOf("Invoke-NativeStage 'Dashboard dependency installation'");
+    const fullSuite = script.indexOf("Invoke-NativeStage 'Full test suite'");
+    const build = script.indexOf("Invoke-NativeStage 'CLI build'");
+    const coreInstall = script.indexOf("Invoke-NativeStage 'Core state installation'");
 
+    expect(windows).toContain('-File .\\scripts\\onboarding-windows-install.ps1');
+    expect(windows).toContain('do not split or rewrite this command');
+    expect(rootInstall).toBeGreaterThanOrEqual(0);
     expect(dashboardInstall).toBeGreaterThanOrEqual(0);
-    expect(commands.indexOf('npm ci', dashboardInstall)).toBeGreaterThan(dashboardInstall);
-    expect(commands.indexOf('Pop-Location', dashboardInstall)).toBeGreaterThan(dashboardInstall);
+    expect(dashboardInstall).toBeGreaterThan(rootInstall);
     expect(fullSuite).toBeGreaterThan(dashboardInstall);
+    expect(build).toBeGreaterThan(fullSuite);
+    expect(coreInstall).toBeGreaterThan(build);
+    expect(script).toContain('if ($LASTEXITCODE -ne 0)');
   });
 
   it('keeps Windows failure diagnosis on native tools', () => {
