@@ -138,14 +138,28 @@ function remoteExists(runner, installDir, name) {
   }
 }
 
+function remoteIdentity(value) {
+  return String(value).trim()
+    .replace(/^git@([^:]+):/i, '$1/')
+    .replace(/^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]+@)?/i, '')
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '')
+    .replace(/\.git$/i, '')
+    .toLowerCase();
+}
+
 /** Update the explicitly selected branch or throw before any build occurs. */
 export function updateCheckout({ runner, installDir, repoUrl, branch }) {
   let remote;
   if (remoteExists(runner, installDir, 'upstream')) {
+    const upstreamUrl = runner.capture('git', ['remote', 'get-url', 'upstream'], { cwd: installDir });
+    if (remoteIdentity(upstreamUrl) !== remoteIdentity(repoUrl)) {
+      throw new Error('Existing checkout upstream does not match the selected cortextOS repository.');
+    }
     remote = 'upstream';
   } else if (remoteExists(runner, installDir, 'origin')) {
     const originUrl = runner.capture('git', ['remote', 'get-url', 'origin'], { cwd: installDir });
-    if (!(originUrl.includes('grandamenium/cortextos') || originUrl === repoUrl)) {
+    if (remoteIdentity(originUrl) !== remoteIdentity(repoUrl)) {
       throw new Error('Existing checkout has no upstream remote and origin is not the selected cortextOS repository.');
     }
     runner.visible('git', ['remote', 'rename', 'origin', 'upstream'], { cwd: installDir });

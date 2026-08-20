@@ -54,24 +54,44 @@ flowchart TD
 
 ## Quick Start
 
-**Requirements:** Node.js 20+, Claude API key, PM2, Telegram bot token from @BotFather.
+**Before installing:** Node.js 20+, npm, Git, and an authenticated agent runtime.
+The installer adds PM2 and Claude Code when they are missing. Guided onboarding
+will ask for a Telegram bot token when it is needed.
+
+macOS/Linux:
 
 ```bash
-# 1. Install PM2 globally if you don't have it
-npm install -g pm2
+curl -fsSL https://raw.githubusercontent.com/grandamenium/cortextos/main/install.mjs | node --input-type=module
 
-# 2. Install cortextOS
-curl -fsSL https://raw.githubusercontent.com/grandamenium/cortextos/main/install.mjs | node
-
-# 3. Open the project in Claude Code and run guided onboarding
+# Open the project in Claude Code and run guided onboarding
 claude ~/cortextos
 # Then inside Claude Code:
 # /onboarding
 ```
 
+Windows PowerShell 5.1 or newer:
+
+```powershell
+$p = Join-Path ([IO.Path]::GetTempPath()) ('cortextos-install-' + [guid]::NewGuid() + '.mjs')
+try {
+  Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/grandamenium/cortextos/main/install.mjs' -OutFile $p
+  node $p
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+} finally {
+  Remove-Item $p -Force -ErrorAction SilentlyContinue
+}
+
+claude (Join-Path $env:USERPROFILE 'cortextos')
+# Then inside Claude Code: /onboarding
+```
+
 Onboarding handles everything: dependency checks, org setup, bot creation, PM2 config, and dashboard launch. Your Orchestrator comes online in Telegram and finishes its own setup there.
 
 ### Manual setup (advanced)
+
+The shell example below is for macOS/Linux. Native Windows users should use the
+guided `/onboarding` flow; its Windows reference performs the equivalent file,
+CLI, dashboard, and persistence operations without translating Bash commands.
 
 ```bash
 cortextos install                          # Set up state directories
@@ -103,9 +123,10 @@ pm2 startup
 | Dependency | Notes |
 |---|---|
 | Node.js 20+ | [nodejs.org](https://nodejs.org) |
-| macOS, Linux, or Windows 10/11 | Windows uses Task Scheduler for reboot persistence — see `scripts/install-windows-pm2-startup.ps1` |
+| macOS, Linux, Windows 10/11, or Windows Server | Windows uses Task Scheduler for reboot persistence — see `scripts/install-windows-pm2-startup.ps1` |
 | Agent runtime | Claude Code, Codex, and OpenCode are supported; install and authenticate only the runtimes used by your agents |
-| PM2 | `npm install -g pm2` |
+| Git | [git-scm.com](https://git-scm.com/downloads) |
+| PM2 | Installed automatically; supervises the daemon, dashboard, and agents |
 | Telegram bot token | Create via @BotFather |
 
 ---
@@ -114,8 +135,11 @@ pm2 startup
 
 cortextOS runs directly in Windows with the same Node.js daemon used on macOS
 and Linux. Docker, WSL, and Windows Developer Mode are not required. Install
-Node.js and the agent CLIs in the same Windows user account that will run PM2,
-then verify executable and authentication readiness without printing credentials:
+Node.js, Git, and the agent CLIs in the same Windows user account that will run
+PM2. The public PowerShell command above performs the real clone, dependency
+install, build, global CLI registration, and core state installation without
+Bash or POSIX utilities. Then verify executable and authentication readiness
+without printing credentials:
 
 ```powershell
 cortextos doctor

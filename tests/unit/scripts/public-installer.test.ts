@@ -58,10 +58,14 @@ describe('public cross-platform installer', () => {
 
   it('documents a PowerShell 5.1 file bootstrap instead of putting source in argv', () => {
     const source = readFileSync(join(process.cwd(), 'install.mjs'), 'utf8');
+    const readme = readFileSync(join(process.cwd(), 'README.md'), 'utf8');
     expect(source).toContain("Invoke-WebRequest -UseBasicParsing");
     expect(source).toContain('-OutFile $p; node $p;');
     expect(source).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }');
     expect(source).not.toContain('node -e "$(irm');
+    expect(readme).toContain("Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/grandamenium/cortextos/main/install.mjs' -OutFile $p");
+    expect(readme).toContain('node --input-type=module');
+    expect(readme).not.toContain('node -e "$(irm');
   });
 
   it('rejects unsafe branch refs and preserves valid selected branches', () => {
@@ -134,6 +138,24 @@ describe('public cross-platform installer', () => {
     expect(gitArgs).toContain('checkout -b codex/dogfood-2 --track upstream/codex/dogfood-2');
     expect(gitArgs).toContain('pull --ff-only upstream codex/dogfood-2');
     expect(gitArgs.every((args) => !/(?:^|\s)main(?:\s|$)/.test(args))).toBe(true);
+  });
+
+  it('refuses to update an existing checkout from an unexpected upstream', () => {
+    const runner = fakeRunner();
+    runner.capture = vi.fn((command: string, args: string[] = [], opts: { cwd?: string } = {}) => {
+      if (`${command} ${args.join(' ')}` === 'git remote get-url upstream') {
+        return 'https://example.test/untrusted/repository.git';
+      }
+      return '';
+    });
+
+    expect(() => installer.updateCheckout({
+      runner,
+      installDir: '/tmp/cortextos',
+      repoUrl: 'https://github.com/grandamenium/cortextos.git',
+      branch: 'main',
+    })).toThrow(/upstream does not match/);
+    expect(runner.calls.some((call) => call.command === 'git' && call.args[0] === 'fetch')).toBe(false);
   });
 
   it('propagates update failure before downstream installation can run', () => {
