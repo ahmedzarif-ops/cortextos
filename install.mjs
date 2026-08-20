@@ -12,7 +12,7 @@
  */
 
 import { spawnSync } from 'child_process';
-import { existsSync, readdirSync, statSync, chmodSync } from 'fs';
+import { existsSync, readdirSync, statSync, chmodSync, readFileSync } from 'fs';
 import { join, resolve, win32 } from 'path';
 import { homedir, platform } from 'os';
 import { pathToFileURL } from 'url';
@@ -127,6 +127,32 @@ export function resolveClaudeNativeFromPath(
   return null;
 }
 
+/** Resolve an npm-style Windows global package beside the command shims on PATH. */
+export function resolveWindowsGlobalPackageVersion(
+  pathValue,
+  packageName,
+  fileExists = existsSync,
+  readFile = (path) => readFileSync(path, 'utf8'),
+) {
+  if (!/^[a-z0-9_-]+$/i.test(packageName)) return null;
+  for (const rawEntry of String(pathValue || '').split(win32.delimiter)) {
+    const prefix = rawEntry.trim().replace(/^"|"$/g, '');
+    if (!prefix) continue;
+    const hasShim = ['cmd', 'exe', 'bat'].some((extension) =>
+      fileExists(win32.join(prefix, `${packageName}.${extension}`)));
+    if (!hasShim) continue;
+    const manifest = win32.join(prefix, 'node_modules', packageName, 'package.json');
+    if (!fileExists(manifest)) continue;
+    try {
+      const version = JSON.parse(readFile(manifest))?.version;
+      if (typeof version === 'string') return version;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 function resolveOnPath(command, isWindows, env = process.env) {
   if (command.includes('/') || command.includes('\\')) return command;
   if (isWindows && command.toLowerCase() === 'claude') {
@@ -192,6 +218,10 @@ export function createProcessRunner({ isWindows = platform() === 'win32', env = 
     visible: (command, args = [], opts = {}) => invoke(command, args, opts, true),
     logged: (command, args = [], opts = {}) => invoke(command, args, opts, 'logged'),
     exists: (command) => resolveOnPath(command, isWindows, env) !== null,
+    windowsPackageVersion: (packageName) => resolveWindowsGlobalPackageVersion(
+      env.PATH || env.Path || env.path,
+      packageName,
+    ),
   };
 }
 
@@ -204,15 +234,9 @@ export function createProcessRunner({ isWindows = platform() === 'win32', env = 
  */
 export function detectPm2Version(runner, isWindows) {
   if (!isWindows) return runner.capture('pm2', ['--version']);
-  let metadata;
-  try {
-    metadata = JSON.parse(runner.capture('npm', ['list', '-g', 'pm2', '--depth=0', '--json']));
-  } catch {
-    throw new Error('PM2 is on PATH but its installed package metadata could not be verified.');
-  }
-  const version = metadata?.dependencies?.pm2?.version;
+  const version = runner.windowsPackageVersion?.('pm2');
   if (typeof version !== 'string' || !/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(version)) {
-    throw new Error('PM2 is on PATH but its installed package metadata is invalid.');
+    throw new Error('PM2 is on PATH but its adjacent installed package metadata is invalid.');
   }
   return version;
 }

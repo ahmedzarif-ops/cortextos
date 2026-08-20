@@ -43,7 +43,6 @@ function fakeRunner(options: {
     if (key === 'claude --version') return '2.1.0';
     if (key === 'claude auth status') return '{"loggedIn":true}';
     if (key === 'pm2 --version') return '6.0.0';
-    if (key === 'npm list -g pm2 --depth=0 --json') return '{"dependencies":{"pm2":{"version":"6.0.0"}}}';
     if (key === 'git remote get-url upstream') {
       if (options.upstream === false) throw new installer.InstallerCommandError(key, 2);
       return 'https://github.com/grandamenium/cortextos.git';
@@ -60,6 +59,7 @@ function fakeRunner(options: {
     capture: (command: string, args?: string[], opts?: { cwd?: string }) => invoke('capture', command, args, opts),
     visible: (command: string, args?: string[], opts?: { cwd?: string }) => invoke('visible', command, args, opts),
     logged: (command: string, args?: string[], opts?: { cwd?: string }) => invoke('logged', command, args, opts),
+    windowsPackageVersion: (packageName: string) => packageName === 'pm2' ? '6.0.0' : null,
   };
 }
 
@@ -241,11 +241,6 @@ describe('public cross-platform installer', () => {
     expect(names).not.toContain('jq');
     expect(names).not.toContain('python');
     expect(names).not.toContain('cl.exe');
-    expect(runner.calls).toContainEqual(expect.objectContaining({
-      kind: 'capture',
-      command: 'npm',
-      args: ['list', '-g', 'pm2', '--depth=0', '--json'],
-    }));
     expect(runner.calls).not.toContainEqual(expect.objectContaining({
       command: 'pm2',
       args: ['--version'],
@@ -276,19 +271,24 @@ describe('public cross-platform installer', () => {
     ]));
   });
 
+  it('resolves Windows PM2 metadata beside its PATH shim without launching PM2', () => {
+    const prefix = 'C:\\ProgramData\\cortextos\\npm-global';
+    const shim = `${prefix}\\pm2.cmd`;
+    const manifest = `${prefix}\\node_modules\\pm2\\package.json`;
+    expect(installer.resolveWindowsGlobalPackageVersion(
+      `C:\\missing;${prefix}`,
+      'pm2',
+      (path: string) => path === shim || path === manifest,
+      (path: string) => path === manifest ? '{"version":"6.0.0"}' : '',
+    )).toBe('6.0.0');
+  });
+
   it('fails closed when Windows PM2 package metadata is missing or malformed', () => {
     const runner = fakeRunner();
-    runner.capture = vi.fn((command: string, args: string[] = []) => {
-      if (`${command} ${args.join(' ')}` === 'npm list -g pm2 --depth=0 --json') {
-        return '{"dependencies":{}}';
-      }
-      return '';
-    });
+    runner.windowsPackageVersion = vi.fn(() => null);
 
     expect(() => installer.detectPm2Version(runner, true)).toThrow(/metadata is invalid/);
-    expect(runner.capture).toHaveBeenCalledWith(
-      'npm', ['list', '-g', 'pm2', '--depth=0', '--json'],
-    );
+    expect(runner.windowsPackageVersion).toHaveBeenCalledWith('pm2');
   });
 
   it.each([
