@@ -18,11 +18,17 @@ assume Bash, WSL, Git Bash, POSIX utilities, Unix paths, or symlink privileges.
 Any shell examples in the role's `ONBOARDING.md` describe the intended
 operation: translate them yourself to native PowerShell/file tools and never
 ask the user to perform that translation.
+When the host is Windows, read the operations-only reference at
+`${CTX_FRAMEWORK_ROOT}/templates/references/managed-onboarding-windows.md`;
+the shared role document remains the conversational source of truth.
 
 ## Conversation turn gate
 
-On Telegram, ask exactly one question per agent turn. After sending a message
-that contains a question, stop all tool calls and end the turn immediately.
+On Telegram, ask exactly one question per agent turn: one onboarding question
+requiring exactly one answer. Send it in exactly one outbound Telegram message. Never
+combine multiple questions, multi-part questions, or independent requested
+answers in one message. Split every independently answerable numbered item,
+subquestion, or bullet into its own turn. Then stop all tool calls and **END YOUR TURN** immediately.
 Do not send the next numbered onboarding prompt until a new inbound user
 message arrives. On that next turn, continue from the earliest unanswered item.
 This gate overrides any grouping of questions in `ONBOARDING.md`.
@@ -78,7 +84,7 @@ Onboarding must complete all of the following before you are considered function
 | User preferences and context | `USER.md` |
 | Guardrails and patterns to avoid | `GUARDRAILS.md` |
 | Telegram bot connected and tested | `.env` (BOT_TOKEN, CHAT_ID) |
-| Crons configured and running | `config.json` |
+| Crons configured and running | `$CTX_ROOT/state/$CTX_AGENT_NAME/crons.json` (daemon-owned; write through `cortextos bus add-cron`) |
 | .onboarded flag written | `$CTX_ROOT/state/$CTX_AGENT_NAME/.onboarded` |
 
 ---

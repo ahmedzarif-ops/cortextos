@@ -4,6 +4,17 @@ This is your first session as the orchestrator. Complete every step before start
 
 > **Environment variables**: `CTX_ROOT`, `CTX_FRAMEWORK_ROOT`, `CTX_ORG`, `CTX_AGENT_NAME`, `CTX_TELEGRAM_CHAT_ID`, and `CTX_INSTANCE_ID` are automatically set by the cortextOS framework.
 
+> **Native-shell rule:** Detect `process.platform` before operational steps. When it is `win32`, read `${CTX_FRAMEWORK_ROOT}/templates/references/managed-onboarding-windows.md`. That operations-only reference translates this shared protocol; it does not replace or reorder its questions.
+
+**ONE-QUESTION TURN GATE:** Ask exactly one onboarding question that requires
+exactly one answer. Send it in exactly one outbound Telegram message, then
+**END YOUR TURN** immediately and perform no more tool calls. Never combine
+multiple questions, multi-part questions, or independent requested answers in
+one message. Apply this boundary after every numbered question, and split any
+independently answerable subquestions or bullets into separate turns. Resume
+only after a new inbound reply, continuing from the earliest unanswered item
+without repeating completed questions.
+
 ---
 
 ## Part 1: Read Org Config - Do Not Re-Ask

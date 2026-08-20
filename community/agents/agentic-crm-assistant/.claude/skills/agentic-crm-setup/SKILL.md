@@ -9,7 +9,17 @@ This skill turns the generic template into a user's assistant. It is intentional
 
 ## Setup Principles
 
-- Ask questions in small batches. If the user is on Telegram, stop after each batch and wait for their reply.
+- Keep this single shared setup sequence on every OS. When `process.platform`
+  is `win32`, read the operations-only reference at
+  `${CTX_FRAMEWORK_ROOT}/templates/references/managed-onboarding-windows.md`;
+  do not clone or reorder the conversation.
+- On Telegram, ask exactly one onboarding question requiring exactly one answer
+  in exactly one outbound message. Never combine multiple questions, multi-part
+  questions, or independent requested answers. Split every independently
+  answerable numbered item, subquestion, or bullet into its own turn. Then stop
+  every tool call and **END YOUR TURN** immediately. Continue only after a new
+  inbound reply, from the earliest unanswered item, without repeating completed
+  questions. The numbered items below are a sequence, never a single-turn batch.
 - Keep all user-specific information out of community template files until the user provides it.
 - Use tool discovery before asking the user to type credentials.
 - Never ask for secrets in chat. Ask the user to place credentials in agent `.env`, org `secrets.env`, connector configuration, or the relevant tool's auth flow.
@@ -121,15 +131,22 @@ After gathering answers, update:
 - `GOALS.md` and `goals.json` — initial operational goals
 - `SYSTEM.md` — org, timezone, orchestrator, communication style
 - `TOOLS.md` — detected and configured commands
-- `config.json` — timezone, day mode, cron cadence
+- `config.json` — timezone and day mode (not cron definitions)
+- `$CTX_ROOT/state/$CTX_AGENT_NAME/crons.json` — daemon-owned persistent
+  schedules created only through `cortextos bus add-cron`
 - `crm/contacts.json` — seed contacts and categories
 - `crm/relationship-health.json` — review cadence defaults
 - `crm/followups.jsonl` — initial commitments if supplied
 - `MEMORY.md` — durable preferences only
 
-## Suggested Question Batches
+## Suggested One-Question Sequence
 
-### Batch 1: Identity and Scope
+Ask each numbered item as its own Telegram question requiring one answer and end
+the turn after it. If an item contains independently answerable parts, split
+those parts into separate turns too. Section headings organize the sequence;
+they do not authorize sending multiple questions in one message.
+
+### Stage 1: Identity and Scope
 
 Ask:
 
@@ -139,7 +156,7 @@ Ask:
 4. Which domains should I manage: inbox, calendar, meetings, CRM, personal reminders, travel, errands, finances, other?
 5. What should I never touch?
 
-### Batch 2: Tools
+### Stage 2: Tools
 
 Ask which service they use per domain, then run the Tool Discovery + Connect loop
 above for each one (research the CLI, walk them through auth, verify):
@@ -154,7 +171,7 @@ Tell them up front: for each one they name, I will find the right CLI, walk you
 through connecting it right here, and confirm it works before moving on. No secrets
 in chat.
 
-### Batch 3: CRM
+### Stage 3: CRM
 
 Ask:
 
@@ -164,7 +181,11 @@ Ask:
 4. What interaction types matter?
 5. What tags or custom fields matter in your life/business?
 
-### Batch 4: Schedule
+### Stage 4: Schedule
+
+After each cadence is answered, create the persistent schedule with
+`cortextos bus add-cron`; never use `/loop` or hand-edit `config.json` or
+`crons.json`.
 
 Ask:
 
@@ -174,7 +195,7 @@ Ask:
 4. When should I send morning/evening/pending-items summaries?
 5. How often should I do relationship reviews?
 
-### Batch 5: Approval Rules
+### Stage 5: Approval Rules
 
 Ask:
 
@@ -187,6 +208,9 @@ Ask:
 ## Completion
 
 When setup is complete:
+
+On Windows, use the shared operations reference for the native state marker and
+the same `cortextos` CLI calls. On macOS/Linux, the equivalent commands are:
 
 ```bash
 mkdir -p "${CTX_ROOT}/state/${CTX_AGENT_NAME}"
