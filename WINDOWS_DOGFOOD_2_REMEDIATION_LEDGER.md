@@ -84,7 +84,7 @@ at the final exact commit before VM cleanup.
 
 | ID | Severity | Classification | Status | Observation | Closure evidence |
 |---|---|---|---|---|---|
-| DOG2-001 | high | product/install/prerequisite | implementation-pending | The global Windows `claude.ps1` shim points at a missing package-native path even though another native `claude.exe` exists and remains authenticated | Installer/doctor share robust executable discovery, repair or give actionable failure, deterministic stale-shim regression, clean live handoff |
+| DOG2-001 | high | product/install/prerequisite | fixed; live validation pending | The global Windows `claude.ps1` shim points at a missing legacy package path while the authenticated executable lives in the architecture-specific optional dependency | Shared resolver now selects `claude-code-win32-<arch>/claude.exe`; stale-shim regression plus resolver/profile/doctor/PTY run passed 4 files, 34 tests; installer handoff still must consume the resolver or repair the command |
 | DOG2-002 | critical | product/installer portability | implementation-pending | `install.mjs` still declares WSL required, pre-blocks on compiler tools, treats jq as core, and can continue after a failed pull | Native minimal prerequisites, fail-closed branch-aware installer tests, exact PowerShell 5.1 command, clean live run |
 | DOG2-003 | high | product/runtime dispatch | fixed; candidate regression pending | `AgentPTY.spawn()` ignored the runtime adapter's `getBinaryName()` and always used the Claude resolver, so an OpenCode agent launched `claude` despite its native adapter | Existing failing OpenCode binary assertion plus AgentPTY/Hermes/Claude/lifecycle focused run: 5 files, 76 tests passed |
 

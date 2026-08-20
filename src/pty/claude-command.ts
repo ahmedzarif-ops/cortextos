@@ -19,6 +19,7 @@ export function resolveClaudeCommand(
   platform: NodeJS.Platform = process.platform,
   env: NodeJS.ProcessEnv = process.env,
   fileExists: (path: string) => boolean = existsSync,
+  arch: NodeJS.Architecture = process.arch,
 ): ClaudeCommand {
   if (platform !== 'win32') return { file: 'claude', argsPrefix: [] };
 
@@ -29,6 +30,20 @@ export function resolveClaudeCommand(
     const candidates = [
       win32.join(prefix, 'claude.exe'),
       win32.join(prefix, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'),
+      // Current Claude Code packages keep the native binary in an
+      // architecture-specific optional dependency. npm may still generate a
+      // claude.ps1/.cmd shim pointing at the legacy bin/claude.exe path even
+      // when that file is absent, so resolve the shipped executable directly.
+      win32.join(
+        prefix,
+        'node_modules',
+        '@anthropic-ai',
+        'claude-code',
+        'node_modules',
+        '@anthropic-ai',
+        `claude-code-win32-${arch === 'arm64' ? 'arm64' : 'x64'}`,
+        'claude.exe',
+      ),
     ];
     for (const candidate of candidates) {
       if (fileExists(candidate)) return { file: candidate, argsPrefix: [] };

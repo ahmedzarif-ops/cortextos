@@ -11,6 +11,30 @@ describe('resolveClaudeCommand', () => {
     });
   });
 
+  it('selects the architecture package when the generated npm shim target is stale', () => {
+    const prefix = 'C:\\ProgramData\\cortextos\\npm-global';
+    const expected = [
+      prefix,
+      'node_modules',
+      '@anthropic-ai',
+      'claude-code',
+      'node_modules',
+      '@anthropic-ai',
+      'claude-code-win32-x64',
+      'claude.exe',
+    ].join('\\');
+
+    expect(resolveClaudeCommand(
+      'win32',
+      { PATH: prefix },
+      path => path === expected,
+      'x64',
+    )).toEqual({
+      file: expected,
+      argsPrefix: [],
+    });
+  });
+
   it('uses a shell adapter only when no native executable is available', () => {
     expect(resolveClaudeCommand('win32', { PATH: 'C:\\bin', ComSpec: 'C:\\Windows\\System32\\cmd.exe' }, () => false))
       .toEqual({
