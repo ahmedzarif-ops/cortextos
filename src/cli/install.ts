@@ -6,6 +6,7 @@ import { execSync, spawnSync } from 'child_process';
 import { randomBytes } from 'crypto';
 import { verifyPtySpawn } from '../platform/pty-smoke.js';
 import { writeSecretFileSync } from '../platform/secret-permissions.js';
+import { resolveClaudeCommand, type ClaudeCommand } from '../pty/claude-command.js';
 
 const IS_WINDOWS = platform() === 'win32';
 const IS_MAC = platform() === 'darwin';
@@ -41,6 +42,28 @@ function tryInstallGlobal(pkg: string): boolean {
     ? spawnSync(`npm ${args.join(' ')}`, { stdio: 'inherit', timeout: 120000, shell: true })
     : spawnSync('npm', args, { stdio: 'inherit', timeout: 120000 });
   return result.status === 0;
+}
+
+export function resolveInstallClaudeInvocation(
+  hostPlatform: NodeJS.Platform = platform(),
+  env: NodeJS.ProcessEnv = process.env,
+  fileExists: (path: string) => boolean = existsSync,
+  hostArch: NodeJS.Architecture = arch(),
+): ClaudeCommand {
+  return resolveClaudeCommand(hostPlatform, env, fileExists, hostArch);
+}
+
+function runClaude(args: string[]): string {
+  const invocation = resolveInstallClaudeInvocation();
+  const result = spawnSync(invocation.file, [...invocation.argsPrefix, ...args], {
+    encoding: 'utf-8',
+    stdio: 'pipe',
+    windowsHide: true,
+  });
+  if (result.error || result.status !== 0) {
+    throw result.error || new Error(`Claude exited ${String(result.status)}`);
+  }
+  return String(result.stdout || '').trim();
 }
 
 function commandExists(cmd: string): boolean {
@@ -129,7 +152,7 @@ export const installCommand = new Command('install')
     // Claude Code
     let claudeOk = false;
     try {
-      const v = execSync('claude --version', { encoding: 'utf-8', stdio: 'pipe' }).trim().split('\n')[0];
+      const v = runClaude(['--version']).split(/\r?\n/)[0];
       console.log(`  ✓ claude: ${v}`);
       claudeOk = true;
     } catch {
@@ -137,7 +160,7 @@ export const installCommand = new Command('install')
       console.log('    Auto-installing Claude Code...');
       if (tryInstallGlobal('@anthropic-ai/claude-code')) {
         try {
-          const v = execSync('claude --version', { encoding: 'utf-8', stdio: 'pipe' }).trim().split('\n')[0];
+          const v = runClaude(['--version']).split(/\r?\n/)[0];
           console.log(`  ✓ claude: ${v} (just installed)`);
           claudeOk = true;
         } catch { /* PATH may need refresh */ }
@@ -153,7 +176,7 @@ export const installCommand = new Command('install')
     {
       let authenticated = false;
       try {
-        const authOutput = execSync('claude auth status', { encoding: 'utf-8', stdio: 'pipe' }).trim();
+        const authOutput = runClaude(['auth', 'status']);
         if (authOutput.includes('"loggedIn": true') || authOutput.includes('"loggedIn":true')) {
           authenticated = true;
         }

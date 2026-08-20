@@ -13,7 +13,7 @@
 
 import { spawnSync } from 'child_process';
 import { existsSync, readdirSync, statSync, chmodSync } from 'fs';
-import { join, resolve } from 'path';
+import { join, resolve, win32 } from 'path';
 import { homedir, platform } from 'os';
 import { pathToFileURL } from 'url';
 
@@ -79,8 +79,41 @@ export function buildWindowsShimAction(executable, args) {
   ].join('\r\n');
 }
 
+export function resolveClaudeNativeFromPath(
+  pathValue,
+  architecture = process.arch,
+  fileExists = existsSync,
+) {
+  for (const rawEntry of String(pathValue || '').split(win32.delimiter)) {
+    const prefix = rawEntry.trim().replace(/^"|"$/g, '');
+    if (!prefix) continue;
+    const candidates = [
+      win32.join(prefix, 'claude.exe'),
+      win32.join(prefix, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'),
+      win32.join(
+        prefix,
+        'node_modules',
+        '@anthropic-ai',
+        'claude-code',
+        'node_modules',
+        '@anthropic-ai',
+        `claude-code-win32-${architecture === 'arm64' ? 'arm64' : 'x64'}`,
+        'claude.exe',
+      ),
+    ];
+    for (const candidate of candidates) {
+      if (fileExists(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
 function resolveOnPath(command, isWindows, env = process.env) {
   if (command.includes('/') || command.includes('\\')) return command;
+  if (isWindows && command.toLowerCase() === 'claude') {
+    const native = resolveClaudeNativeFromPath(env.PATH || env.Path || env.path, process.arch);
+    if (native) return native;
+  }
   const locator = isWindows ? 'where.exe' : 'which';
   const result = spawnSync(locator, [command], {
     encoding: 'utf8',

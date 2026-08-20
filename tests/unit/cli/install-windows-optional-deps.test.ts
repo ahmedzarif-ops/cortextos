@@ -1,7 +1,11 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { describe, expect, it } from 'vitest';
-import { globalInstallArgs, shouldInstallLegacyOptionalDependencies } from '../../../src/cli/install.js';
+import {
+  globalInstallArgs,
+  resolveInstallClaudeInvocation,
+  shouldInstallLegacyOptionalDependencies,
+} from '../../../src/cli/install.js';
 
 describe('core install optional dependencies', () => {
   it('defers the historical POSIX helper stack on native Windows only', () => {
@@ -24,6 +28,15 @@ describe('core install optional dependencies', () => {
   it('allows only the native dependency build scripts required by this repository', () => {
     const manifest = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'));
     expect(manifest.allowScripts).toEqual({ esbuild: true, 'node-pty': true });
+  });
+
+  it('bypasses an earlier stale shim and selects a later native Claude package', () => {
+    const stale = 'C:\\ProgramData\\stale-npm';
+    const current = 'C:\\Users\\Test User\\AppData\\Roaming\\npm';
+    const native = `${current}\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe`;
+    expect(resolveInstallClaudeInvocation(
+      'win32', { PATH: `${stale};${current}` }, path => path === native, 'x64',
+    )).toEqual({ file: native, argsPrefix: [] });
   });
 
   it('keeps the Windows core path free of the Bash-only model installer', () => {

@@ -134,6 +134,15 @@ describe('public cross-platform installer', () => {
     ]);
   });
 
+  it('selects a native Claude package behind an earlier stale Windows shim prefix', () => {
+    const stale = 'C:\\ProgramData\\stale-npm';
+    const current = 'C:\\Users\\Test User\\AppData\\Roaming\\npm';
+    const native = `${current}\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe`;
+    expect(installer.resolveClaudeNativeFromPath(
+      `${stale};${current}`, 'x64', (path: string) => path === native,
+    )).toBe(native);
+  });
+
   it('uses the selected branch for fresh clone and remote configuration', () => {
     const runner = fakeRunner();
     installer.cloneCheckout({
