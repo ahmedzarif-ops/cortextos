@@ -90,7 +90,13 @@ Ask: "Ready to get started? And - do you already have a Telegram bot token ready
 
 Check and auto-install all dependencies. Do not ask permission - just install what is missing.
 
-**First: verify Claude Code is authenticated** - the default core agents run as Claude Code sessions and require a valid login:
+**Windows:** perform W1 of the loaded Windows reference as the sole Phase 2
+dependency and authentication check, then resume at Phase 3. Do not execute any
+other command in this phase on Windows. W1 defines the actual native core
+prerequisites and uses the Cortext runtime resolver; do not substitute a bare
+`claude` command or the macOS/Linux list below.
+
+**macOS/Linux only — first verify Claude Code is authenticated** - the default core agents run as Claude Code sessions and require a valid login:
 ```text
 claude --version
 claude auth status
@@ -99,10 +105,6 @@ If the command fails or shows an auth error:
 > "Claude Code is not authenticated. Run `claude login` in your terminal to sign in, then restart this Claude Code session."
 
 Do not proceed until Claude Code is authenticated.
-
-**Windows:** perform the dependency checks and remediation in W1 of the loaded
-Windows reference, then resume at Phase 3. W1 defines the actual native core
-prerequisites; do not substitute the macOS/Linux list below.
 
 **macOS/Linux:** check each dependency with its native version/status command
 and use `command -v <name>` if a command is missing.

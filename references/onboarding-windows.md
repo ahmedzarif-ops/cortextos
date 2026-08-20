@@ -20,18 +20,25 @@ utilities, Python, and compiler tooling are not core runtime prerequisites.
 Python is optional and is checked only if the user enables the knowledge base.
 
 ```powershell
-node -p "process.platform"
 node --version
 npm --version
-claude --version
-claude auth status
 pm2 --version
+node .\dist\cli.js doctor --instance default
 ```
 
-If a command is unavailable, identify it without producing a PowerShell error:
+The platform was already detected before this reference was loaded; do not run
+`node -p "process.platform"` again. Run this block once through the native
+PowerShell tool, not once through each available shell. The doctor output is the
+authority for Claude Code executable and authentication readiness because it
+uses the same native Windows runtime resolver as the daemon. Both `Claude Code
+CLI` and `Claude Code auth` must report `[OK]` before proceeding. Never replace
+this with a bare `claude` probe.
+
+If Node, npm, or PM2 is unavailable, identify it without producing a PowerShell
+error:
 
 ```powershell
-Get-Command node,npm,claude,pm2 -ErrorAction SilentlyContinue | Select-Object Name,Source
+Get-Command node,npm,pm2 -ErrorAction SilentlyContinue | Select-Object Name,Source
 ```
 
 Install missing Node.js with the user's available native package manager:
@@ -46,9 +53,12 @@ Install missing PM2 after Node/npm work:
 npm install --global pm2
 ```
 
-Claude Code authentication is interactive. If `claude auth status` is not
-healthy, tell the user to run `claude login` in this same Windows account and
-resume only after status succeeds. Never copy authentication from another user.
+If doctor reports that Claude Code is missing, rerun the public PowerShell
+installer so it can install and resolve the native executable safely. If it
+reports that Claude Code authentication is not ready, stop and have the user
+authenticate in this same Windows account, then rerun doctor. Never copy
+authentication from another user, and never claim readiness from the fact that
+an unrelated `claude.cmd` or `claude.ps1` shim exists.
 
 ## W2. Repository install and instance state
 

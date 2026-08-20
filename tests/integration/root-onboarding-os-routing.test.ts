@@ -31,6 +31,8 @@ describe('canonical root onboarding OS routing', () => {
     expect(root).toContain(WINDOWS_REFERENCE);
     expect(root).toContain('use the Read tool directly');
     expect(root).toContain('Do not use Glob, `find`, or any shell command');
+    expect(root).toContain('as the sole Phase 2');
+    expect(root).toContain('do not substitute a bare');
     expect(root).toContain('do not load the Windows reference');
     expect(root).toContain('do not ask the user to translate them');
     expect(fencedBlocks(root, 'powershell')).toHaveLength(0);
@@ -61,7 +63,7 @@ describe('canonical root onboarding OS routing', () => {
 
     for (const required of [
       'node --version',
-      'claude auth status',
+      'node .\\dist\\cli.js doctor --instance default',
       'node .\\dist\\cli.js install',
       'enabled-agents.json',
       'Invoke-RestMethod',
@@ -90,9 +92,12 @@ describe('canonical root onboarding OS routing', () => {
 
     expect(commands).not.toMatch(/(^|[\s;&|])(?:wsl|bash|sudo|chmod|which|uname|grep|sed|touch|cat|tail|lsof|awk|jq)(?=$|[\s;&|])/im);
     expect(commands).not.toContain('pm2 startup');
+    expect(commands).not.toContain('node -p "process.platform"');
+    expect(commands).not.toMatch(/(^|\s)claude(?:\.cmd|\.ps1)?\s/im);
     expect(commands).not.toContain('npm run dev');
     expect(commands).not.toMatch(/(?:^|\s)&(?:\s|$)/m);
     expect(windows).toContain('do not ask the user to translate');
     expect(windows).toContain('Never invoke WSL or Git Bash');
+    expect(windows).toContain('Both `Claude Code\nCLI` and `Claude Code auth` must report `[OK]`');
   });
 });
