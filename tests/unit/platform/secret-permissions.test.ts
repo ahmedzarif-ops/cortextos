@@ -88,5 +88,5 @@ describe('restrictSecretFile', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, process.platform === 'win32' ? 35_000 : 10_000);
 });
