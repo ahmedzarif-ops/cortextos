@@ -95,6 +95,9 @@ describe('canonical root onboarding OS routing', () => {
 
     expect(dependencyCheck).toContain('node --version');
     expect(dependencyCheck).toContain('pm2 --version');
+    expect(dependencyCheck).toContain('powershell.exe -NoLogo -NoProfile -NonInteractive -Command');
+    expect(dependencyCheck).toContain('node --version; npm --version; pm2 --version');
+    expect(dependencyCheck).not.toContain('&&');
     expect(dependencyCheck).not.toContain('doctor');
     expect(dependencyCheck).not.toContain('claude');
     expect(commands).not.toMatch(/(^|[\s;&|])(?:wsl|bash|sudo|chmod|which|uname|grep|sed|touch|cat|tail|lsof|awk|jq)(?=$|[\s;&|])/im);
@@ -108,6 +111,7 @@ describe('canonical root onboarding OS routing', () => {
     expect(windows).toContain('Successful execution of this active `/onboarding` session proves');
     expect(windows).toContain('false unauthenticated result');
     expect(windows).toContain('Never fall back to Bash or POSIX utilities');
+    expect(windows).toContain('Submit the\nexact line once without rewriting it');
   });
 
   it('installs dashboard dependencies before the Windows full-suite gate', () => {

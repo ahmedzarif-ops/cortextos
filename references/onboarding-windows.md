@@ -24,15 +24,15 @@ Core prerequisites are Node.js 20+, npm, Claude Code, and PM2. `jq`, Unix shell
 utilities, Python, and compiler tooling are not core runtime prerequisites.
 Python is optional and is checked only if the user enables the knowledge base.
 
-```powershell
-node --version
-npm --version
-pm2 --version
-```
-
 The platform was already detected before this reference was loaded; do not run
-`node -p "process.platform"` again. Run this block once through the native
-PowerShell tool, not once through each available shell.
+`node -p "process.platform"` again. Claude Code may label its terminal surface
+`Bash` on Windows, so this block explicitly enters native PowerShell. Submit the
+exact line once without rewriting it, joining it with another command, or
+substituting `&&` or another shell operator:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -Command "node --version; npm --version; pm2 --version"
+```
 
 Successful execution of this active `/onboarding` session proves that Claude
 Code is executable and authenticated for the current Windows account. The
