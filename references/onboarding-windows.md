@@ -107,12 +107,16 @@ Read the `timezone` field from its small JSON result, show that detected IANA
 timezone to the user, and retain the confirmed literal value in onboarding
 state. Do not reimplement or verify this probe through another shell command.
 
-All Cortext CLI calls are native Node commands. Use explicit literal routing:
+All Cortext CLI calls are native Node commands. Claude Code submits these
+through its Bash-labeled terminal surface even on Windows, so every
+repository-relative executable argument must use forward slashes. Backslashes
+are shell escapes there and must not appear in a submitted command. Use these
+explicit literal forms without rewriting them:
 
 ```powershell
-node .\dist\cli.js init '<org-name>' --instance '<instance-id>'
-node .\dist\cli.js add-agent '<agent-name>' --template orchestrator --org '<org-name>' --instance '<instance-id>'
-node .\dist\cli.js enable '<agent-name>' --org '<org-name>' --instance '<instance-id>'
+node ./dist/cli.js init '<org-name>' --instance '<instance-id>'
+node ./dist/cli.js add-agent '<agent-name>' --template orchestrator --org '<org-name>' --instance '<instance-id>'
+node ./dist/cli.js enable '<agent-name>' --org '<org-name>' --instance '<instance-id>'
 ```
 
 Create and update `context.json`, `goals.json`, `config.json`, `.env`,
@@ -182,17 +186,17 @@ bus contract. Set the Gemini key with the harness Edit tool, never a command
 line.
 
 ```powershell
-python -m venv .\knowledge-base\venv
-.\knowledge-base\venv\Scripts\python.exe -m pip install --requirement .\knowledge-base\scripts\requirements.txt
+python -m venv ./knowledge-base/venv
+./knowledge-base/venv/Scripts/python.exe -m pip install --requirement ./knowledge-base/scripts/requirements.txt
 ```
 
 ```powershell
 $env:CTX_INSTANCE_ID = '<instance-id>'
 $env:CTX_FRAMEWORK_ROOT = (Get-Location).Path
-node .\dist\cli.js bus kb-ingest '<native-file-path>' --org '<org-name>' --scope shared
+node ./dist/cli.js bus kb-ingest '<native-file-path>' --org '<org-name>' --scope shared
 ```
 
-Run one bounded query through `node .\dist\cli.js bus` as defined by the current
+Run one bounded query through `node ./dist/cli.js bus` as defined by the current
 CLI help. If Python or optional dependencies are missing, give the exact native
 remediation and let the user defer the knowledge base without failing the core
 agent runtime.
@@ -209,7 +213,7 @@ $env:CTX_INSTANCE_ID = $InstanceId
 $env:CTX_ROOT = Join-Path $env:USERPROFILE ('.cortextos\' + $InstanceId)
 $env:PM2_HOME = if ($InstanceId -eq 'default') { Join-Path $env:USERPROFILE '.pm2' } else { Join-Path $env:USERPROFILE ('.pm2-' + $InstanceId) }
 $Ecosystem = 'ecosystem.' + $InstanceId + '.config.js'
-node .\dist\cli.js ecosystem --instance $InstanceId --org $OrgName --output $Ecosystem --dashboard-host 127.0.0.1
+node ./dist/cli.js ecosystem --instance $InstanceId --org $OrgName --output $Ecosystem --dashboard-host 127.0.0.1
 pm2 start $Ecosystem
 pm2 save
 ```
@@ -223,7 +227,7 @@ idempotent, limited-privilege scheduled task from the same Windows account that
 owns the runtime authentication and PM2 state:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows-pm2-startup.ps1 -InstanceId $InstanceId -Pm2Home $env:PM2_HOME
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-windows-pm2-startup.ps1 -InstanceId $InstanceId -Pm2Home $env:PM2_HOME
 ```
 
 Use the default Logon trigger on a desktop. On a headless VPS add
@@ -234,8 +238,8 @@ is updated rather than duplicated. The helper must not store a Windows password.
 
 ```powershell
 pm2 list
-node .\dist\cli.js doctor --instance '<instance-id>'
-node .\dist\cli.js status --instance '<instance-id>'
+node ./dist/cli.js doctor --instance '<instance-id>'
+node ./dist/cli.js status --instance '<instance-id>'
 Get-NetTCPConnection -State Listen -LocalPort 3000 -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,OwningProcess
 ```
 
@@ -260,6 +264,6 @@ Startup. Do not show privileged macOS/Linux persistence instructions.
 
 For Telegram failure, run doctor/status, inspect bounded agent logs, verify the
 three `.env` fields are non-empty without printing them, and ensure only one
-poller owns the bot token. For daemon failure, verify `.\dist\daemon.js`, PM2
+poller owns the bot token. For daemon failure, verify `./dist/daemon.js`, PM2
 state, and enabled-agent JSON. For dashboard failure, verify the loopback
 listener, generated `dashboard\.env.local`, and supervised dashboard logs.

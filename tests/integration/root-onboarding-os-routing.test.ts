@@ -76,8 +76,8 @@ describe('canonical root onboarding OS routing', () => {
       'pm2 start $Ecosystem',
       'pm2 save',
       'install-windows-pm2-startup.ps1',
-      'node .\\dist\\cli.js doctor',
-      'node .\\dist\\cli.js status',
+      'node ./dist/cli.js doctor',
+      'node ./dist/cli.js status',
       'Get-Content -LiteralPath',
       'Get-NetTCPConnection',
       "Start-Process 'http://localhost:3000'",
@@ -116,6 +116,12 @@ describe('canonical root onboarding OS routing', () => {
     expect(windows).toContain('false unauthenticated result');
     expect(windows).toContain('Never fall back to Bash or POSIX utilities');
     expect(windows).toContain('Submit the\nexact line once without rewriting it');
+    expect(commands).not.toContain('.\\');
+    expect(windows).toContain('Backslashes\nare shell escapes there');
+    expect(windows).toContain("node ./dist/cli.js init '<org-name>'");
+    expect(windows).toContain("node ./dist/cli.js add-agent '<agent-name>'");
+    expect(windows).toContain("node ./dist/cli.js enable '<agent-name>'");
+    expect(windows).not.toContain('node .\\dist\\cli.js');
   });
 
   it('installs dashboard dependencies before the Windows full-suite gate', () => {
