@@ -66,7 +66,14 @@ jobs:
         run: npm ci --prefix dashboard
 
       - name: Run unit tests
-        run: npm test
+        run: npm test -- --exclude tests/integration/phase5-performance.test.ts
+
+      # Wall-clock performance assertions must not share a hosted runner with
+      # Vitest's parallel file workers: scheduler preemption is not product
+      # latency. Keep the product thresholds unchanged and run the complete
+      # performance file in its own single-worker process instead.
+      - name: Run isolated performance tests
+        run: npx vitest run tests/integration/phase5-performance.test.ts --maxWorkers=1 --no-file-parallelism
 
       - name: Run codex parity tests
         run: npm run test:codex
