@@ -23,16 +23,20 @@ Python is optional and is checked only if the user enables the knowledge base.
 node --version
 npm --version
 pm2 --version
-node .\dist\cli.js doctor --instance default
 ```
 
 The platform was already detected before this reference was loaded; do not run
 `node -p "process.platform"` again. Run this block once through the native
-PowerShell tool, not once through each available shell. The doctor output is the
-authority for Claude Code executable and authentication readiness because it
-uses the same native Windows runtime resolver as the daemon. Both `Claude Code
-CLI` and `Claude Code auth` must report `[OK]` before proceeding. Never replace
-this with a bare `claude` probe.
+PowerShell tool, not once through each available shell.
+
+Successful execution of this active `/onboarding` session proves that Claude
+Code is executable and authenticated for the current Windows account. The
+public installer also checks both immediately before printing the native launch
+handoff. Do not spawn `claude auth status`, bare `claude`, or `doctor` as a
+nested child of this Claude session: Claude's child-tool context can report a
+false unauthenticated result even though the same account passes immediately
+outside the session. Validate daemon authentication after boot with the
+readiness and doctor checks in W8.
 
 If Node, npm, or PM2 is unavailable, identify it without producing a PowerShell
 error:
@@ -53,12 +57,11 @@ Install missing PM2 after Node/npm work:
 npm install --global pm2
 ```
 
-If doctor reports that Claude Code is missing, rerun the public PowerShell
-installer so it can install and resolve the native executable safely. If it
-reports that Claude Code authentication is not ready, stop and have the user
-authenticate in this same Windows account, then rerun doctor. Never copy
-authentication from another user, and never claim readiness from the fact that
-an unrelated `claude.cmd` or `claude.ps1` shim exists.
+If this onboarding session itself cannot execute authenticated work, stop and
+have the user authenticate in this same Windows account through the native
+handoff emitted by the public installer. Never copy authentication from another
+user, and never claim readiness from the existence of an unrelated
+`claude.cmd` or `claude.ps1` shim.
 
 ## W2. Repository install and instance state
 

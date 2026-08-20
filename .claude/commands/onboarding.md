@@ -93,8 +93,8 @@ Check and auto-install all dependencies. Do not ask permission - just install wh
 **Windows:** perform W1 of the loaded Windows reference as the sole Phase 2
 dependency and authentication check, then resume at Phase 3. Do not execute any
 other command in this phase on Windows. W1 defines the actual native core
-prerequisites and uses the Cortext runtime resolver; do not substitute a bare
-`claude` command or the macOS/Linux list below.
+prerequisites and the active-session authentication proof; do not spawn a nested
+Claude auth probe or substitute the macOS/Linux list below.
 
 **macOS/Linux only — first verify Claude Code is authenticated** - the default core agents run as Claude Code sessions and require a valid login:
 ```text
