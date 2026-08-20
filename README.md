@@ -64,7 +64,7 @@ macOS/Linux:
 curl -fsSL https://raw.githubusercontent.com/grandamenium/cortextos/main/install.mjs | node --input-type=module
 
 # Open the project in Claude Code and run guided onboarding
-claude ~/cortextos
+cd ~/cortextos && claude
 # Then inside Claude Code:
 # /onboarding
 ```

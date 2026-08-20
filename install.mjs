@@ -74,16 +74,16 @@ export function formatClaudeHandoff(
   architecture = process.arch,
   fileExists = existsSync,
 ) {
-  if (os !== 'win32') return `claude ${JSON.stringify(installDir)}`;
+  if (os !== 'win32') return `cd ${JSON.stringify(installDir)} && claude`;
   const native = resolveClaudeNativeFromPath(
     env.PATH || env.Path || env.path,
     architecture,
     fileExists,
   );
   if (native) {
-    return `& ${quotePowerShellLiteral(native)} ${quotePowerShellLiteral(installDir)}`;
+    return `Set-Location -LiteralPath ${quotePowerShellLiteral(installDir)}; & ${quotePowerShellLiteral(native)}`;
   }
-  return `claude ${quotePowerShellLiteral(installDir)}`;
+  return `Set-Location -LiteralPath ${quotePowerShellLiteral(installDir)}; claude`;
 }
 
 /** Build the source encoded for Windows PowerShell when invoking npm .cmd shims. */

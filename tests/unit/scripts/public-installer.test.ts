@@ -149,11 +149,14 @@ describe('public cross-platform installer', () => {
       'x64',
       (path: string) => path === native,
     )).toBe(
-      "& 'C:\\Users\\Test User\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe' " +
-      "'C:\\Users\\Test User\\cortextos'",
+      "Set-Location -LiteralPath 'C:\\Users\\Test User\\cortextos'; " +
+      "& 'C:\\Users\\Test User\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe'",
     );
     expect(installer.formatClaudeHandoff('/Users/test/cortextos', 'darwin'))
-      .toBe('claude "/Users/test/cortextos"');
+      .toBe('cd "/Users/test/cortextos" && claude');
+    expect(installer.formatClaudeHandoff(
+      'C:\\Users\\Test User\\cortextos', 'win32', { PATH: stale }, 'x64', () => false,
+    )).toBe("Set-Location -LiteralPath 'C:\\Users\\Test User\\cortextos'; claude");
   });
 
   it('uses the selected branch for fresh clone and remote configuration', () => {
