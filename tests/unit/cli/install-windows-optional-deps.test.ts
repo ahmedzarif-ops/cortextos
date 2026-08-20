@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   combineClaudeOutput,
   globalInstallArgs,
+  hasActiveClaudeSession,
   resolveInstallClaudeInvocation,
   shouldInstallLegacyOptionalDependencies,
 } from '../../../src/cli/install.js';
@@ -43,6 +44,12 @@ describe('core install optional dependencies', () => {
   it('recognizes successful Claude output captured on stderr', () => {
     expect(combineClaudeOutput('', '{"loggedIn":true}')).toBe('{"loggedIn":true}');
     expect(combineClaudeOutput('2.0.0', 'native diagnostic')).toBe('2.0.0\nnative diagnostic');
+  });
+
+  it('uses the authenticated parent session instead of a nested Claude auth probe', () => {
+    expect(hasActiveClaudeSession({ CLAUDECODE: '1' })).toBe(true);
+    expect(hasActiveClaudeSession({ CLAUDECODE: '' })).toBe(false);
+    expect(hasActiveClaudeSession({})).toBe(false);
   });
 
   it('keeps the Windows core path free of the Bash-only model installer', () => {

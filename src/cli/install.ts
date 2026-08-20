@@ -60,6 +60,15 @@ export function combineClaudeOutput(stdout: unknown, stderr: unknown): string {
     .join('\n');
 }
 
+export function hasActiveClaudeSession(env: NodeJS.ProcessEnv = process.env): boolean {
+  // Claude Code sets this marker for commands executed by an authenticated
+  // interactive session. Starting another Claude command from that child-tool
+  // context can report a false unauthenticated result even though the parent
+  // session and the same account are healthy outside it. Core installation is
+  // informational here, so the already-running parent is the stronger proof.
+  return typeof env.CLAUDECODE === 'string' && env.CLAUDECODE.length > 0;
+}
+
 function runClaude(args: string[]): string {
   const invocation = resolveInstallClaudeInvocation();
   const result = spawnSync(invocation.file, [...invocation.argsPrefix, ...args], {
@@ -184,16 +193,19 @@ export const installCommand = new Command('install')
 
     // Claude Code auth check — use `claude auth status` which covers all auth methods
     {
-      let authenticated = false;
-      try {
-        const authOutput = runClaude(['auth', 'status']);
-        if (authOutput.includes('"loggedIn": true') || authOutput.includes('"loggedIn":true')) {
-          authenticated = true;
-        }
-      } catch {
-        // claude auth status failed — check env var as fallback
-        if (process.env.ANTHROPIC_API_KEY) {
-          authenticated = true;
+      const activeClaudeSession = hasActiveClaudeSession();
+      let authenticated = activeClaudeSession;
+      if (!activeClaudeSession) {
+        try {
+          const authOutput = runClaude(['auth', 'status']);
+          if (authOutput.includes('"loggedIn": true') || authOutput.includes('"loggedIn":true')) {
+            authenticated = true;
+          }
+        } catch {
+          // claude auth status failed — check env var as fallback
+          if (process.env.ANTHROPIC_API_KEY) {
+            authenticated = true;
+          }
         }
       }
 
@@ -205,7 +217,9 @@ export const installCommand = new Command('install')
         console.log('    You can run this after installation completes.');
         console.log('');
       } else {
-        console.log('  ✓ claude: authenticated');
+        console.log(activeClaudeSession
+          ? '  ✓ claude: authenticated (active Claude session)'
+          : '  ✓ claude: authenticated');
       }
     }
 
