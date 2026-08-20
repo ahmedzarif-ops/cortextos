@@ -2,6 +2,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+
+// Keep this PM2/config contract independent from the dedicated Windows ACL
+// contract and its real PowerShell subprocess.
+vi.mock('../../../src/platform/secret-permissions.js', async () => {
+  const { writeFileSync: writeFile } = await import('node:fs');
+  return {
+    writeSecretFileSync: (path: string, content: string) => writeFile(path, content, 'utf-8'),
+    restrictSecretFile: vi.fn(),
+  };
+});
+
 import { ecosystemCommand, pm2ProcessName, prepareDashboardEnvLocal } from '../../../src/cli/ecosystem';
 
 describe('cross-platform PM2 ecosystem generation', () => {

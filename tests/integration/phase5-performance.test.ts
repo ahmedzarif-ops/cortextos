@@ -850,7 +850,7 @@ describe('SC-4: Fleet scan scale — 200 and 500 agents', () => {
       threshold: 10_000,
       unit: 'ms',
     };
-  });
+  }, 60_000); // fixture creation is outside the measured <10s scan contract
 
   it('polling 500 agents × 2 crons (1000 total): documents degradation point', () => {
     const agents = populateFleet(500, 2);
@@ -876,7 +876,7 @@ describe('SC-4: Fleet scan scale — 200 and 500 agents', () => {
     };
     // Document but don't fail — this is a cliff-probe
     // Real cliff expected at ~5000+ agents on spinning disk
-  });
+  }, 60_000); // fixture creation is intentionally not the degradation metric
 });
 
 // ===========================================================================

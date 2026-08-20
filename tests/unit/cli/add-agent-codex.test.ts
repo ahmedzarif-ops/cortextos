@@ -22,6 +22,18 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, lstatSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir, homedir } from 'os';
+
+// Scaffolding behavior is the subject of this suite. Windows ACL behavior has
+// a dedicated platform contract; launching PowerShell twice per fixture here
+// makes unrelated tests contend for processes under the full CI worker pool.
+vi.mock('../../../src/platform/secret-permissions.js', async () => {
+  const { writeFileSync: writeFile } = await import('node:fs');
+  return {
+    writeSecretFileSync: (path: string, content: string) => writeFile(path, content, 'utf-8'),
+    restrictSecretFile: vi.fn(),
+  };
+});
+
 import { addAgentCommand } from '../../../src/cli/add-agent';
 
 describe('PR-02: add-agent --runtime codex-app-server', () => {

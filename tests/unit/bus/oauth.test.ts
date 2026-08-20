@@ -7,6 +7,12 @@ import { tmpdir } from 'os';
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
+// Token persistence semantics are covered here; the platform ACL subprocess
+// is exercised separately so this suite does not launch PowerShell per write.
+vi.mock('../../../src/platform/secret-permissions.js', () => ({
+  restrictSecretFile: vi.fn(),
+}));
+
 const {
   loadAccounts,
   getActiveAccount,
