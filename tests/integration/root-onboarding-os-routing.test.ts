@@ -7,6 +7,7 @@ const ROOT = join(__dirname, '..', '..');
 const ROOT_ONBOARDING = '.claude/commands/onboarding.md';
 const WINDOWS_REFERENCE = 'references/onboarding-windows.md';
 const WINDOWS_INSTALL_SCRIPT = 'scripts/onboarding-windows-install.ps1';
+const WINDOWS_INSTANCE_SCRIPT = 'scripts/onboarding-windows-select-instance.ps1';
 
 function read(relative: string): string {
   // Git may materialize Markdown with CRLF on Windows. The onboarding contract
@@ -66,6 +67,7 @@ describe('canonical root onboarding OS routing', () => {
     for (const required of [
       'node --version',
       'onboarding-windows-install.ps1',
+      'onboarding-windows-select-instance.ps1',
       'enabled-agents.json',
       'Invoke-RestMethod',
       'npm run build',
@@ -133,6 +135,21 @@ describe('canonical root onboarding OS routing', () => {
     expect(build).toBeGreaterThan(fullSuite);
     expect(coreInstall).toBeGreaterThan(build);
     expect(script).toContain('if ($LASTEXITCODE -ne 0)');
+  });
+
+  it('selects instance state through one checked-in native command', () => {
+    const windows = read(WINDOWS_REFERENCE);
+    const script = read(WINDOWS_INSTANCE_SCRIPT);
+
+    expect(windows).toContain('-File ./scripts/onboarding-windows-select-instance.ps1');
+    expect(windows).toContain('Read the `instanceId` field');
+    expect(windows).toContain('Do not reimplement or verify');
+    expect(windows).not.toContain('Use harness file and JSON tools to select the instance');
+    expect(script).toContain("[Environment]::GetFolderPath('UserProfile')");
+    expect(script).toContain('ConvertFrom-Json');
+    expect(script).toContain("$EnabledAgents -is [PSCustomObject]");
+    expect(script).toContain("$Candidate = 'cortextos' + $Index");
+    expect(script).not.toContain('$env:USERPROFILE');
   });
 
   it('keeps Windows failure diagnosis on native tools', () => {

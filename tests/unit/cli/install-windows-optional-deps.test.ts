@@ -2,6 +2,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { describe, expect, it } from 'vitest';
 import {
+  combineClaudeOutput,
   globalInstallArgs,
   resolveInstallClaudeInvocation,
   shouldInstallLegacyOptionalDependencies,
@@ -37,6 +38,11 @@ describe('core install optional dependencies', () => {
     expect(resolveInstallClaudeInvocation(
       'win32', { PATH: `${stale};${current}` }, path => path === native, 'x64',
     )).toEqual({ file: native, argsPrefix: [] });
+  });
+
+  it('recognizes successful Claude output captured on stderr', () => {
+    expect(combineClaudeOutput('', '{"loggedIn":true}')).toBe('{"loggedIn":true}');
+    expect(combineClaudeOutput('2.0.0', 'native diagnostic')).toBe('2.0.0\nnative diagnostic');
   });
 
   it('keeps the Windows core path free of the Bash-only model installer', () => {

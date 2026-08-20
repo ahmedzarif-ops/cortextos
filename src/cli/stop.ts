@@ -10,9 +10,14 @@ import { IPCClient } from '../daemon/ipc-server.js';
  * the stop was intentional and does not fire a false 🚨 CRASH alarm.
  * Pattern matches src/cli/bus.ts:1285-1289.
  */
-export function writeStopMarker(instanceId: string, agent: string, reason: string): void {
+export function writeStopMarker(
+  instanceId: string,
+  agent: string,
+  reason: string,
+  homeDir: string = homedir(),
+): void {
   try {
-    const ctxRoot = join(homedir(), '.cortextos', instanceId);
+    const ctxRoot = join(homeDir, '.cortextos', instanceId);
     const stateDir = join(ctxRoot, 'state', agent);
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, '.user-stop'), reason);

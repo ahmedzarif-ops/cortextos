@@ -120,9 +120,14 @@ export function readEnabledAgents(instanceId: string): Record<string, any> {
  * disable was intentional and does not fire a false 🚨 CRASH alarm.
  * Pattern matches src/cli/bus.ts:1285-1289.
  */
-export function writeDisableMarker(instanceId: string, agent: string, reason: string): void {
+export function writeDisableMarker(
+  instanceId: string,
+  agent: string,
+  reason: string,
+  homeDir: string = homedir(),
+): void {
   try {
-    const ctxRoot = join(homedir(), '.cortextos', instanceId);
+    const ctxRoot = join(homeDir, '.cortextos', instanceId);
     const stateDir = join(ctxRoot, 'state', agent);
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, '.user-disable'), reason);

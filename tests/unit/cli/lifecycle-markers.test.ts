@@ -18,41 +18,35 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { tmpdir, homedir } from 'os';
+import { tmpdir } from 'os';
 import { writeDisableMarker } from '../../../src/cli/enable-agent';
 import { writeStopMarker } from '../../../src/cli/stop';
 
 describe('BUG-036: lifecycle marker writes', () => {
-  // The helpers write under homedir() — point HOME at a temp dir for the test
-  // so we don't pollute the user's real ~/.cortextos.
   let tmpHome: string;
-  const origHome = process.env.HOME;
 
   beforeEach(() => {
     tmpHome = mkdtempSync(join(tmpdir(), 'cortextos-bug036-'));
-    process.env.HOME = tmpHome;
   });
 
   afterEach(() => {
-    if (origHome === undefined) delete process.env.HOME;
-    else process.env.HOME = origHome;
     rmSync(tmpHome, { recursive: true, force: true });
   });
 
   describe('writeDisableMarker', () => {
     it('writes .user-disable at the correct path with the given reason', () => {
-      writeDisableMarker('default', 'commander', 'disabled via cortextos disable');
+      writeDisableMarker('default', 'commander', 'disabled via cortextos disable', tmpHome);
 
-      const expectedPath = join(homedir(), '.cortextos', 'default', 'state', 'commander', '.user-disable');
+      const expectedPath = join(tmpHome, '.cortextos', 'default', 'state', 'commander', '.user-disable');
       expect(existsSync(expectedPath)).toBe(true);
       expect(readFileSync(expectedPath, 'utf-8')).toBe('disabled via cortextos disable');
     });
 
     it('creates the state directory if it does not exist', () => {
       // The state dir does not exist yet — helper must mkdirSync it
-      writeDisableMarker('cortextos1', 'analyst', 'test reason');
+      writeDisableMarker('cortextos1', 'analyst', 'test reason', tmpHome);
 
-      const stateDir = join(homedir(), '.cortextos', 'cortextos1', 'state', 'analyst');
+      const stateDir = join(tmpHome, '.cortextos', 'cortextos1', 'state', 'analyst');
       expect(existsSync(stateDir)).toBe(true);
     });
 
@@ -62,30 +56,30 @@ describe('BUG-036: lifecycle marker writes', () => {
       // disable command — worst case the user gets a false crash alarm,
       // best case they get the right notification.
       expect(() =>
-        writeDisableMarker('bad\0instance', 'commander', 'reason'),
+        writeDisableMarker('bad\0instance', 'commander', 'reason', tmpHome),
       ).not.toThrow();
     });
   });
 
   describe('writeStopMarker', () => {
     it('writes .user-stop at the correct path with the given reason', () => {
-      writeStopMarker('default', 'commander', 'stopped via cortextos stop');
+      writeStopMarker('default', 'commander', 'stopped via cortextos stop', tmpHome);
 
-      const expectedPath = join(homedir(), '.cortextos', 'default', 'state', 'commander', '.user-stop');
+      const expectedPath = join(tmpHome, '.cortextos', 'default', 'state', 'commander', '.user-stop');
       expect(existsSync(expectedPath)).toBe(true);
       expect(readFileSync(expectedPath, 'utf-8')).toBe('stopped via cortextos stop');
     });
 
     it('creates the state directory if it does not exist', () => {
-      writeStopMarker('cortextos1', 'analyst', 'test reason');
+      writeStopMarker('cortextos1', 'analyst', 'test reason', tmpHome);
 
-      const stateDir = join(homedir(), '.cortextos', 'cortextos1', 'state', 'analyst');
+      const stateDir = join(tmpHome, '.cortextos', 'cortextos1', 'state', 'analyst');
       expect(existsSync(stateDir)).toBe(true);
     });
 
     it('does not throw when the filesystem write fails', () => {
       expect(() =>
-        writeStopMarker('bad\0instance', 'commander', 'reason'),
+        writeStopMarker('bad\0instance', 'commander', 'reason', tmpHome),
       ).not.toThrow();
     });
 
@@ -93,10 +87,10 @@ describe('BUG-036: lifecycle marker writes', () => {
       // BUG-036 distinguishes disable (semi-permanent) from stop (transient).
       // The hook uses different emojis (⏸️ vs ⏹️) so the user can tell at a glance.
       // Verify the two helpers write to different files even for the same agent.
-      writeDisableMarker('default', 'commander', 'disable');
-      writeStopMarker('default', 'commander', 'stop');
+      writeDisableMarker('default', 'commander', 'disable', tmpHome);
+      writeStopMarker('default', 'commander', 'stop', tmpHome);
 
-      const stateDir = join(homedir(), '.cortextos', 'default', 'state', 'commander');
+      const stateDir = join(tmpHome, '.cortextos', 'default', 'state', 'commander');
       expect(existsSync(join(stateDir, '.user-disable'))).toBe(true);
       expect(existsSync(join(stateDir, '.user-stop'))).toBe(true);
     });

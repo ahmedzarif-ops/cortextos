@@ -53,6 +53,13 @@ export function resolveInstallClaudeInvocation(
   return resolveClaudeCommand(hostPlatform, env, fileExists, hostArch);
 }
 
+export function combineClaudeOutput(stdout: unknown, stderr: unknown): string {
+  return [stdout, stderr]
+    .map(value => String(value || '').trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
 function runClaude(args: string[]): string {
   const invocation = resolveInstallClaudeInvocation();
   const result = spawnSync(invocation.file, [...invocation.argsPrefix, ...args], {
@@ -63,7 +70,10 @@ function runClaude(args: string[]): string {
   if (result.error || result.status !== 0) {
     throw result.error || new Error(`Claude exited ${String(result.status)}`);
   }
-  return String(result.stdout || '').trim();
+  // Claude's native Windows executable can write successful structured
+  // `auth status` output to stderr. Treat both captured streams as command
+  // output while preserving stdout first for the version display.
+  return combineClaudeOutput(result.stdout, result.stderr);
 }
 
 function commandExists(cmd: string): boolean {

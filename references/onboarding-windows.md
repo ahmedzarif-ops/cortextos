@@ -80,11 +80,19 @@ the full suite, then tests, builds, and installs core state in order:
 powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./scripts/onboarding-windows-install.ps1
 ```
 
-Use harness file and JSON tools to select the instance under
-`$env:USERPROFILE\.cortextos`. Reuse `default` only when
-`config\enabled-agents.json` exists and is an empty JSON object; otherwise use
-the first absent `cortextosN` directory. Do not implement this decision with
-shell text parsing.
+Select the instance with one fail-closed native operation. Submit this exact
+line once without rewriting it or separately listing profile state:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./scripts/onboarding-windows-select-instance.ps1
+```
+
+Read the `instanceId` field from its small JSON result and retain that literal
+value in onboarding state. The checked-in selector reuses `default` only when
+`config\enabled-agents.json` exists and is an empty JSON object; otherwise it
+returns the first absent `cortextosN` directory. Do not reimplement or verify
+this decision with shell commands, `$env:USERPROFILE`, path text parsing, or a
+second profile inspection.
 
 All Cortext CLI calls are native Node commands. Use explicit literal routing:
 
