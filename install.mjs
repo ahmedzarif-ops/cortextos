@@ -67,6 +67,25 @@ export function globalInstallArgs(pkg, os) {
   return args;
 }
 
+export function formatClaudeHandoff(
+  installDir,
+  os,
+  env = process.env,
+  architecture = process.arch,
+  fileExists = existsSync,
+) {
+  if (os !== 'win32') return `claude ${JSON.stringify(installDir)}`;
+  const native = resolveClaudeNativeFromPath(
+    env.PATH || env.Path || env.path,
+    architecture,
+    fileExists,
+  );
+  if (native) {
+    return `& ${quotePowerShellLiteral(native)} ${quotePowerShellLiteral(installDir)}`;
+  }
+  return `claude ${quotePowerShellLiteral(installDir)}`;
+}
+
 /** Build the source encoded for Windows PowerShell when invoking npm .cmd shims. */
 export function buildWindowsShimAction(executable, args) {
   const literals = args.map(quotePowerShellLiteral).join(', ');
@@ -432,7 +451,7 @@ export function install(options = {}) {
   console.log(`${BOLD}Next steps:${R}`);
   console.log('');
   console.log(`  1. Open ${BOLD}${installDir}${R} in Claude Code:`);
-  console.log(`     ${Y}claude ${isWindows ? quotePowerShellLiteral(installDir) : JSON.stringify(installDir)}${R}`);
+  console.log(`     ${Y}${formatClaudeHandoff(installDir, os, env)}${R}`);
   console.log('');
   console.log('  2. In Claude Code, run:');
   console.log(`     ${Y}/onboarding${R}`);

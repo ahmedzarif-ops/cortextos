@@ -141,6 +141,18 @@ describe('public cross-platform installer', () => {
     expect(installer.resolveClaudeNativeFromPath(
       `${stale};${current}`, 'x64', (path: string) => path === native,
     )).toBe(native);
+    expect(installer.formatClaudeHandoff(
+      'C:\\Users\\Test User\\cortextos',
+      'win32',
+      { PATH: `${stale};${current}` },
+      'x64',
+      (path: string) => path === native,
+    )).toBe(
+      "& 'C:\\Users\\Test User\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe' " +
+      "'C:\\Users\\Test User\\cortextos'",
+    );
+    expect(installer.formatClaudeHandoff('/Users/test/cortextos', 'darwin'))
+      .toBe('claude "/Users/test/cortextos"');
   });
 
   it('uses the selected branch for fresh clone and remote configuration', () => {
