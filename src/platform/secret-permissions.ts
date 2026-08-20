@@ -21,14 +21,11 @@ const WINDOWS_ACL_SCRIPT = `
 $ErrorActionPreference = 'Stop'
 $target = $env:CTX_SECRET_FILE
 if ([string]::IsNullOrWhiteSpace($target)) { throw 'CTX_SECRET_FILE is missing' }
-$acl = Get-Acl -LiteralPath $target
+# Build a fresh descriptor instead of reading and mutating the image-provided
+# descriptor. Existing ACLs can contain stale provisioning SIDs, and both
+# account-name translation and per-rule removal can fail on those entries.
+$acl = New-Object System.Security.AccessControl.FileSecurity
 $acl.SetAccessRuleProtection($true, $false)
-# Request SecurityIdentifier objects explicitly. The convenience .Access
-# property translates every ACE to an NTAccount; hosted/build-machine ACLs can
-# contain stale image-provisioning SIDs whose names no longer resolve. We must
-# still remove those ACEs rather than fail before replacing the DACL.
-$existingRules = $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
-foreach ($rule in @($existingRules)) { [void]$acl.RemoveAccessRuleSpecific($rule) }
 $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $systemSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
 $allow = [System.Security.AccessControl.AccessControlType]::Allow

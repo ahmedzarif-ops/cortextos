@@ -1,15 +1,24 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
 import { pathToFileURL } from 'url';
 
-// Let Node load the executable module directly. Vite's transform path can leave
-// a CRLF shebang behind on Windows, causing a file-level SyntaxError before any
-// tests are collected; Node itself supports the installer's shebang correctly.
-const installerUrl = pathToFileURL(join(process.cwd(), 'install.mjs')).href;
+// Windows checkouts can materialize the executable with CRLF. Import a
+// normalized test-only copy without its shebang so neither Vite nor Node has to
+// parse an executable-file preamble; the real-file execution test below still
+// exercises install.mjs directly.
+const installerImportDir = mkdtempSync(join(tmpdir(), 'ctx-installer-import-'));
+const installerImportPath = join(installerImportDir, 'install.mjs');
+const installerSource = readFileSync(join(process.cwd(), 'install.mjs'), 'utf8')
+  .replace(/^#![^\n]*(?:\n|$)/, '')
+  .replace(/\r\n?/g, '\n');
+writeFileSync(installerImportPath, installerSource, 'utf8');
+const installerUrl = pathToFileURL(installerImportPath).href;
 const installer = await import(/* @vite-ignore */ installerUrl);
+
+afterAll(() => rmSync(installerImportDir, { recursive: true, force: true }));
 
 type Call = { kind: 'capture' | 'visible' | 'logged'; command: string; args: string[]; cwd?: string };
 
