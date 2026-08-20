@@ -1,0 +1,108 @@
+# Windows Dogfood 2 remediation ledger
+
+Run ID: `windows-dogfood-2-20260819`
+
+Branch: `codex/windows-native-install-dogfood-2-20260819`
+
+Ledger baseline commit: `af7515af`
+
+Candidate commit: pending
+
+Dispositions:
+
+- `integrated-and-regressed`
+- `implementation-pending`
+- `live-validation-pending`
+- `environment-orchestration-control`
+- `out-of-scope-by-decision`
+- `external-unverified`
+
+The historical regression references below establish why an existing fix is in
+the candidate. Gate C still requires all applicable tests to be rerun together
+at the final exact commit before VM cleanup.
+
+## Prior Windows engineering findings
+
+| ID | Disposition | Candidate implementation / source | Deterministic evidence | Dogfood 2 live gate or residual |
+|---|---|---|---|---|
+| WIN-001 | integrated-and-regressed | Platform-neutral catalog, KB, dashboard sync, migrations (`fa86b55a`) | catalog, KB, dashboard, migration suites | Fresh install exercises native paths |
+| WIN-002 | integrated-and-regressed | BOM/CRLF-safe parsers (`fa86b55a`) | frontmatter and migration parser suites | PowerShell-authored config inspected live |
+| WIN-003 | integrated-and-regressed | Windows Codex loopback WebSocket endpoint (`dbd7bc6d`) | Codex unit/E2E lifecycle suites | Extra Codex agent is out of current live scope |
+| WIN-004 | integrated-and-regressed | Native process-tree adapter and OpenCode reap (`dbd7bc6d`) | OpenCode reap/process suites | Extra OpenCode agent is out of current live scope |
+| WIN-005 | integrated-and-regressed | HOME/USERPROFILE-aware test isolation (`f8cfc289`) | cross-platform home/path suites | None beyond three-OS candidate CI |
+| WIN-006 | integrated-and-regressed | Native lifecycle marker/log paths (`dbd7bc6d`) | lifecycle/agent-process suites | Initial Claude boot verifies markers/logs |
+| WIN-007 | integrated-and-regressed | Platform-neutral CLI test invocation (`f8cfc289`) | CLI error-boundary suite | Public installer exit observed live |
+| WIN-008 | integrated-and-regressed | Injected filesystem-failure harness (`f8cfc289`) | deterministic recovery failure suite | None beyond candidate CI |
+| WIN-009 | integrated-and-regressed | Junction/copy skill install fallback (`dbd7bc6d`) | add-agent Codex/skill install suites | Extra Codex agent is out of current live scope |
+| WIN-010 | integrated-and-regressed | Isolated native Git diagnostics (`96f126bf` and Git follow-ups) | legacy/status/Git diagnostic suites | `legacy-status.test.ts` user edit excluded from commits |
+| WIN-011 | integrated-and-regressed | Shared lifecycle plus prior three-runtime live acceptance | E2E lifecycle suites | Current live scope verifies initial Claude only |
+| WIN-012 | live-validation-pending | PM2 resurrection and startup helper (`ab5aed96`, `1f929dee`) | ecosystem/startup helper suites | New default-path Startup/S4U instance must survive new session |
+| WIN-013 | live-validation-pending | Telegram routing already deterministic; credentials now authorized | Telegram API/poller/dispatcher suites | Fresh user `hi`, one dispatch, first single question |
+| WIN-014 | integrated-and-regressed | Headless Codex process transport (`dbd7bc6d`) | headless-process and Codex lifecycle suites | Codex live agent out of current scope |
+| WIN-015 | integrated-and-regressed | Native Codex fixture paths (`f8cfc289`) | Codex continuation/lifecycle suite | None beyond candidate CI |
+| WIN-016 | integrated-and-regressed | Closed trusted Git/Node environment (`a39e2323`) | diagnostic/Git trust suites | Installer/doctor run in cleaned account |
+| WIN-017 | integrated-and-regressed | Completion-event live oracle (`67fddcea`) | Codex lifecycle completion suite | Codex live agent out of current scope |
+| WIN-018 | integrated-and-regressed | Explicit bus-only lifecycle enablement (`1a6e68b8`) | enable-agent validation/lifecycle suites | Bus-only live path out of current scope |
+| WIN-019 | integrated-and-regressed | Native repository identity and safe.directory (`f9ba488b`–`32e13e98`) | Git root/diagnostic suites | Default-path installer/doctor validates live |
+| WIN-020 | out-of-scope-by-decision | Dashboard remains loopback-only; dependency upgrades separated | Dashboard build/auth/loopback tests only | Public exposure is not approved or claimed |
+| WIN-021 | out-of-scope-by-decision | Normal global `cortextos` CLI deliberately mirrors Mac/Linux | Installer global-link tests | Account is snapshotted/cleaned; isolated CLI mode not required |
+| WIN-022 | live-validation-pending | PM2 path and authenticated Windows identity (`ab5aed96`) | startup helper resolver/identity tests | Double registration and task action inspected live |
+| WIN-023 | integrated-and-regressed | Isolated PTY diagnostics close handles (`f0a03b20`–`58523d56`) | PTY smoke/doctor/install exit suites | Installer and doctor must return cleanly live |
+| WIN-024 | live-validation-pending | Explicit dashboard host (`fe101adf`) | ecosystem Windows-native suite | Listener must be `127.0.0.1` only |
+| WIN-025 | live-validation-pending | Restricted dashboard `.env.local` materialization (`b7495cfb`) | ecosystem/dashboard credential suites | Dashboard auth/health passes from fresh state |
+| WIN-026 | integrated-and-regressed | BOM stripping across agent config lifecycle (`409ea334`) | enable/daemon/config suites | PowerShell-authored config parsed live |
+| WIN-027 | live-validation-pending | Headless Claude first-run screen handling (`158451db`) | agent PTY/profile lifecycle suites | Fresh initial Claude must not stall or swallow message |
+| WIN-028 | integrated-and-regressed | Full synchronous CSI/OSC stripping (`e858a7da`) | agent PTY output/bootstrap suites | Sanitized live logs confirm readiness parsing |
+| WIN-029 | integrated-and-regressed | Exact Claude permission-ready sentinel (`7afa235c`) | agent PTY warning/readiness tests | Live readiness cannot be warning false-positive |
+| WIN-030 | live-validation-pending | Auth-confirmed non-secret Claude profile preparation (`305d7d7a`) | Claude profile suite | Cleaned account retains auth and boots without OAuth prompt |
+| WIN-031 | live-validation-pending | Claude OAuth variable allowlist (`773d1ba5`) | secret-safe environment propagation test | Native scheduled runtime remains authenticated |
+| WIN-032 | live-validation-pending | Startup/S4U trigger (`1f929dee`) | startup helper PowerShell contract tests | Task-owned startup and new-session survival required |
+| WIN-033 | live-validation-pending | Current runtime readiness marker tolerance (`2f61cb8f`) | Claude/OpenCode readiness suites | Initial Claude crosses readiness without timeout |
+| WIN-034 | integrated-and-regressed | Ignore transient private Git maintenance state (`776b919f`) | immutability stress/three-OS CI | Candidate three-OS CI must remain green |
+| WIN-035 | integrated-and-regressed | Preserve queue until replacement readiness (`3c1f256b`) | agent-process recovery suites | Crash-boundary live message is outside initial handoff scope |
+| WIN-036 | implementation-pending | Existing portability work (`0d466f37`) must be completed with installer and OS references | onboarding portability suite to be strengthened | Public installer → root onboarding → first managed question, no translation |
+| WIN-037 | live-validation-pending | Shared Windows ACL adapter (`0d466f37`) | secret-permissions and CLI writer suites | All new secret files pass live `Get-Acl` inspection |
+
+## Prior Telegram dogfood findings
+
+| ID | Disposition | Candidate implementation / source | Deterministic evidence | Dogfood 2 live gate or residual |
+|---|---|---|---|---|
+| DOG-001 | implementation-pending | Complete public installer plus root/managed Windows reference work | installer/onboarding portability tests | Full clean initial Windows path required |
+| DOG-002 | environment-orchestration-control | Use one foreground dependency install; never overlap observer retries | Serialized execution runbook | A single clean install failure would reopen as product |
+| DOG-003 | live-validation-pending | Shared fail-closed Windows ACL adapter (`0d466f37`) | secret-permissions tests | Inspect installer, org, agent, dashboard secrets live |
+| DOG-004 | live-validation-pending | Two bots valid; current run activates Claude bot only | Telegram routing/poller suites | User sends fresh `hi`; exactly one authorized route |
+| DOG-005 | environment-orchestration-control | Treat npm allow-scripts warning as informational only if artifacts work | Native node-pty load/spawn and build | Broken artifact reclassifies as product install failure |
+| DOG-006 | out-of-scope-by-decision | Existing setup-wizard changes retained but not exercised | Existing setup tests may run in full suite | `cortextos setup` does not block this run |
+| DOG-007 | integrated-and-regressed | Windows-native CLI handoff (`3cdc0ab1`) | CLI/ecosystem handoff assertions | Public installer and root onboarding output checked live |
+| DOG-008 | live-validation-pending | Native Claude resolver (`bbdd8f35`) | Claude command/profile/doctor tests | Fresh scheduled Claude stays stable and answers |
+| DOG-009 | environment-orchestration-control | Task Scheduler owns PM2; SSH-owned PM2 is not acceptance | startup helper/ecosystem tests | New admin session must not kill daemon/dashboard |
+| DOG-010 | live-validation-pending | Generation/bootstrap/stability recovery notice (`3ff763ce`) | recovery-notification suite | No false recovered/crashed burst during initial soak |
+| DOG-011 | implementation-pending | Global rule (`0958d5d1`) needs explicit structural boundaries/reference | managed onboarding structural tests | Exactly one first Telegram question live |
+| DOG-012 | implementation-pending | Replace “translate it yourself” with selected Windows operational reference | static portability and live command observation | No Bash/WSL/manual translation in initial managed turn |
+
+## Dogfood 2 findings
+
+| ID | Severity | Classification | Status | Observation | Closure evidence |
+|---|---|---|---|---|---|
+| DOG2-001 | high | product/install/prerequisite | implementation-pending | The global Windows `claude.ps1` shim points at a missing package-native path even though another native `claude.exe` exists and remains authenticated | Installer/doctor share robust executable discovery, repair or give actionable failure, deterministic stale-shim regression, clean live handoff |
+| DOG2-002 | critical | product/installer portability | implementation-pending | `install.mjs` still declares WSL required, pre-blocks on compiler tools, treats jq as core, and can continue after a failed pull | Native minimal prerequisites, fail-closed branch-aware installer tests, exact PowerShell 5.1 command, clean live run |
+| DOG2-003 | high | product/runtime dispatch | fixed; candidate regression pending | `AgentPTY.spawn()` ignored the runtime adapter's `getBinaryName()` and always used the Claude resolver, so an OpenCode agent launched `claude` despite its native adapter | Existing failing OpenCode binary assertion plus AgentPTY/Hermes/Claude/lifecycle focused run: 5 files, 76 tests passed |
+
+## Gate A baseline evidence
+
+- Baseline commit: `af7515af` plus only this untracked ledger; typecheck and
+  build passed.
+- Full Vitest baseline: 150 files passed, 1 file failed, 1 skipped; 2,344 tests
+  passed, 1 failed, 5 skipped.
+- The single failure reproduced focused: OpenCode expected its `opencode`
+  binary but received `claude`. Classification: product/runtime dispatch,
+  DOG2-003—not flake, environment, or invalid expectation.
+- Narrow shared fix now respects runtime `getBinaryName()` while retaining
+  Claude command-prefix/profile preparation only for the base Claude command.
+  Adjacent verification passed: 5 files, 76 tests.
+- Candidate-wide rerun remains Gate C work after all bounded implementation
+  streams integrate.
+
+## Candidate acceptance evidence
+
+Pending until Gates C–G.

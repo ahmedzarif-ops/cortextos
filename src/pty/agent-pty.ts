@@ -177,10 +177,20 @@ export class AgentPTY {
     // On Windows, npm global installs create .cmd wrappers, not .exe binaries.
     // node-pty's CreateProcess requires the exact wrapper name to resolve correctly.
     const claudeArgs = this.buildClaudeArgs(mode, prompt);
-    const claudeCommand = resolveClaudeCommand();
-    prepareClaudeHeadlessProfile(claudeCommand.file, claudeCommand.argsPrefix);
+    const resolvedClaudeCommand = resolveClaudeCommand();
+    const binaryName = this.getBinaryName();
+    const agentCommand = binaryName === resolvedClaudeCommand.file
+      ? resolvedClaudeCommand
+      : { file: binaryName, argsPrefix: [] };
 
-    this.pty = this.spawnFn!(claudeCommand.file, [...claudeCommand.argsPrefix, ...claudeArgs], {
+    // Claude's headless profile preparation is provider-specific. Runtime
+    // adapters such as OpenCode and Hermes override getBinaryName(); they must
+    // not be launched through Claude's command resolver or mutate its profile.
+    if (agentCommand === resolvedClaudeCommand) {
+      prepareClaudeHeadlessProfile(agentCommand.file, agentCommand.argsPrefix);
+    }
+
+    this.pty = this.spawnFn!(agentCommand.file, [...agentCommand.argsPrefix, ...claudeArgs], {
       name: 'xterm-256color',
       cols: 200,
       rows: 50,
