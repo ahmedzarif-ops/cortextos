@@ -81,7 +81,7 @@ try {
   Remove-Item $p -Force -ErrorAction SilentlyContinue
 }
 
-claude (Join-Path $env:USERPROFILE 'cortextos')
+# Run the exact native Claude Code command printed by the installer.
 # Then inside Claude Code: /onboarding
 ```
 

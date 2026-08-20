@@ -77,8 +77,9 @@ describe('public cross-platform installer', () => {
     expect(source).toContain('-OutFile $p; node $p;');
     expect(source).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }');
     expect(source).not.toContain('node -e "$(irm');
-    expect(readme).toContain("Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/grandamenium/cortextos/main/install.mjs' -OutFile $p");
     expect(readme).toContain('node --input-type=module');
+    expect(readme).toContain('Run the exact native Claude Code command printed by the installer.');
+    expect(readme).not.toContain("claude (Join-Path $env:USERPROFILE 'cortextos')");
     expect(readme).not.toContain('node -e "$(irm');
   });
 
