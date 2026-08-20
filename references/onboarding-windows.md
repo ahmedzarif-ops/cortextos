@@ -119,40 +119,43 @@ node ./dist/cli.js add-agent '<agent-name>' --template orchestrator --org '<org-
 node ./dist/cli.js enable '<agent-name>' --org '<org-name>' --instance '<instance-id>'
 ```
 
-Create and update `context.json`, `goals.json`, `config.json`, `.env`,
-`secrets.env`, and `enabled-agents.json` with the harness file/JSON tools. Use
-Windows paths returned by Node/path APIs. Do not compose them by replacing path
-separators. Preserve existing ACLs and never print secret values.
+Create and update `context.json`, `goals.json`, `config.json`, `secrets.env`,
+and `enabled-agents.json` with the harness file/JSON tools. Use Windows paths
+returned by Node/path APIs. Do not compose them by replacing path separators.
+Preserve existing ACLs and never print secret values. W3 is the only supported
+route for the agent `.env` and Telegram authorization.
 
 ## W3. Telegram discovery
 
-Create the agent directory with the Node CLI before storing the token. Use the
-harness Write/Edit tool for `.env`, containing only `BOT_TOKEN`, `CHAT_ID`, and
-`ALLOWED_USER` at this stage. Start this long poll in the same response that
-tells the user to send `hi`:
+Create the non-secret agent scaffold first and require this command to succeed:
 
 ```powershell
-$AgentEnv = Join-Path (Get-Location).Path 'orgs\<org-name>\agents\<orchestrator-name>\.env'
-$BotTokenLine = Get-Content -LiteralPath $AgentEnv | Where-Object { $_ -like 'BOT_TOKEN=*' } | Select-Object -First 1
-$OrchBotToken = ($BotTokenLine -split '=', 2)[1]
-$OrchChatId = $null
-$OrchUserId = $null
-for ($Attempt = 0; $Attempt -lt 3 -and -not $OrchChatId; $Attempt++) {
-  $Uri = 'https://api.telegram.org/bot' + $OrchBotToken + '/getUpdates?timeout=30'
-  $Updates = Invoke-RestMethod -Method Get -Uri $Uri
-  $Private = @($Updates.result | Where-Object { $_.message -and $_.message.chat.type -eq 'private' } | Select-Object -Last 1)
-  if ($Private) {
-    $OrchChatId = [string]$Private.message.chat.id
-    $OrchUserId = [string]$Private.message.from.id
-  }
-  if (-not $OrchChatId -and $Attempt -lt 2) { Start-Sleep -Seconds 5 }
-}
+node ./dist/cli.js add-agent <orchestrator-name> --template orchestrator --org <org-name> --instance <instance-id>
 ```
 
-Do not display `$OrchBotToken`, the URI, the `.env` contents, or a transcript
-containing the token. Do not flush Telegram updates. Store the numeric chat ID
-and sender ID with the harness Edit tool, then verify only that required values
-are non-empty.
+Have the normal user open a separate native PowerShell terminal at the
+repository root and run the Windows safe onboarding command:
+
+```powershell
+node ./dist/cli.js telegram onboard <orchestrator-name> --org <org-name> --instance <instance-id>
+```
+
+The command prompts for the token with masked input, tells the user to send
+`hi`, starts long polling immediately without flushing the update, requires the
+existing agent scaffold, and stores the credential plus discovered chat and
+sender authorization internally with the required Windows ACL. It prints only
+safe progress and completion: never the token, Telegram API URI, agent
+environment path or contents, chat ID, or sender ID.
+
+The onboarding agent must never ask the user to paste the token into the agent
+conversation, place it in an argument, or reproduce a Telegram HTTP/polling
+block. It must never use Read, Write, or Edit on the agent `.env`. Wait for the
+separate terminal to finish and continue only after it reports safe completion.
+
+Dogfood automation may instead run the same command with
+`--use-existing-token`, but only after the credential has been securely
+pre-provisioned for that exact agent. Never offer this flag to a normal user or
+use it to bypass the masked prompt with an untrusted credential source.
 
 ## W4. Dashboard install, build, and browser handoff
 
@@ -262,8 +265,9 @@ print credential files during routine diagnosis.
 At completion, report whether the single scoped scheduled task uses Logon or
 Startup. Do not show privileged macOS/Linux persistence instructions.
 
-For Telegram failure, run doctor/status, inspect bounded agent logs, verify the
-three `.env` fields are non-empty without printing them, and ensure only one
-poller owns the bot token. For daemon failure, verify `./dist/daemon.js`, PM2
-state, and enabled-agent JSON. For dashboard failure, verify the loopback
-listener, generated `dashboard\.env.local`, and supervised dashboard logs.
+For Telegram failure, run doctor/status, inspect bounded agent logs, and ensure
+only one poller owns the bot through redacted process diagnostics. Never inspect
+the agent `.env`; rerun W3 if its safe command reports incomplete setup. For
+daemon failure, verify `./dist/daemon.js`, PM2 state, and enabled-agent JSON. For
+dashboard failure, verify the loopback listener, generated
+`dashboard\.env.local`, and supervised dashboard logs.

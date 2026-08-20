@@ -625,8 +625,9 @@ export class AgentManager {
 
       if (botToken && chatId) {
         telegramApi = new TelegramAPI(botToken);
-        // Don't log sensitive user IDs — just indicate the gate is enabled
-        log(`Telegram configured (chat_id: ****${String(chatId).slice(-4)}, allowed_user: enabled)`);
+        // Do not log even a partial user identifier. Bounded diagnostics only
+        // need to establish that the credential and authorization gates loaded.
+        log('Telegram configured with sender authorization enabled');
       }
     }
 

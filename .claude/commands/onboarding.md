@@ -309,6 +309,14 @@ Store: `ORCH_NAME` and `ANALYST_NAME`
 
 ### 6a. Telegram Bot Setup
 
+**Windows:** use W3 of the loaded Windows reference for the entire Telegram
+setup. W3 creates the non-secret agent scaffold first and then hands credential
+entry and discovery to the safe native CLI. Do not ask for the token in this
+conversation, and do not execute or translate the macOS/Linux instructions
+below on Windows.
+
+**macOS/Linux:**
+
 Walk through step by step:
 
 1. "Open Telegram on your phone or desktop"
@@ -338,12 +346,6 @@ Then tell the user: "Now send any message to your new bot on Telegram (just 'hi'
 
 Use long polling (timeout=30) so Telegram holds the connection open until a message arrives instead of returning empty immediately. Read the token from the restricted `.env`; do not interpolate it into the logged command.
 
-**Windows:** use W3 of the loaded Windows reference. It implements this exact
-long-poll timing and credential boundary natively; do not translate the block
-below.
-
-**macOS/Linux:**
-
 ```bash
 AGENT_ENV="orgs/${ORG_NAME}/agents/${ORCH_NAME}/.env"
 ORCH_BOT_TOKEN=$(awk -F= '/^BOT_TOKEN=/{print substr($0,index($0,"=")+1); exit}' "$AGENT_ENV")
@@ -362,10 +364,14 @@ If ORCH_CHAT_ID is empty after 3 retries, tell user to send another message and 
 
 ### 6b. Finalize Agent Credentials
 
-Use the Write/Edit tool—not shell redirection—to update the already-created
-`.env` with `BOT_TOKEN`, `CHAT_ID`, and `ALLOWED_USER`. Preserve its restricted
-permissions. Never include the token in a report, screenshot, diagnostic, or
-Git diff.
+**Windows:** W3's completed safe CLI command has already persisted and
+restricted the bot credential and Telegram authorization. Do not inspect the
+agent `.env` or reveal any credential or identifier.
+
+**macOS/Linux:** use the Write/Edit tool—not shell redirection—to update the
+already-created `.env` with `BOT_TOKEN`, `CHAT_ID`, and `ALLOWED_USER`. Preserve
+its restricted permissions. Never include the token in a report, screenshot,
+diagnostic, or Git diff.
 
 Update `config.json` with agent name:
 read the JSON with the harness file tool, set `agent_name`, and write valid

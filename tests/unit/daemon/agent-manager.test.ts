@@ -18,13 +18,16 @@ vi.mock('../../../src/daemon/agent-process.js', () => ({
     async stop() { /* no-op */ }
     getStatus() { return { name: this.name, status: 'stopped' }; }
     onExit() { /* no-op */ }
+    onStatusChanged() { /* no-op */ }
+    setTelegramHandle() { /* no-op */ }
+    isBootstrapped() { return true; }
   },
 }));
 
 // Mock FastChecker so it doesn't try to spawn anything either.
 vi.mock('../../../src/daemon/fast-checker.js', () => ({
   FastChecker: class {
-    start() { /* no-op */ }
+    async start() { /* no-op */ }
     stop() { /* no-op */ }
     wake() { /* no-op */ }
   },
@@ -34,14 +37,33 @@ vi.mock('../../../src/daemon/fast-checker.js', () => ({
 vi.mock('../../../src/telegram/api.js', () => ({
   TelegramAPI: class {
     constructor() { /* no-op */ }
+    async sendMessage() { /* no-op */ }
   },
 }));
 
 vi.mock('../../../src/telegram/poller.js', () => ({
   TelegramPoller: class {
+    lastExitReason = 'stopped-externally';
+    async start() { /* no-op */ }
+    stop() { /* no-op */ }
+    onMessage() { /* no-op */ }
+    onCallback() { /* no-op */ }
+    onReaction() { /* no-op */ }
+  },
+}));
+
+vi.mock('../../../src/daemon/cron-scheduler.js', () => ({
+  CronScheduler: class {
     start() { /* no-op */ }
     stop() { /* no-op */ }
+    reload() { /* no-op */ }
+    getNextFireTimes() { return []; }
   },
+}));
+
+vi.mock('../../../src/bus/metrics.js', () => ({
+  collectTelegramCommands: () => [],
+  registerTelegramCommands: async () => ({ status: 'empty', count: 0 }),
 }));
 
 const { AgentManager } = await import('../../../src/daemon/agent-manager.js');
@@ -121,6 +143,38 @@ describe('AgentManager.discoverAndStart - BUG-028 fix', () => {
     expect(startSpy).toHaveBeenCalledTimes(1);
     // BUG-043: startAgent now accepts a 4th `org` argument
     expect(startSpy).toHaveBeenCalledWith('bob', expect.any(String), expect.any(Object), 'acme');
+  });
+
+  it('logs Telegram readiness without full or partial chat/user identifiers', async () => {
+    const agentDir = join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice');
+    const chatId = '9876543210';
+    const allowedUser = '1234567890';
+    const config = { agent_name: 'alice', enabled: true, crons: [] };
+    writeFileSync(join(agentDir, 'config.json'), JSON.stringify(config));
+    writeFileSync(join(agentDir, '.env'), [
+      'BOT_TOKEN=123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      `CHAT_ID=${chatId}`,
+      `ALLOWED_USER=${allowedUser}`,
+      '',
+    ].join('\n'));
+    const output: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      output.push(args.map(String).join(' '));
+    });
+
+    try {
+      const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+      await am.startAgent('alice', agentDir, config, 'acme');
+      const visible = output.join('\n');
+      expect(visible).toContain('Telegram configured with sender authorization enabled');
+      expect(visible).not.toContain(chatId);
+      expect(visible).not.toContain(allowedUser);
+      expect(visible).not.toContain(chatId.slice(-4));
+      expect(visible).not.toContain(allowedUser.slice(-4));
+      await am.stopAll();
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it('handles corrupt enabled-agents.json by defaulting to enabled-all', async () => {

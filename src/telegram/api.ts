@@ -56,27 +56,26 @@ export function formatValidateError(result: Extract<ValidateCredentialsResult, {
       return 'BOT_TOKEN is invalid or revoked. Telegram returned 401 Unauthorized. Check the token in your .env against @BotFather.';
     case 'chat_not_found':
       return (
-        `CHAT_ID ${result.detail} was not found by the bot. ` +
+        'The configured private chat was not found by the bot. ' +
         'The most common cause: the user has never sent /start to the bot. ' +
         'Open Telegram, send /start to your bot, then retry.'
       );
     case 'bot_recipient':
       return (
-        `CHAT_ID ${result.detail} resolves to a bot, not a user. ` +
+        'The configured recipient resolves to a bot, not a user. ' +
         'A Telegram bot cannot message another bot. ' +
-        'Confirm this is a real user chat_id, not a bot user id.'
+        'Run secure Telegram onboarding again with a real user chat.'
       );
     case 'self_chat':
       return (
-        `CHAT_ID (${result.detail}) matches the bot's own user ID. ` +
+        'The configured recipient matches the bot itself. ' +
         'You likely pasted the BOT_TOKEN prefix instead of your real chat_id. ' +
-        'To get your real chat_id: send /start to the bot in Telegram, then visit ' +
-        'https://api.telegram.org/bot<TOKEN>/getUpdates and look for result[-1].message.chat.id.'
+        'Send /start to the bot and run secure Telegram onboarding again.'
       );
     case 'network_error':
-      return `Could not reach the Telegram API: ${result.detail}. Check connectivity and retry.`;
+      return 'Could not reach the Telegram API. Check connectivity and retry.';
     case 'rate_limited':
-      return `Telegram API rate-limited the validation probe (${result.detail}). Retry in a few seconds.`;
+      return 'Telegram API rate-limited the validation probe. Retry in a few seconds.';
   }
 }
 
@@ -248,9 +247,9 @@ export class TelegramAPI {
         if (!this.warnedSelfChat.has(key)) {
           this.warnedSelfChat.add(key);
           console.warn(
-            `[telegram] self_chat trap likely: chat_id=${key} resolved to another bot. ` +
+            `[telegram] self_chat trap likely: the configured recipient resolved to another bot. ` +
             `Check .env — CHAT_ID must be YOUR Telegram user id, not the BOT_TOKEN prefix. ` +
-            `Fix by sending /start to the bot from your own account and reading the chat id via getUpdates.`,
+            `Fix by sending /start to the bot from your own account and running secure Telegram onboarding again.`,
           );
         }
       }

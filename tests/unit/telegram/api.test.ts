@@ -137,12 +137,11 @@ describe('TelegramAPI.validateCredentials', () => {
       expect(result.reason).toBe('self_chat');
       expect(result.detail).toBe('1234567890');
       const msg = formatValidateError(result);
-      // The error message must name the trap, point at the fix, and NOT
-      // leak any part of the token.
-      expect(msg).toContain('1234567890');
+      // The error message must name the trap and point at the fix without
+      // exposing either credential or identifier.
+      expect(msg).not.toContain('1234567890');
       expect(msg).toContain('BOT_TOKEN prefix');
       expect(msg).toContain('/start');
-      expect(msg).toContain('getUpdates');
       expect(msg).not.toContain('AAF3');
     }
     // self_chat is caught after getMe alone — getChat must not have been called.
@@ -161,7 +160,7 @@ describe('TelegramAPI.validateCredentials', () => {
       expect(result.reason).toBe('chat_not_found');
       expect(result.detail).toBe('222');
       const msg = formatValidateError(result);
-      expect(msg).toContain('222');
+      expect(msg).not.toContain('222');
       expect(msg).toContain('/start');
     }
     expect(callLog).toHaveLength(2);
@@ -181,7 +180,7 @@ describe('TelegramAPI.validateCredentials', () => {
     if (!result.ok) {
       expect(result.reason).toBe('bot_recipient');
       const msg = formatValidateError(result);
-      expect(msg).toContain('333');
+      expect(msg).not.toContain('333');
       expect(msg).toContain('bot');
     }
     expect(callLog).toHaveLength(2);
@@ -284,17 +283,16 @@ describe('formatValidateError', () => {
     expect(msg).toMatch(/invalid or revoked/);
   });
 
-  it('self_chat: message includes concrete fix instructions', () => {
+  it('self_chat: message includes a concrete fix without the identifier', () => {
     const msg = formatValidateError({ ok: false, reason: 'self_chat', detail: '1234567890' });
-    expect(msg).toContain('1234567890');
+    expect(msg).not.toContain('1234567890');
     expect(msg).toContain('BOT_TOKEN prefix');
     expect(msg).toContain('/start');
-    expect(msg).toContain('getUpdates');
   });
 
   it('chat_not_found: suggests /start', () => {
     const msg = formatValidateError({ ok: false, reason: 'chat_not_found', detail: '222' });
-    expect(msg).toContain('222');
+    expect(msg).not.toContain('222');
     expect(msg).toContain('/start');
   });
 
@@ -302,16 +300,17 @@ describe('formatValidateError', () => {
     const msg = formatValidateError({ ok: false, reason: 'bot_recipient', detail: '333' });
     expect(msg).toMatch(/bot/i);
     expect(msg).toMatch(/user/i);
-    expect(msg).toContain('333');
+    expect(msg).not.toContain('333');
   });
 
-  it('network_error: includes the underlying detail', () => {
+  it('network_error: suppresses underlying transport detail', () => {
     const msg = formatValidateError({
       ok: false,
       reason: 'network_error',
       detail: 'ENOTFOUND api.telegram.org',
     });
-    expect(msg).toContain('ENOTFOUND');
+    expect(msg).not.toContain('ENOTFOUND');
+    expect(msg).toMatch(/connectivity/i);
   });
 
   it('rate_limited: mentions retry', () => {

@@ -71,7 +71,7 @@ describe('canonical root onboarding OS routing', () => {
       'onboarding-windows-select-instance.ps1',
       'onboarding-windows-timezone.ps1',
       'enabled-agents.json',
-      'Invoke-RestMethod',
+      'node ./dist/cli.js telegram onboard',
       'npm run build',
       'pm2 start $Ecosystem',
       'pm2 save',
@@ -120,8 +120,51 @@ describe('canonical root onboarding OS routing', () => {
     expect(windows).toContain('Backslashes\nare shell escapes there');
     expect(windows).toContain("node ./dist/cli.js init '<org-name>'");
     expect(windows).toContain("node ./dist/cli.js add-agent '<agent-name>'");
+    expect(windows).toContain('node ./dist/cli.js telegram onboard <orchestrator-name>');
     expect(windows).toContain("node ./dist/cli.js enable '<agent-name>'");
     expect(windows).not.toContain('node .\\dist\\cli.js');
+  });
+
+  it('delegates Telegram secrets and discovery to the shared safe CLI', () => {
+    const root = read(ROOT_ONBOARDING);
+    const windows = read(WINDOWS_REFERENCE);
+    const phase6 = root.slice(
+      root.indexOf('## Phase 6: Orchestrator Setup'),
+      root.indexOf('## Phase 7: Dashboard Setup'),
+    );
+    const w3 = windows.slice(
+      windows.indexOf('## W3. Telegram discovery'),
+      windows.indexOf('## W4. Dashboard install'),
+    );
+
+    const scaffold =
+      'node ./dist/cli.js add-agent <orchestrator-name> --template orchestrator --org <org-name> --instance <instance-id>';
+    const onboard =
+      'node ./dist/cli.js telegram onboard <orchestrator-name> --org <org-name> --instance <instance-id>';
+
+    expect(phase6).toContain('**Windows:** use W3 of the loaded Windows reference');
+    expect(phase6).toContain('Do not ask for the token in this\nconversation');
+    expect(phase6).toContain('do not execute or translate the macOS/Linux instructions');
+    expect(phase6).toContain('**macOS/Linux:**');
+
+    expect(w3).toContain(scaffold);
+    expect(w3).toContain(onboard);
+    expect(w3.indexOf(scaffold)).toBeLessThan(w3.indexOf(onboard));
+    expect(w3).toContain('existing agent scaffold');
+    expect(w3).toContain('separate native');
+    expect(w3).toContain('masked');
+    expect(w3).toContain('without flushing');
+    expect(w3).toContain('--use-existing-token');
+    expect(w3).toContain('securely\npre-provisioned');
+    expect(w3).toContain('never use Read, Write, or Edit on the agent `.env`');
+    expect(w3).not.toMatch(/paste (?:the token|it) here/i);
+    expect(w3).not.toContain('BOT_TOKEN=');
+    expect(w3).not.toContain('getUpdates');
+    expect(w3).not.toContain('Invoke-RestMethod');
+    expect(w3).not.toMatch(/\bcurl\b/i);
+
+    expect(w3).toContain('never the token, Telegram API URI');
+    expect(w3).not.toContain('creates the\nagent');
   });
 
   it('installs dashboard dependencies before the Windows full-suite gate', () => {

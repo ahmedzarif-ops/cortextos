@@ -203,9 +203,11 @@ describe('TelegramAPI.sendMessage self_chat runtime safety net', () => {
     const warn = warnLog[0];
     expect(warn).toContain('[telegram]');
     expect(warn).toContain('self_chat');
-    expect(warn).toContain('chat_id=777');
+    expect(warn).not.toContain('777');
     expect(warn).toContain('CHAT_ID');
     expect(warn).toContain('/start');
+    expect(warn).toContain('secure Telegram onboarding');
+    expect(warn).not.toContain('getUpdates');
     // Must not leak any portion of the bot token.
     expect(warn).not.toContain('AAA');
     expect(warn).not.toContain('111:AAA');
@@ -242,8 +244,11 @@ describe('TelegramAPI.sendMessage self_chat runtime safety net', () => {
     await expect(api.sendMessage('888', 'b')).rejects.toThrow();
 
     expect(warnLog).toHaveLength(2);
-    expect(warnLog[0]).toContain('chat_id=777');
-    expect(warnLog[1]).toContain('chat_id=888');
+    expect(warnLog[0]).not.toContain('777');
+    expect(warnLog[0]).not.toContain('888');
+    expect(warnLog[1]).not.toContain('777');
+    expect(warnLog[1]).not.toContain('888');
+    expect(warnLog[0]).toBe(warnLog[1]);
   });
 
   it('does NOT warn on unrelated 403s', async () => {

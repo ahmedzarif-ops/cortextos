@@ -63,6 +63,11 @@ export function requiresTelegramCredentials(agentDir: string): boolean {
   }
 }
 
+/** Success output must remain independent of credential and identity values. */
+export function telegramValidationSuccessMessage(): string {
+  return 'Telegram credentials validated.';
+}
+
 function getEnabledAgentsPath(instanceId: string): string {
   return join(homedir(), '.cortextos', instanceId, 'config', 'enabled-agents.json');
 }
@@ -238,10 +243,7 @@ export const enableAgentCommand = new Command('enable')
         const telegramApi = new TelegramAPI(env.BOT_TOKEN);
         const validation = await telegramApi.validateCredentials(env.CHAT_ID);
         if (validation.ok) {
-          const label = validation.chatTitle ? ` (${validation.chatTitle})` : '';
-          console.log(
-            `Telegram validated: bot=@${validation.botUsername} chat=${env.CHAT_ID} type=${validation.chatType}${label}`,
-          );
+          console.log(telegramValidationSuccessMessage());
         } else if (validation.reason === 'network_error' || validation.reason === 'rate_limited') {
           console.error(`Warning: could not verify Telegram credentials (${validation.reason}).`);
           console.error(`  ${formatValidateError(validation)}`);
@@ -252,11 +254,11 @@ export const enableAgentCommand = new Command('enable')
           console.error(`  Edit ${agentEnvPath} and re-run: cortextos enable ${agent}`);
           process.exit(1);
         }
-      } catch (err) {
+      } catch {
         // Defensive: validateCredentials should never throw, but if it does,
         // fall through with a warning rather than blocking enable on a bug in
         // the validator itself.
-        console.error(`Warning: Telegram credential validation crashed: ${err instanceof Error ? err.message : String(err)}`);
+        console.error('Warning: Telegram credential validation could not be completed.');
         console.error('  Continuing enable. Investigate the validator if this recurs.');
       }
     }
