@@ -53,6 +53,18 @@ describe('restrictSecretFile', () => {
     expect(detail.length).toBeLessThanOrEqual(502);
   });
 
+  it('removes inherited PowerShell Core module paths from the 5.1 child', () => {
+    const env = secretPermissionInternals.windowsPowerShellEnvironment(
+      'C:\\safe\\secret.env',
+      { Path: 'C:\\Windows', PsMoDuLePaTh: 'C:\\Program Files\\PowerShell\\7\\Modules', KEEP: 'yes' },
+    );
+    expect(env).toEqual({
+      Path: 'C:\\Windows',
+      KEEP: 'yes',
+      CTX_SECRET_FILE: 'C:\\safe\\secret.env',
+    });
+  });
+
   it('replaces inherited rules and grants only current-user and SYSTEM SIDs', () => {
     const script = secretPermissionInternals.WINDOWS_ACL_SCRIPT;
     expect(script).toContain('New-Object System.Security.AccessControl.FileSecurity');

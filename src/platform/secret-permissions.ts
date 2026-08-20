@@ -37,13 +37,27 @@ $acl.SetOwner($userSid)
 Set-Acl -LiteralPath $target -AclObject $acl
 `;
 
+function windowsPowerShellEnvironment(
+  path: string,
+  source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...source, CTX_SECRET_FILE: path };
+  // A PowerShell 5.1 grandchild of pwsh can inherit pwsh's Core-only module
+  // paths through Node. Dropping the inherited value makes powershell.exe
+  // rebuild its own Windows PowerShell module path before Set-Acl autoloads.
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase() === 'PSMODULEPATH') delete env[key];
+  }
+  return env;
+}
+
 function secureWindowsAcl(path: string): SecretPermissionCommandResult {
   const encoded = Buffer.from(WINDOWS_ACL_SCRIPT, 'utf16le').toString('base64');
   const result = spawnSync(
     'powershell.exe',
     ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
     {
-      env: { ...process.env, CTX_SECRET_FILE: path },
+      env: windowsPowerShellEnvironment(path),
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 15_000,
@@ -110,4 +124,5 @@ export function writeSecretFileSync(path: string, content: string): void {
 export const secretPermissionInternals = {
   WINDOWS_ACL_SCRIPT,
   boundedWindowsAclDiagnostic,
+  windowsPowerShellEnvironment,
 };
