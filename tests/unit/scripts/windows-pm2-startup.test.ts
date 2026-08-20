@@ -37,4 +37,11 @@ describe('native Windows PM2 startup helper contract', () => {
     expect(script).toContain("Join-Path (Split-Path $pm2Command.Source -Parent) 'node_modules\\pm2\\bin\\pm2'");
     expect(script).toContain('& $nodeLiteral $pm2BinLiteral resurrect');
   });
+
+  it('restores allowlisted user-scoped provider auth without embedding values', () => {
+    expect(script).toContain("@('CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_API_KEY')");
+    expect(script).toContain("[Environment]::GetEnvironmentVariable(`$name, 'User')");
+    expect(script).toContain("[Environment]::SetEnvironmentVariable(`$name, `$value, 'Process')");
+    expect(script).not.toContain('CLAUDE_CODE_OAUTH_TOKEN=');
+  });
 });

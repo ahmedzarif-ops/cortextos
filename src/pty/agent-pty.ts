@@ -6,6 +6,7 @@ import { OutputBuffer, stripAnsiSync } from './output-buffer.js';
 import { injectMessage as injectMessageIntoPty } from './inject.js';
 import { prepareClaudeHeadlessProfile } from './claude-profile.js';
 import { resolveClaudeCommand } from './claude-command.js';
+import { withWindowsUserProviderEnv } from '../platform/windows-user-env.js';
 
 // node-pty types
 interface IPty {
@@ -286,7 +287,7 @@ export class AgentPTY {
       clearInterval(promptPoll);
       if (this.pty && !this.outputBuffer.isBootstrapped()) {
         const recent = stripAnsiSync(this.outputBuffer.getRecent());
-        if (this.detectFirstRunPrompt(recent) !== null) {
+        if (!this.matchesAuthenticationRequired(recent) && this.detectFirstRunPrompt(recent) !== null) {
           this._awaitingInteractiveConfirmation = true;
           console.warn(`[agent-pty] ${this.env.agentName}: awaiting interactive confirmation — first-run prompt still showing at backstop, not bootstrapped`);
         }
@@ -478,6 +479,7 @@ export class AgentPTY {
     }
 
     const recent = stripAnsiSync(this.outputBuffer.getRecent());
+    if (this.matchesAuthenticationRequired(recent)) return false;
     if (this.detectFirstRunPrompt(recent) !== null) return false;
 
     return Date.now() - this.firstOutputAtMs >= OUTPUT_READY_FALLBACK_MS;
@@ -486,7 +488,17 @@ export class AgentPTY {
   // first-run observability fix: true only while genuinely wedged — AND-gated with
   // !isBootstrapped so a late recovery auto-reports healthy without extra clearing.
   isAwaitingInteractiveConfirmation(): boolean {
-    return this._awaitingInteractiveConfirmation && !this.outputBuffer.isBootstrapped();
+    return this._awaitingInteractiveConfirmation && !this.outputBuffer.isBootstrapped() && !this.isAuthenticationRequired();
+  }
+
+  /** True when Claude's current unbootstrapped screen requires host login. */
+  isAuthenticationRequired(): boolean {
+    if (this.outputBuffer.isBootstrapped()) return false;
+    return this.matchesAuthenticationRequired(stripAnsiSync(this.outputBuffer.getRecent()));
+  }
+
+  private matchesAuthenticationRequired(recent: string): boolean {
+    return /not\s+logged\s+in/i.test(recent) && /run\s+\/login/i.test(recent);
   }
 
   /**
@@ -494,6 +506,7 @@ export class AgentPTY {
    */
   private getBaseEnv(): Record<string, string> {
     const env: Record<string, string> = {};
+    const hostEnv = withWindowsUserProviderEnv(process.env);
     // Copy essential env vars
     const keepVars = [
       'PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG', 'LC_ALL',
@@ -508,8 +521,8 @@ export class AgentPTY {
       'HOMEDRIVE', 'HOMEPATH', 'PUBLIC',
     ];
     for (const key of keepVars) {
-      if (process.env[key]) {
-        env[key] = process.env[key]!;
+      if (hostEnv[key]) {
+        env[key] = hostEnv[key]!;
       }
     }
 

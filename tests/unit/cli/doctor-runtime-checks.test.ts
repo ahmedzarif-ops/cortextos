@@ -1,7 +1,21 @@
 import { describe, expect, it, vi } from 'vitest';
-import { getAgentRuntimeChecks, resolveRuntimeProbeInvocation, type RuntimeProbe } from '../../../src/cli/doctor';
+import { getAgentRuntimeChecks, inferLegacyTemplateName, resolveRuntimeProbeInvocation, type RuntimeProbe } from '../../../src/cli/doctor';
 
 describe('doctor agent runtime checks', () => {
+  it('infers a legacy orchestrator from its exact hook key set', () => {
+    const shared = { PermissionRequest: [], PreToolUse: [], SessionEnd: [], PreCompact: [] };
+    expect(inferLegacyTemplateName(shared, [
+      { name: 'orchestrator', hooks: { ...shared } },
+      { name: 'analyst', hooks: { ...shared, Stop: [] } },
+    ])).toBe('orchestrator');
+  });
+
+  it('keeps the agent fallback when no legacy role matches exactly', () => {
+    expect(inferLegacyTemplateName({ PermissionRequest: [] }, [
+      { name: 'orchestrator', hooks: { PermissionRequest: [], PreToolUse: [] } },
+    ])).toBe('agent');
+  });
+
   it('probes the native Claude executable on Windows instead of its cmd shim', () => {
     const prefix = 'C:\\ProgramData\\cortextos\\npm-global';
     const native = `${prefix}\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe`;

@@ -194,9 +194,7 @@ python -m venv ./knowledge-base/venv
 ```
 
 ```powershell
-$env:CTX_INSTANCE_ID = '<instance-id>'
-$env:CTX_FRAMEWORK_ROOT = (Get-Location).Path
-node ./dist/cli.js bus kb-ingest '<native-file-path>' --org '<org-name>' --scope shared
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./scripts/onboarding-windows-kb-ingest.ps1 -InstanceId '<instance-id>' -OrgName '<org-name>' -FilePath '<native-file-path>'
 ```
 
 Run one bounded query through `node ./dist/cli.js bus` as defined by the current
@@ -206,36 +204,39 @@ agent runtime.
 
 ## W6. Generate and start the supervised system
 
-Set the instance, state root, and scoped PM2 home in the same invocation that
-generates and starts the ecosystem:
+Generate and start the ecosystem through the checked-in native helper. Keep the
+selected values literal. The helper owns all PowerShell variables internally,
+binds the dashboard to loopback, uses the instance-scoped PM2 home, and fails
+closed before saving partial PM2 state:
 
 ```powershell
-$InstanceId = '<instance-id>'
-$OrgName = '<org-name>'
-$env:CTX_INSTANCE_ID = $InstanceId
-$env:CTX_ROOT = Join-Path $env:USERPROFILE ('.cortextos\' + $InstanceId)
-$env:PM2_HOME = if ($InstanceId -eq 'default') { Join-Path $env:USERPROFILE '.pm2' } else { Join-Path $env:USERPROFILE ('.pm2-' + $InstanceId) }
-$Ecosystem = 'ecosystem.' + $InstanceId + '.config.js'
-node ./dist/cli.js ecosystem --instance $InstanceId --org $OrgName --output $Ecosystem --dashboard-host 127.0.0.1
-pm2 start $Ecosystem
-pm2 save
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./scripts/start-windows-runtime.ps1 -InstanceId '<instance-id>' -OrgName '<org-name>'
 ```
 
+Never rewrite this as a `powershell.exe -Command` string or reproduce its
+PowerShell variables through Claude Code's Bash-labelled command surface.
 Do not treat PM2 `online` as agent readiness. Continue through W8.
 
 ## W7. Native reboot persistence
 
-Do not use PM2's Unix startup generator on Windows. Register the repository's
-idempotent, limited-privilege scheduled task from the same Windows account that
-owns the runtime authentication and PM2 state:
+Do not use PM2's Unix startup generator on Windows. First detect the correct
+native trigger with this checked-in probe:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-windows-pm2-startup.ps1 -InstanceId $InstanceId -Pm2Home $env:PM2_HOME
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./scripts/onboarding-windows-trigger-mode.ps1
 ```
 
-Use the default Logon trigger on a desktop. On a headless VPS add
-`-TriggerMode Startup`. Run the helper twice and verify one instance-scoped task
-is updated rather than duplicated. The helper must not store a Windows password.
+Read the `triggerMode` field. Use its literal value in the registration command;
+do not reimplement the probe or use a PowerShell variable. Run this exact shape
+twice and verify one instance-scoped task is updated rather than duplicated:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./scripts/install-windows-pm2-startup.ps1 -InstanceId '<instance-id>' -TriggerMode '<Logon-or-Startup>'
+```
+
+The helper must not store a Windows password. It restores only allowlisted,
+user-scoped provider authentication into the scheduled process without printing
+or embedding credential values in its action, logs, or arguments.
 
 ## W8. Readiness, diagnostics, logs, and port health
 
@@ -248,6 +249,12 @@ Get-NetTCPConnection -State Listen -LocalPort 3000 -ErrorAction SilentlyContinue
 
 Require the daemon, dashboard, Telegram poller, and enabled agent runtime to
 cross their actual readiness gates. Confirm the dashboard listener is loopback.
+On Windows, doctor and the managed PTY restore missing allowlisted provider
+credentials from the current account's persistent user environment because
+Claude Code intentionally removes its OAuth token from tool-child processes.
+They never print or persist the restored values. An authenticated outer
+`/onboarding` session alone is not proof that the daemon-launched runtime is
+authenticated; require the live runtime readiness result.
 Read bounded diagnostics without revealing `.env` or token-bearing URLs:
 
 ```powershell

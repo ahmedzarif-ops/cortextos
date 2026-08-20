@@ -230,6 +230,24 @@ describe('PR-02: add-agent --runtime codex-app-server', () => {
     // requiring knowledge of the implicit default.
     const cfg = JSON.parse(readFileSync(join(agentDir, 'config.json'), 'utf-8'));
     expect(cfg.runtime).toBe('claude-code');
+    expect(cfg.template).toBe('agent');
+  });
+
+  it('persists the actual orchestrator template for truthful doctor comparisons', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await addAgentCommand.parseAsync([
+      'node', 'cli', 'orchestrator-test', '--template', 'orchestrator',
+      '--org', 'testorg', '--instance', 'pr02-test',
+    ]);
+
+    const cfg = JSON.parse(readFileSync(
+      join(tempRoot, 'orgs', 'testorg', 'agents', 'orchestrator-test', 'config.json'),
+      'utf-8',
+    ));
+    expect(cfg.template).toBe('orchestrator');
+    expect(cfg.runtime).toBe('claude-code');
   });
 
   it('scaffolds runtime=opencode with the OpenCode-native template and local skill links', async () => {
@@ -253,6 +271,7 @@ describe('PR-02: add-agent --runtime codex-app-server', () => {
 
     const cfg = JSON.parse(readFileSync(join(agentDir, 'config.json'), 'utf-8'));
     expect(cfg.runtime).toBe('opencode');
+    expect(cfg.template).toBe('agent-opencode');
     expect(cfg.model).toBe('openai/gpt-4.1-nano');
     expect(cfg.dangerously_skip_permissions).toBe(true);
 

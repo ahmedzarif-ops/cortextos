@@ -115,6 +115,13 @@ $pm2HomeLiteral = ConvertTo-SingleQuotedLiteral $Pm2Home
 $actionSource = @"
 `$ErrorActionPreference = 'Stop'
 `$env:PM2_HOME = $pm2HomeLiteral
+foreach (`$name in @('CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_API_KEY')) {
+    if (-not [Environment]::GetEnvironmentVariable(`$name, 'Process')) {
+        `$value = [Environment]::GetEnvironmentVariable(`$name, 'User')
+        if (-not `$value) { `$value = [Environment]::GetEnvironmentVariable(`$name, 'Machine') }
+        if (`$value) { [Environment]::SetEnvironmentVariable(`$name, `$value, 'Process') }
+    }
+}
 & $nodeLiteral $pm2BinLiteral resurrect
 exit `$LASTEXITCODE
 "@

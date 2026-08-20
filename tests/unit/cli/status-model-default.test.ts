@@ -39,4 +39,13 @@ describe('cortextos status: Model column', () => {
     expect(output).toContain('claude-opus-4-8');
     expect(output).not.toContain('default');
   });
+
+  it('distinguishes provider auth failure from a stale first-run prompt', () => {
+    const output = captureOutput([
+      { name: 'alice', status: 'running', authenticationRequired: true },
+    ]);
+    expect(output).toContain('auth-needed‡');
+    expect(output).toContain('provider authentication is unavailable');
+    expect(output).not.toContain('awaiting interactive confirmation');
+  });
 });

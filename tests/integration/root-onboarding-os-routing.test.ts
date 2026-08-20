@@ -9,6 +9,8 @@ const WINDOWS_REFERENCE = 'references/onboarding-windows.md';
 const WINDOWS_INSTALL_SCRIPT = 'scripts/onboarding-windows-install.ps1';
 const WINDOWS_INSTANCE_SCRIPT = 'scripts/onboarding-windows-select-instance.ps1';
 const WINDOWS_TIMEZONE_SCRIPT = 'scripts/onboarding-windows-timezone.ps1';
+const WINDOWS_RUNTIME_SCRIPT = 'scripts/start-windows-runtime.ps1';
+const WINDOWS_TRIGGER_SCRIPT = 'scripts/onboarding-windows-trigger-mode.ps1';
 
 function read(relative: string): string {
   // Git may materialize Markdown with CRLF on Windows. The onboarding contract
@@ -73,8 +75,8 @@ describe('canonical root onboarding OS routing', () => {
       'enabled-agents.json',
       'node ./dist/cli.js telegram onboard',
       'npm run build',
-      'pm2 start $Ecosystem',
-      'pm2 save',
+      'start-windows-runtime.ps1',
+      'onboarding-windows-trigger-mode.ps1',
       'install-windows-pm2-startup.ps1',
       'node ./dist/cli.js doctor',
       'node ./dist/cli.js status',
@@ -123,6 +125,9 @@ describe('canonical root onboarding OS routing', () => {
     expect(windows).toContain('node ./dist/cli.js telegram onboard <orchestrator-name>');
     expect(windows).toContain("node ./dist/cli.js enable '<agent-name>'");
     expect(windows).not.toContain('node .\\dist\\cli.js');
+    expect(commands).not.toMatch(/^\s*\$[A-Za-z_][A-Za-z0-9_]*\s*=/m);
+    expect(commands).not.toContain('$env:');
+    expect(windows).toContain('Never rewrite this as a `powershell.exe -Command` string');
   });
 
   it('delegates Telegram secrets and discovery to the shared safe CLI', () => {
@@ -215,6 +220,22 @@ describe('canonical root onboarding OS routing', () => {
     expect(windows).toContain('Read the `timezone` field');
     expect(script).toContain("& node.exe -p 'Intl.DateTimeFormat().resolvedOptions().timeZone'");
     expect(script).toContain('ConvertTo-Json -Compress');
+  });
+
+  it('keeps runtime start and persistence trigger logic inside checked-in native scripts', () => {
+    const windows = read(WINDOWS_REFERENCE);
+    const runtime = read(WINDOWS_RUNTIME_SCRIPT);
+    const trigger = read(WINDOWS_TRIGGER_SCRIPT);
+
+    expect(windows).toContain('-File ./scripts/start-windows-runtime.ps1');
+    expect(windows).toContain('-File ./scripts/onboarding-windows-trigger-mode.ps1');
+    expect(runtime).toContain('& $pm2.Source start $EcosystemPath');
+    expect(runtime).toContain('& $pm2.Source save');
+    expect(runtime).toContain('--dashboard-host 127.0.0.1');
+    expect(runtime).toContain('if ($LASTEXITCODE -ne 0)');
+    expect(trigger).toContain("Get-Process -Name explorer");
+    expect(trigger).toContain('$_.SessionId -eq $CurrentSession');
+    expect(trigger).toContain("{ 'Logon' } else { 'Startup' }");
   });
 
   it('keeps Windows failure diagnosis on native tools', () => {

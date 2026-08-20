@@ -95,11 +95,13 @@ export function displayStatuses(statuses: AgentStatus[]): void {
   console.log(separator);
 
   let anyAwaiting = false;
+  let anyAuthRequired = false;
   let anyDormant = false;
   for (const s of statuses) {
     const name = s.name.padEnd(18);
     let label: string = s.status;
     if (s.awaitingConfirmation) { label = 'unhealthy*'; anyAwaiting = true; }
+    if (s.authenticationRequired) { label = 'auth-needed‡'; anyAuthRequired = true; }
     if (s.dormant) { label = 'dormant†'; anyDormant = true; }
     const status = label.padEnd(12);
     const pid = (s.pid?.toString() || '-').padEnd(10);
@@ -109,6 +111,7 @@ export function displayStatuses(statuses: AgentStatus[]): void {
   }
 
   if (anyAwaiting) console.log('  * awaiting interactive confirmation (first-run prompt not accepted)\n');
+  if (anyAuthRequired) console.log('  ‡ provider authentication is unavailable to the managed runtime\n');
   if (anyDormant) console.log('  † enabled but heartbeat stale relative to liveness baseline (possible silent dormancy)\n');
 
   console.log('');

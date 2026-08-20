@@ -5,6 +5,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { verifyPtySpawn } from '../platform/pty-smoke.js';
 import { resolveClaudeCommand } from '../pty/claude-command.js';
+import { withWindowsUserProviderEnv } from '../platform/windows-user-env.js';
 
 export interface Check {
   name: string;
@@ -20,6 +21,14 @@ export interface RuntimeProbeResult {
 
 export type RuntimeProbe = (command: string, args: readonly string[]) => RuntimeProbeResult;
 
+export function inferLegacyTemplateName(
+  agentHooks: Record<string, unknown>,
+  candidates: ReadonlyArray<{ name: string; hooks: Record<string, unknown> }>,
+): string {
+  const agentHookKeys = Object.keys(agentHooks).sort().join('\0');
+  return candidates.find(({ hooks }) => Object.keys(hooks).sort().join('\0') === agentHookKeys)?.name ?? 'agent';
+}
+
 /**
  * Run a fixed diagnostic command without inheriting stdio. Windows global npm
  * commands are .cmd shims, so they must be resolved through the native shell.
@@ -33,12 +42,14 @@ export function runRuntimeProbe(command: string, args: readonly string[]): Runti
   if (![command, ...args].every((part) => /^[A-Za-z0-9._/-]+$/.test(part))) {
     return { ok: false, stdout: '' };
   }
-  const invocation = resolveRuntimeProbeInvocation(command, args, process.platform, process.env);
+  const probeEnv = withWindowsUserProviderEnv(process.env);
+  const invocation = resolveRuntimeProbeInvocation(command, args, process.platform, probeEnv);
   const result = spawnSync(invocation.file, invocation.args, {
     encoding: 'utf-8',
     stdio: 'pipe',
     timeout: 10_000,
     windowsHide: true,
+    env: probeEnv,
   });
   return {
     ok: !result.error && result.status === 0,
@@ -424,26 +435,43 @@ export const doctorCommand = new Command('doctor')
             const agentConfig = join(agentsRoot, agent, 'config.json');
             if (!existsSync(agentSettings) || !existsSync(agentConfig)) continue;
 
-            // Determine which template this agent was created from.
-            // config.json doesn't always record this, so default to 'agent'
-            // and check templates/orchestrator + templates/analyst as
-            // candidates if the agent's hook set looks like one of those.
+            // Determine which template this agent was created from. New agents
+            // always persist this field. For older agents, accept an exact hook
+            // key-set match with a shipped role before falling back to 'agent'.
             let templateName = 'agent';
+            let templateRecorded = false;
             try {
               const cfg = JSON.parse(readFileSync(agentConfig, 'utf-8'));
-              if (typeof cfg.template === 'string') templateName = cfg.template;
+              if (typeof cfg.template === 'string') {
+                templateName = cfg.template;
+                templateRecorded = true;
+              }
             } catch { /* ignore — use default */ }
+
+            let agentHooks: Record<string, unknown> = {};
+            try {
+              agentHooks = (JSON.parse(readFileSync(agentSettings, 'utf-8')).hooks ?? {});
+            } catch { continue; }
+
+            if (!templateRecorded) {
+              const candidates: Array<{ name: string; hooks: Record<string, unknown> }> = [];
+              for (const candidate of ['orchestrator', 'analyst']) {
+                const candidateSettings = join(frameworkRoot, 'templates', candidate, '.claude', 'settings.json');
+                if (!existsSync(candidateSettings)) continue;
+                try {
+                  const candidateHooks = (JSON.parse(readFileSync(candidateSettings, 'utf-8')).hooks ?? {});
+                  candidates.push({ name: candidate, hooks: candidateHooks });
+                } catch { /* inspect the next candidate */ }
+              }
+              templateName = inferLegacyTemplateName(agentHooks, candidates);
+            }
 
             const templateSettings = join(frameworkRoot, 'templates', templateName, '.claude', 'settings.json');
             if (!existsSync(templateSettings)) continue;
 
             let templateHooks: Record<string, unknown> = {};
-            let agentHooks: Record<string, unknown> = {};
             try {
               templateHooks = (JSON.parse(readFileSync(templateSettings, 'utf-8')).hooks ?? {});
-            } catch { continue; }
-            try {
-              agentHooks = (JSON.parse(readFileSync(agentSettings, 'utf-8')).hooks ?? {});
             } catch { continue; }
 
             const missing = HOOK_KEYS.filter(k => k in templateHooks && !(k in agentHooks));

@@ -185,17 +185,19 @@ export const addAgentCommand = new Command('add-agent')
       }, null, 2) + '\n', 'utf-8');
     }
 
-    // Persist non-default runtime into config.json regardless of whether the
-    // file came from a template or was created above. The template-supplied
-    // config.json wins file existence, so we read-merge-write to inject the
-    // runtime field that agent-process.ts branches on.
-    if (options.runtime !== 'claude-code' && existsSync(configPath)) {
+    // Persist the effective template and any non-default runtime regardless of
+    // whether config.json came from a template or was created above. Doctor and
+    // skill discovery must compare the agent with the template it actually
+    // received; defaulting an Orchestrator to templates/agent creates a false
+    // missing-Stop failure because Orchestrators intentionally omit that hook.
+    if (existsSync(configPath)) {
       try {
         const existingCfg = JSON.parse(readFileSync(configPath, 'utf-8'));
-        existingCfg.runtime = options.runtime;
+        existingCfg.template = effectiveTemplate;
+        if (options.runtime !== 'claude-code') existingCfg.runtime = options.runtime;
         writeFileSync(configPath, JSON.stringify(existingCfg, null, 2) + '\n', 'utf-8');
       } catch (err) {
-        console.error(`Warning: failed to set runtime field in config.json: ${(err as Error).message}`);
+        console.error(`Warning: failed to set template/runtime fields in config.json: ${(err as Error).message}`);
       }
     }
 

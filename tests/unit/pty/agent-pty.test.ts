@@ -146,6 +146,18 @@ describe('AgentPTY first-run wedge detection (awaiting interactive confirmation)
     pty.getOutputBuffer().push('permissions: bypass');
     expect(pty.isAwaitingInteractiveConfirmation()).toBe(false);
   });
+
+  it('reports an auth requirement instead of misclassifying retained trust text as a prompt wedge', async () => {
+    const pty = newPty({});
+    await pty.spawn('fresh', 'P');
+    pty.getOutputBuffer().push('Do you trust the files in this folder?');
+    pty.getOutputBuffer().push('Not logged in — Run /login');
+    await vi.advanceTimersByTimeAsync(46_000);
+
+    expect(pty.isAuthenticationRequired()).toBe(true);
+    expect(pty.isAwaitingInteractiveConfirmation()).toBe(false);
+    expect(pty.isReadyForMessages()).toBe(false);
+  });
 });
 
 describe('AgentPTY readiness fallback for current Claude terminal chrome', () => {

@@ -475,6 +475,10 @@ export class AgentProcess {
         this.pty && 'isAwaitingInteractiveConfirmation' in this.pty
           ? this.pty.isAwaitingInteractiveConfirmation()
           : false,
+      authenticationRequired:
+        this.pty && 'isAuthenticationRequired' in this.pty
+          ? this.pty.isAuthenticationRequired()
+          : false,
     };
   }
 

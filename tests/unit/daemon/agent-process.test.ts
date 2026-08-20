@@ -17,6 +17,7 @@ const mockPty = {
   getPid: vi.fn().mockReturnValue(12345),
   isAlive: vi.fn().mockReturnValue(true),
   isAwaitingInteractiveConfirmation: vi.fn().mockReturnValue(false),
+  isAuthenticationRequired: vi.fn().mockReturnValue(false),
   onExit: vi.fn().mockImplementation((cb: (exitCode: number, signal?: number) => void) => {
     capturedOnExit = cb;
   }),
@@ -110,6 +111,8 @@ beforeEach(() => {
   mockPty.isAlive.mockReturnValue(true);
   mockPty.isAwaitingInteractiveConfirmation.mockClear();
   mockPty.isAwaitingInteractiveConfirmation.mockReturnValue(false);
+  mockPty.isAuthenticationRequired.mockClear();
+  mockPty.isAuthenticationRequired.mockReturnValue(false);
   mockPty.onExit.mockClear();
   mockInjectMessage.mockClear();
   mockTerminateProcessTree.mockReset().mockImplementation(async (pid: number) => {
@@ -672,5 +675,14 @@ describe('AgentProcess - first-run observability (awaitingConfirmation)', () => 
     await ap.start();
 
     expect(ap.getStatus().awaitingConfirmation).toBeFalsy();
+  });
+
+  it('surfaces provider authentication separately from an interactive prompt wedge', async () => {
+    mockPty.isAuthenticationRequired.mockReturnValue(true);
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    expect(ap.getStatus().authenticationRequired).toBe(true);
+    expect(ap.getStatus().awaitingConfirmation).toBe(false);
   });
 });
