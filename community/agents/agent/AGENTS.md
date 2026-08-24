@@ -48,9 +48,9 @@ Run these steps before any restart (hard or soft) and on context exhaustion.
 1. Write final memory checkpoint to daily memory:
    ```bash
    TODAY=$(date -u +%Y-%m-%d)
-   cat >> "memory/$TODAY.md" << MEMEOF
+   printf '\n## Session End - %s\n' "$(date -u +'%H:%M:%S UTC')" >> "memory/$TODAY.md"
+cat >> "memory/$TODAY.md" << 'MEMEOF'
 
-## Session End - $(date -u +'%H:%M:%S UTC')
 - Status: [done/interrupted/context-full]
 - Current state: [where things stand — specific enough that the next session can resume cold]
 - Active threads: [anything in progress or mid-task with current state]
@@ -239,9 +239,9 @@ Use this when: you make a significant decision, learn something about the user, 
 ```bash
 TODAY=$(date -u +%Y-%m-%d)
 mkdir -p memory
-cat >> "memory/$TODAY.md" << MEMEOF
+printf '\n## Session Start - %s\n' "$(date -u +'%H:%M:%S UTC')" >> "memory/$TODAY.md"
+cat >> "memory/$TODAY.md" << 'MEMEOF'
 
-## Session Start - $(date -u +'%H:%M:%S UTC')
 - Status: online
 - Crons active: <output of `cortextos bus list-crons $CTX_AGENT_NAME`>
 - Inbox: <N messages or "empty">
