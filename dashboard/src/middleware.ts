@@ -49,6 +49,65 @@ function getAllowedOrigin(requestOrigin: string | null): string | null {
   return null;
 }
 
+
+// GAP: /login was frameable by ANY origin. Measured 2026-08-26 on the running dev
+// server: GET /login returned 200 with NO X-Frame-Options. The cause was
+// structural, not a missing line — the security headers were set ONLY on the
+// final authenticated success path, so every OTHER way out of this function
+// returned a response without them: the public-path early return (/login,
+// /api/auth, /_next, the icon paths, /api/workflows/health), the unauthenticated
+// redirect to /login, the 401 for API routes, the two 500 misconfiguration
+// responses, and the OPTIONS preflight. A login page any site can frame is a
+// clickjacking and credential-harvesting surface, and it was reached by one of
+// the paths that skipped the headers.
+//
+// PRE-EXISTING ON MAIN — not introduced by the agent-city branch.
+//
+// ⚠ THE SHAPE IS THE LESSON: headers applied at ONE exit protect only the
+// requests that leave through it. Setting them at the LAST return looks
+// complete while covering the fewest paths — the authenticated success case is
+// the one that needed them least. Every `return` below now goes through these
+// helpers; adding a new early return without them re-opens exactly this hole.
+function applySecurityHeaders(response: NextResponse, pathname: string): NextResponse {
+  // The Agent City scene bundle is framed by /city, a first-party page on this
+  // same origin. DENY blocks even same-origin framing, so that one path relaxes
+  // to SAMEORIGIN — which still refuses every other site, which is what this
+  // header is here to do. Everything else stays DENY.
+  //
+  // The bundle it refers to is GENERATED, not committed: it is produced by
+  // orgs/<org>/agents/city/build/build-internal.mjs into dashboard/public/agent-city/,
+  // which is gitignored because the build bakes live fleet state into it. So a
+  // fresh clone will NOT contain the directory this relaxation exists for, and
+  // /city renders an explicit "not built" state until someone runs that build.
+  // Said out loud because this comment justifies a WEAKENED control: a reviewer
+  // who goes looking for the bundle, does not find it, and concludes the
+  // relaxation is unjustified or vestigial would be wrong both ways, and one of
+  // those wrong turns removes a header exemption that a real first-party page
+  // depends on.
+  response.headers.set(
+    'X-Frame-Options',
+    pathname.startsWith('/agent-city/') ? 'SAMEORIGIN' : 'DENY',
+  );
+  response.headers.set('X-Content-Type-Options', 'nosniff');
+  response.headers.set('Referrer-Policy', 'no-referrer');
+  if (process.env.NODE_ENV === 'production') {
+    response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  return response;
+}
+
+// Every response leaving this middleware goes through here: CORS and security
+// headers together, so the two cannot drift apart per-path again.
+function withCommonHeaders(
+  response: NextResponse,
+  pathname: string,
+  corsOrigin: string,
+): NextResponse {
+  response.headers.set('Access-Control-Allow-Origin', corsOrigin);
+  response.headers.set('Vary', 'Origin');
+  return applySecurityHeaders(response, pathname);
+}
+
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const requestOrigin = request.headers.get('origin');
@@ -56,16 +115,15 @@ export async function middleware(request: NextRequest) {
 
   // Handle CORS preflight requests
   if (request.method === 'OPTIONS') {
-    return new NextResponse(null, {
+    const preflight = new NextResponse(null, {
       status: 204,
       headers: {
-        'Access-Control-Allow-Origin': corsOrigin,
         'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         'Access-Control-Max-Age': '86400',
-        'Vary': 'Origin',
       },
     });
+    return withCommonHeaders(preflight, pathname, corsOrigin);
   }
 
   // Allow public paths
@@ -78,12 +136,23 @@ export async function middleware(request: NextRequest) {
     pathname.startsWith('/api/auth') ||
     pathname.startsWith('/_next') ||
     pathname === '/favicon.ico' ||
+    /* App Router serves the app icon from src/app/icon.svg at /icon.svg — NOT at
+       /favicon.ico. Excluding only favicon.ico auth-gated the real icon, so an
+       unauthenticated page load fired GET /icon.svg -> 307 /login?callbackUrl=
+       %2Ficon.svg, a second competing document request that left the login page
+       stuck on "Loading…" (React never finished hydrating, so the csrf effect
+       never ran and the submit button stayed disabled through refreshes).
+       Only visible when there is no session cookie, which is why it looked like
+       a phone/LAN-only bug: the Mac browser was already logged in.
+       Verified 2026-08-26 with controls — favicon.ico and _next chunks were 200
+       while icon.svg was 307. */
+    pathname === '/icon.svg' ||
+    pathname === '/apple-icon.png' ||
+    pathname === '/apple-touch-icon.png' ||
+    pathname === '/manifest.json' ||
     pathname === '/api/workflows/health'
   ) {
-    const response = NextResponse.next();
-    response.headers.set('Access-Control-Allow-Origin', corsOrigin);
-    response.headers.set('Vary', 'Origin');
-    return response;
+    return withCommonHeaders(NextResponse.next(), pathname, corsOrigin);
   }
 
   // GAP-0030: Verify the NextAuth session token. Previous implementation only
@@ -119,9 +188,7 @@ export async function middleware(request: NextRequest) {
       { error: 'Server misconfiguration: auth secret not configured' },
       { status: 500 },
     );
-    res.headers.set('Access-Control-Allow-Origin', corsOrigin);
-    res.headers.set('Vary', 'Origin');
-    return res;
+    return withCommonHeaders(res, pathname, corsOrigin);
   }
 
   // Check for Bearer token (mobile app)
@@ -142,9 +209,7 @@ export async function middleware(request: NextRequest) {
           { error: 'Server misconfiguration: auth secret not configured' },
           { status: 500 },
         );
-        res.headers.set('Access-Control-Allow-Origin', corsOrigin);
-        res.headers.set('Vary', 'Origin');
-        return res;
+        return withCommonHeaders(res, pathname, corsOrigin);
       }
       try {
         const secret = new TextEncoder().encode(authSecret);
@@ -160,49 +225,22 @@ export async function middleware(request: NextRequest) {
     // For API routes, return 401 instead of redirect
     if (pathname.startsWith('/api/')) {
       const res = NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-      res.headers.set('Access-Control-Allow-Origin', corsOrigin);
-      res.headers.set('Vary', 'Origin');
-      return res;
+      return withCommonHeaders(res, pathname, corsOrigin);
     }
     const loginUrl = new URL('/login', request.url);
     loginUrl.searchParams.set('callbackUrl', pathname);
-    return NextResponse.redirect(loginUrl);
+    // This redirect previously carried NO headers at all — not even CORS.
+    return withCommonHeaders(NextResponse.redirect(loginUrl), pathname, corsOrigin);
   }
 
-  const response = NextResponse.next();
-  response.headers.set('Access-Control-Allow-Origin', corsOrigin);
-  response.headers.set('Vary', 'Origin');
-  // Standard security headers.
-  // The Agent City scene bundle is framed by /city, a first-party page on this
-  // same origin. DENY blocks even same-origin framing, so that one path relaxes
-  // to SAMEORIGIN — which still refuses every other site, which is what this
-  // header is here to do. Everything else stays DENY.
-  //
-  // The bundle it refers to is GENERATED, not committed: it is produced by
-  // orgs/<org>/agents/city/build/build-internal.mjs into dashboard/public/agent-city/,
-  // which is gitignored because the build bakes live fleet state into it. So a
-  // fresh clone will NOT contain the directory this relaxation exists for, and
-  // /city renders an explicit "not built" state until someone runs that build.
-  // Said out loud because this comment justifies a WEAKENED control: a reviewer
-  // who goes looking for the bundle, does not find it, and concludes the
-  // relaxation is unjustified or vestigial would be wrong both ways, and one of
-  // those wrong turns removes a header exemption that a real first-party page
-  // depends on.
-  response.headers.set(
-    'X-Frame-Options',
-    pathname.startsWith('/agent-city/') ? 'SAMEORIGIN' : 'DENY',
-  );
-  response.headers.set('X-Content-Type-Options', 'nosniff');
-  response.headers.set('Referrer-Policy', 'no-referrer');
-  if (process.env.NODE_ENV === 'production') {
-    response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-  }
-  return response;
+  return withCommonHeaders(NextResponse.next(), pathname, corsOrigin);
 }
 
 export const config = {
   matcher: [
     // Match all routes except static files
-    '/((?!_next/static|_next/image|favicon.ico).*)',
+    // Keep in sync with the public-path list above — icon.svg is the App Router
+    // app icon and must not be auth-gated (see the note there).
+    '/((?!_next/static|_next/image|favicon.ico|icon.svg|apple-icon.png|apple-touch-icon.png|manifest.json).*)',
   ],
 };
