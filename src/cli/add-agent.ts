@@ -4,6 +4,7 @@ import { join, resolve } from 'path';
 import { homedir } from 'os';
 import { OrgContext } from '../types';
 import { validateAgentName, validateHermesProfile, validateModel, validateOrgName } from '../utils/validate';
+import { resolveHermesLaunchPins } from '../utils/hermes-runtime';
 
 const VALID_RUNTIMES = ['claude-code', 'hermes', 'codex-app-server', 'opencode'] as const;
 type RuntimeKind = typeof VALID_RUNTIMES[number];
@@ -51,6 +52,18 @@ export const addAgentCommand = new Command('add-agent')
       const validReasoning = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
       if (!validReasoning.includes(options.reasoning)) {
         console.error(`Error: --reasoning must be one of: ${validReasoning.join(', ')} (got "${options.reasoning}")`);
+        process.exit(1);
+      }
+      try {
+        resolveHermesLaunchPins({
+          runtime: 'hermes',
+          hermes_profile: name,
+          model: options.model,
+          hermes_provider: options.provider,
+          hermes_reasoning: options.reasoning as any,
+        }, name);
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
         process.exit(1);
       }
     }

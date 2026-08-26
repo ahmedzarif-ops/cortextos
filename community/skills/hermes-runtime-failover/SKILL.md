@@ -19,7 +19,7 @@ Use this workflow only for a standing cortextOS fleet. It is dry-run-first and f
 
 ## 1. Validate the plan without changing state
 
-Prepare a plan JSON using `references/ygs-routes.example.json` as the schema and the current restore snapshot as the second input.
+Copy `references/ygs-routes.example.json` to a new evidence path and replace every `REPLACE` value. The validator requires a fresh trigger receipt, a byte-bound restore snapshot, per-seat MCP transcript and usage receipts, a native-cron scan, and an explicit city-first/chief-last order. The example itself is deliberately not executable until those receipts are supplied.
 
 ```bash
 node scripts/validate-plan.mjs \
@@ -27,11 +27,11 @@ node scripts/validate-plan.mjs \
   --restore /absolute/path/to/RESTORE-STATE.json
 ```
 
-The validator performs no writes and prints no credentials. Any error blocks the switch.
+The validator performs no writes and prints no credentials. It hashes every referenced restore/MCP/cron artifact and rejects stale trigger, snapshot, MCP, or cron evidence; a past/non-next Sunday restore; null or moving models; invalid restore runtimes or missing Hermes restore pins; whitespace pins; absent tool effects; enabled native crons; incomplete ordering; or a snapshot-path/hash mismatch. `evidence_max_age_minutes` is mandatory and capped at 24 hours. Any error blocks the switch.
 
 ## 2. Re-read live state immediately before preflight
 
-Capture each seat's current `runtime`, `model`, config hash, process PID/status, profile, cron count, and next fire time. Save the restore snapshot to a new timestamped file. Do not overwrite an earlier snapshot.
+Capture each seat's current `runtime`, explicit fixed `model`, config hash, process PID/status, profile, cron count, and next fire time. The snapshot must include schema version, absolute UTC capture/restore timestamps, capture reason/source, and a config SHA-256 for every seat. Save it to a new timestamped file. Do not overwrite an earlier snapshot.
 
 For each proposed Hermes seat:
 
@@ -40,7 +40,9 @@ For each proposed Hermes seat:
 3. Write `--usage-file` output into the evidence directory.
 4. Put a unique nonce into profile A. Query profile A, profile B, and global `~/.hermes/state.db`; require counts `>0`, `0`, `0` respectively.
 5. Enable only required MCPs in that profile, run `hermes --profile <name> mcp test <server>`, then require a real model-invoked MCP tool row in that profile DB.
-6. Run `hermes --profile <name> prompt-size --json`. Reject a model whose usable context cannot comfortably hold fixed bootstrap plus the expected task input and output.
+   Preserve a transcript containing the tool name and result marker plus a hashed usage receipt matching the planned model/provider; the validator binds both files.
+6. Read `<profile>/cron/jobs.json`. Require zero enabled native jobs before selecting `hermes_cron_ownership: cortextos`; the runtime adapter independently refuses to start the external scheduler when the native file is active, malformed, or unreadable.
+7. Run `hermes --profile <name> prompt-size --json`. Reject a model whose usable context cannot comfortably hold fixed bootstrap plus the expected task input and output.
 
 ## 3. Prove the cortextOS adapter
 
@@ -82,7 +84,7 @@ Stop until Zarif approves the exact packet.
 
 ## 5. Approved cutover
 
-Apply one low-risk canary seat first. Restart only that seat. Verify:
+Apply `city` first as the mechanically declared canary. The validator requires the exact Hermes seat set once, `city` first, and coordinating seat `chief` last for both cutover and restore. Restart only the canary seat. Verify:
 
 1. process runtime and PID;
 2. argv/profile env in adapter evidence;
@@ -112,4 +114,3 @@ If Sunday arrives while prerequisites are not satisfied, roll the restore forwar
 ## Stop conditions
 
 Stop and report a concrete blocker for any of: no verified usage figure, unapproved live mutation, moving model alias, duplicate/shared profile, model/provider mismatch, profile cross-contamination, missing cron owner, double fire, MCP flag without tool execution, missing restore seat, changed restore hash, or incomplete effect proof.
-

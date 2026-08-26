@@ -1,12 +1,33 @@
 {
   "trigger": {
     "metric": "claude_weekly_remaining_percent",
-    "at_or_below": 10
+    "at_or_below": 10,
+    "observed_value": 9,
+    "observed_at_utc": "REPLACE_WITH_FRESH_UTC_TIMESTAMP",
+    "max_age_minutes": 30,
+    "denominator": "percent_remaining",
+    "source": "REPLACE_WITH_PRIMARY_USAGE_RECEIPT"
   },
   "restore": {
     "day": "Sunday",
     "time": "15:00",
-    "timezone": "America/Chicago"
+    "timezone": "America/Chicago",
+    "occurrence_utc": "REPLACE_WITH_NEXT_SUNDAY_1500_AMERICA_CHICAGO"
+  },
+  "restore_snapshot": {
+    "path": "/absolute/path/to/RESTORE-STATE.json",
+    "sha256": "REPLACE_WITH_LOWERCASE_SHA256",
+    "taken_at_utc": "REPLACE_WITH_SNAPSHOT_UTC_TIMESTAMP",
+    "reason": "REPLACE_WITH_CAPTURE_REASON",
+    "captured_from": "live-seat-configs"
+  },
+  "live_changes": 0,
+  "evidence_max_age_minutes": 240,
+  "cutover": {
+    "canary_seat": "city",
+    "coordinator_seat": "chief",
+    "order": ["city", "social", "growth", "sentinel", "chief"],
+    "restore_order": ["city", "social", "growth", "sentinel", "chief"]
   },
   "seats": {
     "chief": {
@@ -58,5 +79,19 @@
       "cron_ownership": "cortextos",
       "mcp_required": ["context7"]
     }
+  },
+  "mcp_evidence": {
+    "chief": { "context7": { "profile": "ygs-chief", "tested_at_utc": "REPLACE", "connected": true, "tools_discovered": 2, "tool_name": "mcp__context7__resolve_library_id", "result_marker": "/colinhacks/zod", "transcript_file": "/absolute/path/to/transcript.txt", "transcript_sha256": "REPLACE", "usage_file": "/absolute/path/to/usage.json", "usage_sha256": "REPLACE" } },
+    "growth": { "context7": { "profile": "ygs-growth", "tested_at_utc": "REPLACE", "connected": true, "tools_discovered": 2, "tool_name": "mcp__context7__resolve_library_id", "result_marker": "/colinhacks/zod", "transcript_file": "/absolute/path/to/transcript.txt", "transcript_sha256": "REPLACE", "usage_file": "/absolute/path/to/usage.json", "usage_sha256": "REPLACE" } },
+    "city": { "context7": { "profile": "ygs-city", "tested_at_utc": "REPLACE", "connected": true, "tools_discovered": 2, "tool_name": "mcp__context7__resolve_library_id", "result_marker": "/colinhacks/zod", "transcript_file": "/absolute/path/to/transcript.txt", "transcript_sha256": "REPLACE", "usage_file": "/absolute/path/to/usage.json", "usage_sha256": "REPLACE" } },
+    "social": { "context7": { "profile": "ygs-social", "tested_at_utc": "REPLACE", "connected": true, "tools_discovered": 2, "tool_name": "mcp__context7__resolve_library_id", "result_marker": "/colinhacks/zod", "transcript_file": "/absolute/path/to/transcript.txt", "transcript_sha256": "REPLACE", "usage_file": "/absolute/path/to/usage.json", "usage_sha256": "REPLACE" } },
+    "sentinel": { "context7": { "profile": "ygs-sentinel", "tested_at_utc": "REPLACE", "connected": true, "tools_discovered": 2, "tool_name": "mcp__context7__resolve_library_id", "result_marker": "/colinhacks/zod", "transcript_file": "/absolute/path/to/transcript.txt", "transcript_sha256": "REPLACE", "usage_file": "/absolute/path/to/usage.json", "usage_sha256": "REPLACE" } }
+  },
+  "cron_evidence": {
+    "chief": { "profile": "ygs-chief", "checked_at_utc": "REPLACE", "enabled_native_jobs": 0, "jobs_path": "/absolute/path/to/jobs.json", "jobs_sha256": "absent" },
+    "growth": { "profile": "ygs-growth", "checked_at_utc": "REPLACE", "enabled_native_jobs": 0, "jobs_path": "/absolute/path/to/jobs.json", "jobs_sha256": "absent" },
+    "city": { "profile": "ygs-city", "checked_at_utc": "REPLACE", "enabled_native_jobs": 0, "jobs_path": "/absolute/path/to/jobs.json", "jobs_sha256": "absent" },
+    "social": { "profile": "ygs-social", "checked_at_utc": "REPLACE", "enabled_native_jobs": 0, "jobs_path": "/absolute/path/to/jobs.json", "jobs_sha256": "absent" },
+    "sentinel": { "profile": "ygs-sentinel", "checked_at_utc": "REPLACE", "enabled_native_jobs": 0, "jobs_path": "/absolute/path/to/jobs.json", "jobs_sha256": "absent" }
   }
 }
