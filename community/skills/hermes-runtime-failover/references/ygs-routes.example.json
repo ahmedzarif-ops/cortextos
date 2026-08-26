@@ -1,0 +1,62 @@
+{
+  "trigger": {
+    "metric": "claude_weekly_remaining_percent",
+    "at_or_below": 10
+  },
+  "restore": {
+    "day": "Sunday",
+    "time": "15:00",
+    "timezone": "America/Chicago"
+  },
+  "seats": {
+    "chief": {
+      "runtime": "hermes",
+      "profile": "ygs-chief",
+      "model": "deepseek/deepseek-v4-pro",
+      "provider": "nous",
+      "reasoning": "high",
+      "cron_ownership": "cortextos",
+      "mcp_required": ["context7"]
+    },
+    "growth": {
+      "runtime": "hermes",
+      "profile": "ygs-growth",
+      "model": "deepseek/deepseek-v4-pro",
+      "provider": "nous",
+      "reasoning": "high",
+      "cron_ownership": "cortextos",
+      "mcp_required": ["context7"]
+    },
+    "guard": {
+      "runtime": "codex-app-server",
+      "model": "gpt-5-codex"
+    },
+    "city": {
+      "runtime": "hermes",
+      "profile": "ygs-city",
+      "model": "deepseek/deepseek-v4-flash",
+      "provider": "nous",
+      "reasoning": "high",
+      "cron_ownership": "cortextos",
+      "mcp_required": ["context7"]
+    },
+    "social": {
+      "runtime": "hermes",
+      "profile": "ygs-social",
+      "model": "deepseek/deepseek-v4-pro",
+      "provider": "nous",
+      "reasoning": "high",
+      "cron_ownership": "cortextos",
+      "mcp_required": ["context7"]
+    },
+    "sentinel": {
+      "runtime": "hermes",
+      "profile": "ygs-sentinel",
+      "model": "qwen/qwen3.8-27b",
+      "provider": "nous",
+      "reasoning": "high",
+      "cron_ownership": "cortextos",
+      "mcp_required": ["context7"]
+    }
+  }
+}

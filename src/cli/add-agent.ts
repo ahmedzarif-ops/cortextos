@@ -3,7 +3,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFi
 import { join, resolve } from 'path';
 import { homedir } from 'os';
 import { OrgContext } from '../types';
-import { validateAgentName, validateOrgName } from '../utils/validate';
+import { validateAgentName, validateHermesProfile, validateModel, validateOrgName } from '../utils/validate';
 
 const VALID_RUNTIMES = ['claude-code', 'hermes', 'codex-app-server', 'opencode'] as const;
 type RuntimeKind = typeof VALID_RUNTIMES[number];
@@ -21,9 +21,12 @@ export const addAgentCommand = new Command('add-agent')
   .option('--org <org>', 'Organization name')
   .option('--instance <id>', 'Instance ID', 'default')
   .option('--runtime <runtime>', `Agent runtime (${VALID_RUNTIMES.join(', ')})`, 'claude-code')
+  .option('--model <model>', 'Explicit model ID (required for Hermes agents)')
+  .option('--provider <provider>', 'Hermes inference provider', 'nous')
+  .option('--reasoning <level>', 'Hermes reasoning effort', 'high')
   .option('--buzz-channel <uuid>', 'Buzz (Nostr/NIP-29) channel UUID to scaffold this agent onto')
   .description('Add a new agent to the organization')
-  .action(async (name: string, options: { template: string; org?: string; instance: string; runtime: string; buzzChannel?: string }) => {
+  .action(async (name: string, options: { template: string; org?: string; instance: string; runtime: string; model?: string; provider: string; reasoning: string; buzzChannel?: string }) => {
     if (!VALID_RUNTIMES.includes(options.runtime as RuntimeKind)) {
       console.error(`Error: --runtime must be one of: ${VALID_RUNTIMES.join(', ')} (got "${options.runtime}")`);
       process.exit(1);
@@ -32,6 +35,24 @@ export const addAgentCommand = new Command('add-agent')
     if (options.runtime === 'codex-app-server' && (NON_CODEX_TEMPLATES as readonly string[]).includes(options.template)) {
       console.error(`Error: no codex variant of "${options.template}" yet. Use --template agent for a codex agent (or file an issue to track adding a codex-${options.template} variant).`);
       process.exit(1);
+    }
+    if (options.runtime === 'hermes') {
+      if (!options.model) {
+        console.error('Error: --model is required for Hermes agents so routing is explicit.');
+        process.exit(1);
+      }
+      try {
+        validateHermesProfile(name);
+        validateModel(options.model);
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+      const validReasoning = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+      if (!validReasoning.includes(options.reasoning)) {
+        console.error(`Error: --reasoning must be one of: ${validReasoning.join(', ')} (got "${options.reasoning}")`);
+        process.exit(1);
+      }
     }
     // BUG-041 fix: validate the agent name BEFORE creating anything on disk.
     // Without this, mixed-case names like 'CortextDesigner' pass through
@@ -108,6 +129,7 @@ export const addAgentCommand = new Command('add-agent')
     // and are copied in by the template; .claude/skills is Claude-Code-only.
     const isCodexAppServer = options.runtime === 'codex-app-server';
     const isOpencode = options.runtime === 'opencode';
+    const isHermes = options.runtime === 'hermes';
     if (!isCodexAppServer && !isOpencode) {
       mkdirSync(join(agentDir, '.claude', 'skills'), { recursive: true });
     }
@@ -119,6 +141,8 @@ export const addAgentCommand = new Command('add-agent')
       ? 'agent-codex'
       : isOpencode && options.template === 'agent'
         ? 'agent-opencode'
+        : isHermes && options.template === 'agent'
+          ? 'hermes'
         : options.template;
 
     // Copy template files
@@ -191,6 +215,13 @@ export const addAgentCommand = new Command('add-agent')
       try {
         const existingCfg = JSON.parse(readFileSync(configPath, 'utf-8'));
         existingCfg.runtime = options.runtime;
+        if (isHermes) {
+          existingCfg.hermes_profile = name;
+          existingCfg.model = options.model;
+          existingCfg.hermes_provider = options.provider;
+          existingCfg.hermes_reasoning = options.reasoning;
+          existingCfg.hermes_cron_ownership = 'cortextos';
+        }
         writeFileSync(configPath, JSON.stringify(existingCfg, null, 2) + '\n', 'utf-8');
       } catch (err) {
         console.error(`Warning: failed to set runtime field in config.json: ${(err as Error).message}`);
@@ -368,7 +399,12 @@ export const addAgentCommand = new Command('add-agent')
     console.log(`\n  Next steps:`);
     console.log(`    1. Edit ${join('orgs', org, 'agents', name, '.env')} with your Telegram settings`);
     console.log(`    2. Customize identity files (IDENTITY.md, SOUL.md, GOALS.md)`);
-    console.log(`    3. Start: cortextos start ${name}\n`);
+    if (isHermes) {
+      console.log(`    3. Create the isolated Hermes profile: hermes profile create ${name} --clone --no-alias`);
+      console.log(`    4. Start: cortextos start ${name}\n`);
+    } else {
+      console.log(`    3. Start: cortextos start ${name}\n`);
+    }
   });
 
 /**

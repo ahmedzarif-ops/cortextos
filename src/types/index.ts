@@ -212,6 +212,20 @@ export interface AgentConfig {
    */
   runtime?: 'claude-code' | 'hermes' | 'codex-app-server' | 'opencode';
   /**
+   * Isolated Hermes profile name. Required by HermesPTY for standing agents;
+   * the shared `default` profile is deliberately rejected.
+   */
+  hermes_profile?: string;
+  /** Explicit Hermes inference provider override for each launch. */
+  hermes_provider?: string;
+  /** Explicit Hermes reasoning effort override for each launch. */
+  hermes_reasoning?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+  /**
+   * Which scheduler owns this Hermes agent's crons. Defaults to `native` so
+   * existing Hermes agents are not double-scheduled.
+   */
+  hermes_cron_ownership?: 'native' | 'cortextos';
+  /**
    * Optional OpenCode agent name to pass as `opencode --agent <name>`.
    * Only applies to runtime: 'opencode'.
    */

@@ -498,6 +498,57 @@ describe('AgentManager.reloadCrons - silent-success bug fix (iter 7)', () => {
     expect((am as any).cronSchedulers.has('alice')).toBe(false);
   });
 
+  it('creates a scheduler for Hermes agents that delegate cron ownership to cortextOS', () => {
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+    const fakeProcess = {
+      config: { runtime: 'hermes', hermes_cron_ownership: 'cortextos' },
+    } as any;
+    (am as any).agents.set('alice', { process: fakeProcess, checker: {} });
+
+    const result = am.reloadCrons('alice');
+
+    expect(result).toBe(true);
+    expect((am as any).cronSchedulers.has('alice')).toBe(true);
+    (am as any).cronSchedulers.get('alice').stop();
+  });
+
+  it('fires a cortextOS-owned cron into a Hermes agent through injectAgent', async () => {
+    vi.useFakeTimers();
+    try {
+      const cronDir = join(ctxRoot, '.cortextOS', 'state', 'agents', 'alice');
+      mkdirSync(cronDir, { recursive: true });
+      writeFileSync(join(cronDir, 'crons.json'), JSON.stringify({
+        updated_at: new Date().toISOString(),
+        crons: [{
+          name: 'hermes-heartbeat',
+          prompt: 'Run the isolated heartbeat canary.',
+          schedule: '1m',
+          enabled: true,
+          created_at: new Date().toISOString(),
+        }],
+      }));
+
+      const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+      const fakeProcess = {
+        config: { runtime: 'hermes', hermes_cron_ownership: 'cortextos' },
+      } as any;
+      (am as any).agents.set('alice', { process: fakeProcess, checker: {} });
+      const injectSpy = vi.spyOn(am, 'injectAgent').mockReturnValue(true);
+
+      expect(am.reloadCrons('alice')).toBe(true);
+      await vi.advanceTimersByTimeAsync(90_000);
+
+      expect(injectSpy).toHaveBeenCalledTimes(1);
+      expect(injectSpy).toHaveBeenCalledWith(
+        'alice',
+        expect.stringContaining('hermes-heartbeat: Run the isolated heartbeat canary.'),
+      );
+      (am as any).cronSchedulers.get('alice').stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reuses existing scheduler when one is already wired', () => {
     const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
     const fakeProcess = { config: { runtime: undefined } } as any;
