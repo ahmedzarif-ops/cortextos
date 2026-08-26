@@ -27,6 +27,7 @@ describe('hermes-runtime-failover plan validator', () => {
   let restorePath: string;
   let fleetPath: string;
   let spendPath: string;
+  let triggerPath: string;
   let planPath: string;
   let hermesRoot: string;
   let frameworkRoot: string;
@@ -41,6 +42,19 @@ describe('hermes-runtime-failover plan validator', () => {
     plan.live_changes = 0;
     hermesRoot = join(tempDir, 'hermes-root');
     frameworkRoot = join(tempDir, 'framework-root');
+
+    const triggerReceipt = {
+      schema_version: 1,
+      metric: plan.trigger.metric,
+      denominator: plan.trigger.denominator,
+      observed_value: plan.trigger.observed_value,
+      observed_at_utc: plan.trigger.observed_at_utc,
+      source: plan.trigger.source,
+    };
+    triggerPath = join(tempDir, 'trigger-receipt.json');
+    const triggerBytes = JSON.stringify(triggerReceipt, null, 2) + '\n';
+    writeFileSync(triggerPath, triggerBytes);
+    plan.trigger_receipt = { path: triggerPath, sha256: hash(triggerBytes) };
 
     const liveConfigs = Object.fromEntries(Object.keys(plan.seats).map((seat) => {
       const configPath = join(frameworkRoot, 'orgs', 'ygs-cortex-fleet', 'agents', seat, 'config.json');
@@ -206,6 +220,7 @@ describe('hermes-runtime-failover plan validator', () => {
   const run = (candidatePlan = planPath) => spawnSync(process.execPath, [
     validator, '--plan', candidatePlan, '--restore', restorePath,
     '--fleet-snapshot', fleetPath, '--spend', spendPath,
+    '--trigger-receipt', triggerPath,
   ], {
     encoding: 'utf8',
     env: { ...process.env, HERMES_HOME: hermesRoot, CTX_FRAMEWORK_ROOT: frameworkRoot },
@@ -552,6 +567,99 @@ describe('hermes-runtime-failover plan validator', () => {
     expect(result.status).toBe(1);
     expect(JSON.parse(result.stderr).errors.join('\n'))
       .toContain('MCP tool name must be bound to required server context7');
+  });
+
+  it('rejects a padded MCP server even when raw-key evidence and tool bytes match it', () => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    const proof = plan.mcp_evidence.city.context7;
+    plan.seats.city.mcp_required = [' context7 '];
+    delete plan.mcp_evidence.city.context7;
+    proof.tool_name = 'mcp___context7___resolve_library_id';
+    const transcript = JSON.parse(readFileSync(proof.transcript_file, 'utf8'));
+    transcript.server = ' context7 ';
+    transcript.tool_name = proof.tool_name;
+    writeFileSync(proof.transcript_file, JSON.stringify(transcript));
+    proof.transcript_sha256 = hash(readFileSync(proof.transcript_file));
+    const usage = JSON.parse(readFileSync(proof.usage_file, 'utf8'));
+    usage.server = ' context7 ';
+    writeFileSync(proof.usage_file, JSON.stringify(usage));
+    proof.usage_sha256 = hash(readFileSync(proof.usage_file));
+    plan.mcp_evidence.city[' context7 '] = proof;
+    const invalidPath = join(tempDir, 'padded-mcp-server.json');
+    writeFileSync(invalidPath, JSON.stringify(plan));
+
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr).errors.join('\n')).toContain('city: invalid MCP server name');
+  });
+
+  it('rejects MCP server names that become duplicates after normalization', () => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    plan.seats.city.mcp_required = ['context7', ' context7 '];
+    const invalidPath = join(tempDir, 'normalized-duplicate-mcp.json');
+    writeFileSync(invalidPath, JSON.stringify(plan));
+
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr).errors.join('\n'))
+      .toContain('city: duplicate normalized MCP server context7');
+  });
+
+  it.each([
+    ['metric', 'fabricated_metric'],
+    ['denominator', 'fabricated_denominator'],
+    ['observed_value', 0],
+    ['observed_at_utc', new Date(Date.now() + 1_000).toISOString()],
+    ['source', 'fabricated-no-receipt'],
+  ])('rejects plan trigger %s when it differs from byte-bound receipt', (field, replacement) => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    plan.trigger[field] = replacement;
+    const invalidPath = join(tempDir, `trigger-mismatch-${field}.json`);
+    writeFileSync(invalidPath, JSON.stringify(plan));
+
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr).errors.join('\n'))
+      .toContain(`trigger.${field} does not match byte-bound trigger receipt`);
+  });
+
+  it('rejects a missing trigger receipt binding', () => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    delete plan.trigger_receipt;
+    const invalidPath = join(tempDir, 'missing-trigger-binding.json');
+    writeFileSync(invalidPath, JSON.stringify(plan));
+
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr).errors.join('\n')).toContain('trigger_receipt binding is required');
+  });
+
+  it('rejects tampered trigger receipt bytes without a matching plan hash', () => {
+    const receipt = JSON.parse(readFileSync(triggerPath, 'utf8'));
+    receipt.source = 'tampered';
+    writeFileSync(triggerPath, JSON.stringify(receipt));
+
+    const result = run();
+    expect(result.status).toBe(1);
+    const errors = JSON.parse(result.stderr).errors.join('\n');
+    expect(errors).toContain('trigger_receipt.sha256 does not match trigger receipt bytes');
+    expect(errors).toContain('trigger.source does not match byte-bound trigger receipt');
+  });
+
+  it('rejects the exact fresh-looking fabricated trigger with no matching receipt', () => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    plan.trigger.source = 'fabricated-no-receipt';
+    plan.trigger.observed_value = 0;
+    plan.trigger.observed_at_utc = new Date().toISOString();
+    const invalidPath = join(tempDir, 'fabricated-trigger.json');
+    writeFileSync(invalidPath, JSON.stringify(plan));
+
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    const errors = JSON.parse(result.stderr).errors.join('\n');
+    expect(errors).toContain('trigger.source does not match byte-bound trigger receipt');
+    expect(errors).toContain('trigger.observed_value does not match byte-bound trigger receipt');
+    expect(errors).toContain('trigger.observed_at_utc does not match byte-bound trigger receipt');
   });
 
   it('rejects a decoy cron receipt when the canonical profile jobs file is active', () => {

@@ -8,6 +8,10 @@
     "denominator": "percent_remaining",
     "source": "REPLACE_WITH_PRIMARY_USAGE_RECEIPT"
   },
+  "trigger_receipt": {
+    "path": "/absolute/path/to/TRIGGER-RECEIPT.json",
+    "sha256": "REPLACE_WITH_LOWERCASE_SHA256"
+  },
   "restore": {
     "day": "Sunday",
     "time": "15:00",

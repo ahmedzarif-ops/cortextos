@@ -15,8 +15,9 @@ const planPath = valueFor('--plan');
 const restorePath = valueFor('--restore');
 const fleetPath = valueFor('--fleet-snapshot');
 const spendPath = valueFor('--spend');
-if (!planPath || !restorePath || !fleetPath || !spendPath) {
-  console.error('Usage: validate-plan.mjs --plan <plan.json> --restore <RESTORE-STATE.json> --fleet-snapshot <FLEET-SNAPSHOT.json> --spend <SPEND-ESTIMATE.json>');
+const triggerPath = valueFor('--trigger-receipt');
+if (!planPath || !restorePath || !fleetPath || !spendPath || !triggerPath) {
+  console.error('Usage: validate-plan.mjs --plan <plan.json> --restore <RESTORE-STATE.json> --fleet-snapshot <FLEET-SNAPSHOT.json> --spend <SPEND-ESTIMATE.json> --trigger-receipt <TRIGGER-RECEIPT.json>');
   process.exit(2);
 }
 
@@ -68,10 +69,12 @@ const planBytes = readBytes(planPath);
 const restoreBytes = readBytes(restorePath);
 const fleetBytes = readBytes(fleetPath);
 const spendBytes = readBytes(spendPath);
+const triggerBytes = readBytes(triggerPath);
 const plan = readJsonBytes(planPath, planBytes);
 const restore = readJsonBytes(restorePath, restoreBytes);
 const fleet = readJsonBytes(fleetPath, fleetBytes);
 const spend = readJsonBytes(spendPath, spendBytes);
+const triggerReceipt = readJsonBytes(triggerPath, triggerBytes);
 const errors = [];
 const profiles = new Set();
 const requiredSeats = ['chief', 'city', 'growth', 'guard', 'sentinel', 'social'].sort();
@@ -91,6 +94,19 @@ const evidenceMaxAgeMinutes = plan?.evidence_max_age_minutes;
 if (!Number.isInteger(evidenceMaxAgeMinutes) || evidenceMaxAgeMinutes < 1 || evidenceMaxAgeMinutes > 1440) {
   errors.push('evidence_max_age_minutes must be an integer from 1 to 1440');
 }
+
+const triggerBinding = plan?.trigger_receipt;
+if (!triggerBinding || typeof triggerBinding !== 'object') {
+  errors.push('trigger_receipt binding is required');
+} else {
+  if (!isAbsolute(triggerBinding.path ?? '') || resolve(triggerBinding.path ?? '') !== resolve(triggerPath)) {
+    errors.push('trigger_receipt.path must be absolute and match --trigger-receipt');
+  }
+  if (!shaPattern.test(triggerBinding.sha256 ?? '') || triggerBinding.sha256 !== sha256(triggerBytes)) {
+    errors.push('trigger_receipt.sha256 does not match trigger receipt bytes');
+  }
+}
+if (triggerReceipt?.schema_version !== 1) errors.push('trigger receipt schema_version must be 1');
 
 const fleetBinding = plan?.fleet_snapshot;
 if (!fleetBinding || typeof fleetBinding !== 'object') {
@@ -206,6 +222,11 @@ if (typeof plan?.trigger?.observed_value !== 'number'
 } else if (plan.trigger.observed_value > 10) {
   errors.push('trigger.observed_value is above the 10 percent failover threshold');
 }
+for (const field of ['metric', 'denominator', 'observed_value', 'observed_at_utc', 'source']) {
+  if (plan?.trigger?.[field] !== triggerReceipt?.[field]) {
+    errors.push(`trigger.${field} does not match byte-bound trigger receipt`);
+  }
+}
 if (!validIso(plan?.trigger?.observed_at_utc)) errors.push('trigger.observed_at_utc must be an absolute UTC ISO timestamp');
 const maxAgeMinutes = plan?.trigger?.max_age_minutes;
 if (!Number.isInteger(maxAgeMinutes) || maxAgeMinutes < 1 || maxAgeMinutes > 60) {
@@ -299,9 +320,10 @@ for (const [seat, route] of Object.entries(planSeats)) {
       errors.push(`${seat}: mcp_required must be a non-empty array`);
     } else {
       const unique = new Set();
-      for (const server of route.mcp_required) {
-        if (!nonEmpty(server) || !mcpNamePattern.test(server.trim())) errors.push(`${seat}: invalid MCP server name`);
-        if (unique.has(server)) errors.push(`${seat}: duplicate MCP server ${server}`);
+      for (const rawServer of route.mcp_required) {
+        const server = typeof rawServer === 'string' ? rawServer.trim() : '';
+        if (!canonicalString(rawServer) || !mcpNamePattern.test(server)) errors.push(`${seat}: invalid MCP server name`);
+        if (unique.has(server)) errors.push(`${seat}: duplicate normalized MCP server ${server}`);
         unique.add(server);
       }
     }
@@ -409,7 +431,8 @@ const usedSessions = new Set();
 for (const seat of hermesSeats) {
   const route = planSeats[seat];
   const proofs = mcpEvidence[seat];
-  for (const server of Array.isArray(route.mcp_required) ? route.mcp_required : []) {
+  for (const rawServer of Array.isArray(route.mcp_required) ? route.mcp_required : []) {
+    const server = typeof rawServer === 'string' ? rawServer.trim() : '';
     const proof = proofs?.[server];
     if (!proof || typeof proof !== 'object') {
       errors.push(`${seat}/${server}: MCP readiness proof required`);
@@ -537,6 +560,7 @@ console.log(JSON.stringify({
   ok: true,
   trigger_percent: plan.trigger.observed_value,
   trigger_observed_at_utc: plan.trigger.observed_at_utc,
+  trigger_receipt_sha256: triggerBinding.sha256,
   restore_occurrence_utc: plan.restore.occurrence_utc,
   restore_snapshot_sha256: binding.sha256,
   fleet_snapshot_sha256: fleetBinding.sha256,
