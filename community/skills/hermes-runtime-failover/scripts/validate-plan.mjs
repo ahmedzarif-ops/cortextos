@@ -38,6 +38,7 @@ const readJsonBytes = (path, bytes) => {
 };
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const nonEmpty = (value) => typeof value === 'string' && value.trim().length > 0;
+const canonicalString = (value) => nonEmpty(value) && value === value.trim();
 const isoPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 const validIso = (value) => nonEmpty(value) && isoPattern.test(value) && Number.isFinite(Date.parse(value));
 const shaPattern = /^[a-f0-9]{64}$/;
@@ -47,8 +48,11 @@ const providerPattern = /^[a-zA-Z0-9._-]+$/;
 const mcpNamePattern = /^[a-zA-Z0-9._-]+$/;
 const reasoningLevels = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 const runtimes = new Set(['claude-code', 'hermes', 'codex-app-server', 'opencode']);
-const isMovingModelAlias = (value) => typeof value === 'string'
-  && (value.startsWith('~') || /(?:^|[\/._-])(latest|auto)(?:$|[\/._-])/i.test(value));
+const isMovingModelAlias = (value) => {
+  if (typeof value !== 'string') return false;
+  const model = value.trim();
+  return model.startsWith('~') || /(?:^|[\/._-])(latest|auto)(?:$|[\/._-])/i.test(model);
+};
 const validateFreshTimestamp = (label, value, maxAgeMinutes, errors) => {
   if (!validIso(value)) {
     errors.push(`${label} must be an absolute UTC ISO timestamp`);
@@ -122,10 +126,22 @@ if (!sameSet(intendedHermesSeats, requiredHermesSeats)) {
 for (const seat of requiredSeats) {
   const route = fleetSeats[seat];
   if (!route || !runtimes.has(route.runtime)) errors.push(`${seat}: fleet snapshot runtime is invalid or missing`);
-  if (!nonEmpty(route?.model) || !fixedModelPattern.test(route.model.trim()) || isMovingModelAlias(route.model)) {
+  if (!canonicalString(route?.model) || !fixedModelPattern.test(route.model) || isMovingModelAlias(route.model)) {
     errors.push(`${seat}: fleet snapshot requires a fixed model`);
   }
   if (!shaPattern.test(route?.config_sha256 ?? '')) errors.push(`${seat}: fleet snapshot config_sha256 required`);
+  if (route?.runtime === 'hermes') {
+    if (!profilePattern.test(route.profile ?? '') || route.profile === 'default' || route.profile === 'shared') {
+      errors.push(`${seat}: fleet snapshot requires an isolated Hermes profile`);
+    }
+    if (!canonicalString(route.provider) || !providerPattern.test(route.provider)) {
+      errors.push(`${seat}: fleet snapshot requires a canonical Hermes provider`);
+    }
+    if (!reasoningLevels.has(route.reasoning)) errors.push(`${seat}: fleet snapshot requires a valid Hermes reasoning pin`);
+    if (!['native', 'cortextos'].includes(route.cron_ownership)) {
+      errors.push(`${seat}: fleet snapshot requires valid Hermes cron ownership`);
+    }
+  }
   const canonicalConfigPath = canonicalAgentsRoot ? join(canonicalAgentsRoot, seat, 'config.json') : '';
   if (route?.config_path !== canonicalConfigPath) {
     errors.push(`${seat}: fleet snapshot config_path must equal canonical live config path`);
@@ -274,9 +290,9 @@ for (const [seat, route] of Object.entries(planSeats)) {
     if (route.profile === 'default' || route.profile === 'shared') errors.push(`${seat}: shared profile forbidden`);
     if (profiles.has(route.profile)) errors.push(`${seat}: duplicate profile ${route.profile}`);
     profiles.add(route.profile);
-    if (!nonEmpty(route.model) || !fixedModelPattern.test(route.model.trim())) errors.push(`${seat}: valid fixed model required`);
+    if (!canonicalString(route.model) || !fixedModelPattern.test(route.model)) errors.push(`${seat}: valid fixed model required`);
     if (isMovingModelAlias(route.model)) errors.push(`${seat}: moving model alias forbidden (${route.model})`);
-    if (!nonEmpty(route.provider) || !providerPattern.test(route.provider.trim())) errors.push(`${seat}: valid provider required`);
+    if (!canonicalString(route.provider) || !providerPattern.test(route.provider)) errors.push(`${seat}: valid provider required`);
     if (!reasoningLevels.has(route.reasoning)) errors.push(`${seat}: invalid reasoning ${route.reasoning}`);
     if (route.cron_ownership !== 'cortextos') errors.push(`${seat}: cron_ownership must be cortextos for this fleet`);
     if (!Array.isArray(route.mcp_required) || route.mcp_required.length === 0) {
@@ -290,7 +306,7 @@ for (const [seat, route] of Object.entries(planSeats)) {
       }
     }
   } else if (route.runtime === 'codex-app-server') {
-    if (!nonEmpty(route.model) || !fixedModelPattern.test(route.model.trim())) errors.push(`${seat}: valid Codex model required`);
+    if (!canonicalString(route.model) || !fixedModelPattern.test(route.model)) errors.push(`${seat}: valid Codex model required`);
     if (isMovingModelAlias(route.model)) errors.push(`${seat}: moving model alias forbidden (${route.model})`);
   } else {
     errors.push(`${seat}: unsupported failover runtime ${route.runtime}`);
@@ -298,7 +314,7 @@ for (const [seat, route] of Object.entries(planSeats)) {
 
   const restoreRoute = restoreSeats[seat];
   if (!restoreRoute || !runtimes.has(restoreRoute.runtime)) errors.push(`${seat}: invalid or missing restorable runtime`);
-  if (!nonEmpty(restoreRoute?.model) || !fixedModelPattern.test(restoreRoute.model.trim())) errors.push(`${seat}: valid restorable model required`);
+  if (!canonicalString(restoreRoute?.model) || !fixedModelPattern.test(restoreRoute.model)) errors.push(`${seat}: valid restorable model required`);
   if (isMovingModelAlias(restoreRoute?.model)) errors.push(`${seat}: moving restorable model alias forbidden (${restoreRoute.model})`);
   if (!shaPattern.test(restoreRoute?.config_sha256 ?? '')) errors.push(`${seat}: restore config_sha256 required`);
   const fleetRoute = fleetSeats[seat];
@@ -308,6 +324,14 @@ for (const [seat, route] of Object.entries(planSeats)) {
     || restoreRoute?.config_sha256 !== fleetRoute.config_sha256) {
     errors.push(`${seat}: restore route must match the byte-verified live fleet snapshot`);
   }
+  if (fleetRoute?.runtime === 'hermes' && (
+    restoreRoute?.profile !== fleetRoute.profile
+    || restoreRoute?.provider !== fleetRoute.provider
+    || restoreRoute?.reasoning !== fleetRoute.reasoning
+    || restoreRoute?.cron_ownership !== fleetRoute.cron_ownership
+  )) {
+    errors.push(`${seat}: restore Hermes pins must match the byte-verified live fleet snapshot`);
+  }
   if (restoreRoute?.runtime === 'hermes') {
     if (!profilePattern.test(restoreRoute.profile ?? '') || restoreRoute.profile === 'default' || restoreRoute.profile === 'shared') {
       errors.push(`${seat}: valid isolated restorable Hermes profile required`);
@@ -316,7 +340,7 @@ for (const [seat, route] of Object.entries(planSeats)) {
     } else {
       restoreProfiles.add(restoreRoute.profile);
     }
-    if (!nonEmpty(restoreRoute.provider) || !providerPattern.test(restoreRoute.provider.trim())) {
+    if (!canonicalString(restoreRoute.provider) || !providerPattern.test(restoreRoute.provider)) {
       errors.push(`${seat}: valid restorable Hermes provider required`);
     }
     if (!reasoningLevels.has(restoreRoute.reasoning)) errors.push(`${seat}: valid restorable Hermes reasoning required`);

@@ -29,7 +29,7 @@ node scripts/validate-plan.mjs \
   --spend /absolute/path/to/SPEND-ESTIMATE.json
 ```
 
-The validator performs no writes and prints no credentials. It hashes every referenced fleet/restore/spend/MCP artifact and rejects stale evidence; any roster other than the authoritative six YGS seats; a past/non-next Sunday restore; null or moving models; invalid restore runtimes or missing Hermes restore pins; whitespace pins; missing or inconsistent spend; reused or cross-profile MCP evidence; a tool from the wrong required server; enabled native crons at the canonical profile path; incomplete ordering; or a snapshot-path/hash mismatch. `evidence_max_age_minutes` is mandatory and capped at 24 hours. Any error blocks the switch.
+The validator performs no writes and prints no credentials. It hashes every referenced fleet/restore/spend/MCP artifact and rejects stale evidence; any roster other than the authoritative six YGS seats; a past/non-next Sunday restore; null or moving models (including whitespace-padded aliases); invalid restore runtimes; any Hermes restore pin that differs from byte-verified live config; whitespace-padded model/provider pins; missing or inconsistent spend; reused or cross-profile MCP evidence; a tool from the wrong required server; enabled native crons at the canonical profile path; incomplete ordering; or a snapshot-path/hash mismatch. `evidence_max_age_minutes` is mandatory and capped at 24 hours. Any error blocks the switch.
 
 ## 2. Re-read live state immediately before preflight
 
