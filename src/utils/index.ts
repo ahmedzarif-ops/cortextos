@@ -10,5 +10,7 @@ export {
   validateEventSeverity,
   validateApprovalCategory,
   validateModel,
+  validateHermesProfile,
+  resolveHermesProfile,
   isValidJson,
 } from './validate.js';
