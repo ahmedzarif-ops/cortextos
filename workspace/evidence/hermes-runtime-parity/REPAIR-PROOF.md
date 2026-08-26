@@ -1,15 +1,15 @@
 # Hermes runtime parity repair proof
 
-prepared_at_utc: 2026-08-26T20:28:22Z
+prepared_at_utc: 2026-08-26T20:44:14Z
 worktree: `/Users/guest1/cortextos-worktrees/hermes-runtime-parity`
 branch: `fix/hermes-runtime-parity`
 original_base: `4fe279b753408d407189222809aa3ddf74cc565c`
-reviewed_blocked_baseline_commit: `9972d39d85cfeade8b2b09413521bd44c4c7f1aa`
-reviewed_blocked_baseline_tree: `7ecd42a054c42da58930127f29aae89b76f140d3`
-reviewed_blocked_baseline_manifest_sha256: `a5491198d233bed7756b073368248eec2254d1c3acc325fe72e927d4f381a6be`
-guard_final_report: `/Users/guest1/cortextos/orgs/ygs-cortex-fleet/agents/guard/reports/2026-08-26-hermes-runtime-parity-review-9972d39.md`
-guard_final_report_sha256: `5ecabb44690d5057ccacbb02e1ceadeb5cb730e0bd006fac666c8ef35a625105`
-latest_guard_block_routed_by_chief_msg: `1787775712172-chief-rif42`
+reviewed_blocked_baseline_commit: `8bf5bcd8a3f4fd3024e7d6f2bd3f435cd7a19207`
+reviewed_blocked_baseline_tree: `f60358b71c1496990d078ab74afce4484613bca7`
+reviewed_blocked_baseline_manifest_sha256: `f7fa0a55b225a93262ee7dd770979ef83e001d8ddde6397c9e11ca7063088b79`
+guard_final_report: `/Users/guest1/cortextos/orgs/ygs-cortex-fleet/agents/guard/reports/2026-08-26-hermes-runtime-parity-review-8bf5bcd.md`
+guard_final_report_sha256: `8456d05ea02d834f412856d00a2df6cdd3c2b2afda96554d97cf289135386cf5`
+latest_guard_block_routed_by_chief_msg: `1787776604936-chief-q7mu3`
 live_changes: `0`
 
 The immutable repair commit and external changed-file manifest are frozen after this proof file is committed. Their hashes are supplied in the chief-routed review packet; no writer may modify that target during review.
@@ -23,19 +23,20 @@ The immutable repair commit and external changed-file manifest are frozen after 
 5. **Native/cortextOS cron collision — closed.** Plan validation derives `<HERMES_HOME>/profiles/<validated-profile>/cron/jobs.json` and ignores decoys; runtime independently refuses initial scheduler creation when native jobs are active/unreadable, stops on reload if jobs appear, and rechecks before every fire.
 6. **Mechanical canary ordering — closed.** The byte-bound fleet snapshot names the exact intended Hermes set (`chief`, `city`, `growth`, `sentinel`, `social`), checked against fixed YGS policy. Both cutover orders must contain that set exactly once, with `city` first and coordinator `chief` last; omitting a seat everywhere still fails.
 
-7. **Trigger provenance — closed.** Validation requires a separate absolute `--trigger-receipt` file and plan binding with an exact SHA-256. The plan's metric, denominator, observed value, observation time, and named source must each equal the receipt bytes. Missing binding, tampered bytes, every individual field mismatch, and Guard's combined fresh-looking fabricated source/value/time case reject.
+7. **Trigger byte consistency — closed.** Validation requires a separate absolute `--trigger-receipt` file and plan binding with an exact SHA-256. The plan's metric, denominator, observed value, observation time, and named source must each equal the receipt bytes. Missing binding, tampered bytes, and every individual field mismatch reject.
+8. **Trigger origin authenticity — closed.** Validation independently invokes the fixed `${CTX_FRAMEWORK_ROOT}/dist/cli.js bus check-usage-api --json --force --no-store` path. The canonical CLI performs the authenticated Anthropic OAuth HTTPS read; the validator requires fresh, uncached, complete origin metadata, derives weekly remaining from `seven_day_utilization`, and compares that value to both caller artifacts. The OAuth parser no longer converts missing utilization to zero, and `--no-store` preserves the validator's no-write contract. Guard's jointly forged plan+receipt+hash rejects, as do explicit HTTP 401, missing CLI, missing-field, stale, unauthenticated, and cached-result cases.
 
-The focused suite contains direct negative reproductions of Guard's original attacks plus the padded MCP server with matching raw-key receipts, normalized MCP duplicates, individual trigger-field drift, missing/tampered trigger binding, and the exact fabricated source/value/current-time trigger.
+The focused suite contains direct negative reproductions of Guard's original attacks plus the padded MCP server with matching raw-key receipts, normalized MCP duplicates, individual trigger-field drift, missing/tampered trigger binding, the coupled source/value/time/hash forgery, and every origin-unavailable case above. The current live OAuth credential returns HTTP 401, so a real plan correctly remains blocked; tests use an isolated fixed-path fake CLI and make no provider call.
 
 ## Final focused proof
 
 Exact command:
 
 ```text
-npm test -- --run tests/unit/pty/hermes-pty.test.ts tests/unit/daemon/agent-process-hermes.test.ts tests/unit/daemon/agent-manager.test.ts tests/unit/cli/add-agent-hermes.test.ts tests/unit/community/hermes-runtime-failover-skill.test.ts
+npm test -- --run tests/unit/pty/hermes-pty.test.ts tests/unit/daemon/agent-process-hermes.test.ts tests/unit/daemon/agent-manager.test.ts tests/unit/cli/add-agent-hermes.test.ts tests/unit/community/hermes-runtime-failover-skill.test.ts tests/unit/bus/oauth.test.ts
 ```
 
-Raw result: RC `0`; test files `5 passed (5)`; tests `113 passed (113)`.
+Raw result: RC `0`; test files `6 passed (6)`; tests `143 passed (143)`. Validator-only matrix: RC `0`, `36 passed (36)`.
 
 Build command: `npm run build`
 
@@ -49,7 +50,7 @@ Raw result: RC `0`; no output.
 
 Repair target command: `npm test -- --run`
 
-Raw repair result: RC `1`; test files `5 failed | 137 passed | 1 skipped (143)`; tests `34 failed | 2322 passed | 3 skipped (2359)`.
+Raw repair result: RC `1`; test files `5 failed | 137 passed | 1 skipped (143)`; tests `34 failed | 2331 passed | 3 skipped (2368)`.
 
 The 34 failures are confined to these five pre-existing files:
 
