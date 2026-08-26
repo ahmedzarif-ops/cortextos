@@ -172,8 +172,15 @@ export async function middleware(request: NextRequest) {
   const response = NextResponse.next();
   response.headers.set('Access-Control-Allow-Origin', corsOrigin);
   response.headers.set('Vary', 'Origin');
-  // Standard security headers
-  response.headers.set('X-Frame-Options', 'DENY');
+  // Standard security headers.
+  // The Agent City scene bundle is framed by /city, a first-party page on this
+  // same origin. DENY blocks even same-origin framing, so that one path relaxes
+  // to SAMEORIGIN — which still refuses every other site, which is what this
+  // header is here to do. Everything else stays DENY.
+  response.headers.set(
+    'X-Frame-Options',
+    pathname.startsWith('/agent-city/') ? 'SAMEORIGIN' : 'DENY',
+  );
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('Referrer-Policy', 'no-referrer');
   if (process.env.NODE_ENV === 'production') {
