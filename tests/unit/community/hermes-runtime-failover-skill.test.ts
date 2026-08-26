@@ -307,6 +307,100 @@ describe('hermes-runtime-failover plan validator', () => {
     expect(errors).toContain('duplicate profile');
   });
 
+  it('rejects a whitespace-padded moving route alias even when evidence repeats the raw value', () => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    const spend = JSON.parse(readFileSync(spendPath, 'utf8'));
+    const proof = plan.mcp_evidence.city.context7;
+    plan.seats.city.model = ' auto ';
+    spend.seats.city.model = plan.seats.city.model;
+    writeFileSync(spendPath, JSON.stringify(spend));
+    plan.spend_snapshot.sha256 = hash(readFileSync(spendPath));
+    const usage = JSON.parse(readFileSync(proof.usage_file, 'utf8'));
+    usage.model = plan.seats.city.model;
+    writeFileSync(proof.usage_file, JSON.stringify(usage));
+    proof.usage_sha256 = hash(readFileSync(proof.usage_file));
+    const invalidPath = join(tempDir, 'padded-auto.json');
+    writeFileSync(invalidPath, JSON.stringify(plan));
+
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    const errors = JSON.parse(result.stderr).errors.join('\n');
+    expect(errors).toContain('city: valid fixed model required');
+    expect(errors).toContain('city: moving model alias forbidden');
+  });
+
+  it('rejects a whitespace-padded provider even when spend and MCP evidence repeat it', () => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    const spend = JSON.parse(readFileSync(spendPath, 'utf8'));
+    const proof = plan.mcp_evidence.city.context7;
+    plan.seats.city.provider = ' nous ';
+    spend.seats.city.provider = plan.seats.city.provider;
+    writeFileSync(spendPath, JSON.stringify(spend));
+    plan.spend_snapshot.sha256 = hash(readFileSync(spendPath));
+    const usage = JSON.parse(readFileSync(proof.usage_file, 'utf8'));
+    usage.provider = plan.seats.city.provider;
+    writeFileSync(proof.usage_file, JSON.stringify(usage));
+    proof.usage_sha256 = hash(readFileSync(proof.usage_file));
+    const invalidPath = join(tempDir, 'padded-provider.json');
+    writeFileSync(invalidPath, JSON.stringify(plan));
+
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr).errors.join('\n')).toContain('city: valid provider required');
+  });
+
+  it.each([
+    ['profile', 'different-city-profile'],
+    ['provider', 'different-provider'],
+    ['reasoning', 'low'],
+    ['cron_ownership', 'native'],
+  ])('rejects a restore Hermes %s pin that differs from byte-verified live config', (field, replacement) => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    const fleet = JSON.parse(readFileSync(fleetPath, 'utf8'));
+    const restore = JSON.parse(readFileSync(restorePath, 'utf8'));
+    const liveConfig = {
+      runtime: 'hermes',
+      model: 'deepseek/deepseek-v4-flash',
+      hermes_profile: 'live-city-profile',
+      hermes_provider: 'nous',
+      hermes_reasoning: 'high',
+      hermes_cron_ownership: 'cortextos',
+    };
+    const liveBytes = JSON.stringify(liveConfig, null, 2) + '\n';
+    writeFileSync(fleet.seats.city.config_path, liveBytes);
+    fleet.seats.city = {
+      runtime: liveConfig.runtime,
+      model: liveConfig.model,
+      profile: liveConfig.hermes_profile,
+      provider: liveConfig.hermes_provider,
+      reasoning: liveConfig.hermes_reasoning,
+      cron_ownership: liveConfig.hermes_cron_ownership,
+      config_path: fleet.seats.city.config_path,
+      config_sha256: hash(liveBytes),
+    };
+    writeFileSync(fleetPath, JSON.stringify(fleet));
+    plan.fleet_snapshot.sha256 = hash(readFileSync(fleetPath));
+    restore.seats.city = {
+      runtime: fleet.seats.city.runtime,
+      model: fleet.seats.city.model,
+      profile: fleet.seats.city.profile,
+      provider: fleet.seats.city.provider,
+      reasoning: fleet.seats.city.reasoning,
+      cron_ownership: fleet.seats.city.cron_ownership,
+      config_sha256: fleet.seats.city.config_sha256,
+      [field]: replacement,
+    };
+    writeFileSync(restorePath, JSON.stringify(restore));
+    plan.restore_snapshot.sha256 = hash(readFileSync(restorePath));
+    const invalidPath = join(tempDir, `restore-pin-${field}.json`);
+    writeFileSync(invalidPath, JSON.stringify(plan));
+
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr).errors.join('\n'))
+      .toContain('city: restore Hermes pins must match the byte-verified live fleet snapshot');
+  });
+
   it('rejects stale readiness evidence, a past restore, and incomplete Hermes restore pins', () => {
     const plan = JSON.parse(readFileSync(planPath, 'utf8'));
     const restore = JSON.parse(readFileSync(restorePath, 'utf8'));
