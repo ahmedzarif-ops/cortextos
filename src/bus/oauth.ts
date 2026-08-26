@@ -62,6 +62,9 @@ export interface CheckUsageResult {
   seven_day_utilization: number;
   cached: boolean;
   fetched_at: string;
+  provider: 'anthropic';
+  endpoint: typeof USAGE_API_ENDPOINT;
+  authentication: 'oauth-bearer';
 }
 
 export interface RotateResult {
@@ -73,6 +76,7 @@ export interface RotateResult {
 
 const CACHE_TTL_MS = 3 * 60 * 1000; // 3 minutes
 const ROTATION_LOG_MAX = 50;
+export const USAGE_API_ENDPOINT = 'https://api.anthropic.com/api/oauth/usage';
 
 // Utilization thresholds for rotation trigger
 const THRESHOLD_5H = 0.85;
@@ -172,13 +176,19 @@ function saveCache(ctxRoot: string, snapshot: UsageSnapshot): void {
  */
 export async function checkUsageApi(
   ctxRoot: string,
-  opts: { force?: boolean; account?: string } = {},
+  opts: { force?: boolean; account?: string; noStore?: boolean } = {},
 ): Promise<CheckUsageResult> {
   // Check cache first (unless force)
   if (!opts.force) {
     const cache = loadCache(ctxRoot);
     if (cache && cache.expires_at > Date.now()) {
-      return { ...cache.snapshot, cached: true };
+      return {
+        ...cache.snapshot,
+        cached: true,
+        provider: 'anthropic',
+        endpoint: USAGE_API_ENDPOINT,
+        authentication: 'oauth-bearer',
+      };
     }
   }
 
@@ -205,7 +215,7 @@ export async function checkUsageApi(
     }
   }
 
-  const response = await fetch('https://api.anthropic.com/api/oauth/usage', {
+  const response = await fetch(USAGE_API_ENDPOINT, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       'anthropic-beta': 'oauth-2025-04-20',
@@ -233,15 +243,23 @@ export async function checkUsageApi(
   };
 
   // Normalize 0–100 → 0.0–1.0 if needed
-  const normalize = (v: number | undefined) => {
-    if (v === undefined) return 0;
-    return v > 1 ? v / 100 : v;
+  const normalize = (label: string, value: number | undefined) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new Error(`Usage API response missing valid ${label}`);
+    }
+    const normalized = value > 1 ? value / 100 : value;
+    if (normalized < 0 || normalized > 1) {
+      throw new Error(`Usage API response ${label} is outside 0..1`);
+    }
+    return normalized;
   };
 
   const fiveHour = normalize(
+    'five_hour_utilization',
     data.five_hour?.utilization ?? data.five_hour_utilization ?? data.fiveHourUtilization,
   );
   const sevenDay = normalize(
+    'seven_day_utilization',
     data.seven_day?.utilization ?? data.seven_day_utilization ?? data.sevenDayUtilization,
   );
   const fetchedAt = new Date().toISOString();
@@ -253,17 +271,26 @@ export async function checkUsageApi(
     fetched_at: fetchedAt,
   };
 
-  // Update cache and accounts.json utilization fields
-  saveCache(ctxRoot, snapshot);
+  // Validation callers can require an authenticated fresh read without
+  // mutating caches or account state.
+  if (!opts.noStore) {
+    saveCache(ctxRoot, snapshot);
 
-  const store = loadAccounts(ctxRoot);
-  if (store && store.accounts[accountName]) {
-    store.accounts[accountName].five_hour_utilization = fiveHour;
-    store.accounts[accountName].seven_day_utilization = sevenDay;
-    saveAccounts(ctxRoot, store);
+    const store = loadAccounts(ctxRoot);
+    if (store && store.accounts[accountName]) {
+      store.accounts[accountName].five_hour_utilization = fiveHour;
+      store.accounts[accountName].seven_day_utilization = sevenDay;
+      saveAccounts(ctxRoot, store);
+    }
   }
 
-  return { ...snapshot, cached: false };
+  return {
+    ...snapshot,
+    cached: false,
+    provider: 'anthropic',
+    endpoint: USAGE_API_ENDPOINT,
+    authentication: 'oauth-bearer',
+  };
 }
 
 // --- refresh-oauth-token ---
