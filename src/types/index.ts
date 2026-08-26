@@ -221,8 +221,10 @@ export interface AgentConfig {
   /** Explicit Hermes reasoning effort override for each launch. */
   hermes_reasoning?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
   /**
-   * Which scheduler owns this Hermes agent's crons. Defaults to `native` so
-   * existing Hermes agents are not double-scheduled.
+   * Which scheduler owns this Hermes agent's crons. Omitted legacy configs are
+   * treated as `native` so they are never double-scheduled. New Hermes
+   * templates set `cortextos` explicitly; the manager then requires a clean
+   * Hermes-native jobs file before it starts the external scheduler.
    */
   hermes_cron_ownership?: 'native' | 'cortextos';
   /**

@@ -4,6 +4,7 @@ import { homedir } from 'os';
 
 const fsMocks = {
   existsSync: vi.fn().mockReturnValue(false),
+  readFileSync: vi.fn(),
   writeFileSync: vi.fn(),
 };
 
@@ -12,6 +13,7 @@ vi.mock('fs', async () => {
   return {
     ...actual,
     get existsSync() { return fsMocks.existsSync; },
+    get readFileSync() { return fsMocks.readFileSync; },
     get writeFileSync() { return fsMocks.writeFileSync; },
   };
 });
@@ -29,6 +31,7 @@ vi.mock('node-pty', () => ({
 }));
 
 const { hermesDbExists, hermesProfileHome, HermesPTY } = await import('../../../src/pty/hermes-pty.js');
+const { assertNoHermesNativeCronCollision } = await import('../../../src/utils/hermes-runtime.js');
 
 const mockEnv = {
   instanceId: 'test',
@@ -42,6 +45,7 @@ const mockEnv = {
 
 beforeEach(() => {
   fsMocks.existsSync.mockReset().mockReturnValue(false);
+  fsMocks.readFileSync.mockReset();
   fsMocks.writeFileSync.mockReset();
 });
 
@@ -123,7 +127,9 @@ describe('HermesPTY', () => {
   });
 
   it('falls back to the agent name when a legacy Hermes profile is missing', () => {
-    const pty = new HermesPTY(mockEnv, {});
+    const pty = new HermesPTY(mockEnv, {
+      model: 'deepseek/deepseek-v4-flash', hermes_provider: 'nous', hermes_reasoning: 'high',
+    });
     const args = (
       pty as unknown as { buildClaudeArgs(m: string, p: string): string[] }
     ).buildClaudeArgs('fresh', 'hello');
@@ -138,7 +144,10 @@ describe('HermesPTY', () => {
   });
 
   it('sets HERMES_HOME to the same isolated profile used by --profile', () => {
-    const pty = new HermesPTY(mockEnv, { hermes_profile: 'hermes-agent' });
+    const pty = new HermesPTY(mockEnv, {
+      hermes_profile: 'hermes-agent', model: 'deepseek/deepseek-v4-flash',
+      hermes_provider: 'nous', hermes_reasoning: 'high',
+    });
     const env: Record<string, string> = {};
     (pty as unknown as { customizeEnv(e: Record<string, string>): void }).customizeEnv(env);
     expect(env['HERMES_HOME']).toBe(join(homedir(), '.hermes', 'profiles', 'hermes-agent'));
@@ -149,7 +158,10 @@ describe('HermesPTY', () => {
     const originalHermesHome = process.env['HERMES_HOME'];
     process.env['HERMES_HOME'] = '/custom/hermes';
     try {
-      const pty = new HermesPTY(mockEnv, { hermes_profile: 'hermes-agent' });
+      const pty = new HermesPTY(mockEnv, {
+        hermes_profile: 'hermes-agent', model: 'deepseek/deepseek-v4-flash',
+        hermes_provider: 'nous', hermes_reasoning: 'high',
+      });
       const env: Record<string, string> = { HERMES_HOME: '/agent-local/wrong-root' };
       (pty as unknown as { customizeEnv(e: Record<string, string>): void }).customizeEnv(env);
       const expectedHome = join('/custom/hermes', 'profiles', 'hermes-agent');
@@ -211,7 +223,10 @@ describe('HermesPTY', () => {
   it('fails once before spawning when the named profile directory is absent', async () => {
     const spawnMock = vi.fn();
     fsMocks.existsSync.mockReturnValue(false);
-    const pty = new HermesPTY(mockEnv, { hermes_profile: 'hermes-agent' });
+    const pty = new HermesPTY(mockEnv, {
+      hermes_profile: 'hermes-agent', model: 'deepseek/deepseek-v4-flash',
+      hermes_provider: 'nous', hermes_reasoning: 'high',
+    });
     (pty as unknown as { spawnFn: typeof spawnMock }).spawnFn = spawnMock;
 
     await expect(pty.spawn('fresh', 'bootstrap')).rejects.toThrow(
@@ -221,7 +236,9 @@ describe('HermesPTY', () => {
   });
 
   it('uses the agent name as the isolated profile for legacy Hermes configs', () => {
-    const pty = new HermesPTY(mockEnv, { model: 'deepseek/deepseek-v4-flash' });
+    const pty = new HermesPTY(mockEnv, {
+      model: 'deepseek/deepseek-v4-flash', hermes_provider: 'nous', hermes_reasoning: 'high',
+    });
     const args = (pty as unknown as { buildClaudeArgs(m: string, p: string): string[] })
       .buildClaudeArgs('fresh', 'hello');
     expect(args.slice(0, 2)).toEqual(['--profile', 'hermes-agent']);
@@ -245,6 +262,30 @@ describe('HermesPTY', () => {
     }
   });
 
+  it.each([
+    [{ hermes_profile: 'hermes-agent', hermes_provider: 'nous', hermes_reasoning: 'high' }, /model pin/],
+    [{ hermes_profile: 'hermes-agent', model: 'deepseek/deepseek-v4-flash', hermes_reasoning: 'high' }, /provider pin/],
+    [{ hermes_profile: 'hermes-agent', model: 'deepseek/deepseek-v4-flash', hermes_provider: 'nous' }, /reasoning pin/],
+  ])('fails before argv construction when a mandatory routing pin is absent', (config, pattern) => {
+    const pty = new HermesPTY(mockEnv, config);
+    expect(() => (
+      pty as unknown as { buildClaudeArgs(m: string, p: string): string[] }
+    ).buildClaudeArgs('fresh', 'hello')).toThrow(pattern);
+  });
+
+  it('does not reach the real spawn seam when any mandatory routing pin is absent', async () => {
+    const spawnMock = vi.fn();
+    const pty = new HermesPTY(mockEnv, {
+      hermes_profile: 'hermes-agent',
+      model: 'deepseek/deepseek-v4-flash',
+      hermes_provider: 'nous',
+    });
+    (pty as unknown as { spawnFn: typeof spawnMock }).spawnFn = spawnMock;
+
+    await expect(pty.spawn('fresh', 'bootstrap')).rejects.toThrow(/reasoning pin/);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
   it('isBootstrapped() fires on "❯" in output', () => {
     const pty = new HermesPTY(mockEnv, { hermes_profile: 'hermes-agent' });
     pty.getOutputBuffer().push('⚔ ❯ ');
@@ -255,5 +296,27 @@ describe('HermesPTY', () => {
     const pty = new HermesPTY(mockEnv, { hermes_profile: 'hermes-agent' });
     pty.getOutputBuffer().push('loading...');
     expect(pty.getOutputBuffer().isBootstrapped()).toBe(false);
+  });
+});
+
+describe('Hermes native cron collision guard', () => {
+  it('allows an absent or disabled-only native jobs file', () => {
+    fsMocks.existsSync.mockReturnValue(false);
+    expect(() => assertNoHermesNativeCronCollision('hermes-agent', 'hermes-agent', '/custom/hermes')).not.toThrow();
+
+    fsMocks.existsSync.mockReturnValue(true);
+    fsMocks.readFileSync.mockReturnValue(JSON.stringify({ jobs: [{ enabled: false }, { state: 'paused' }] }));
+    expect(() => assertNoHermesNativeCronCollision('hermes-agent', 'hermes-agent', '/custom/hermes')).not.toThrow();
+  });
+
+  it('blocks enabled or unreadable Hermes-native cron state', () => {
+    fsMocks.existsSync.mockReturnValue(true);
+    fsMocks.readFileSync.mockReturnValue(JSON.stringify({ jobs: [{ enabled: true }] }));
+    expect(() => assertNoHermesNativeCronCollision('hermes-agent', 'hermes-agent', '/custom/hermes'))
+      .toThrow(/Cron ownership collision/);
+
+    fsMocks.readFileSync.mockReturnValue('not-json');
+    expect(() => assertNoHermesNativeCronCollision('hermes-agent', 'hermes-agent', '/custom/hermes'))
+      .toThrow(/Cannot prove cron ownership/);
   });
 });

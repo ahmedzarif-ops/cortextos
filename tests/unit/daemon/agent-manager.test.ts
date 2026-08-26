@@ -512,6 +512,73 @@ describe('AgentManager.reloadCrons - silent-success bug fix (iter 7)', () => {
     (am as any).cronSchedulers.get('alice').stop();
   });
 
+  it('refuses the cortextOS scheduler when the Hermes profile has an enabled native cron', () => {
+    const originalHermesHome = process.env['HERMES_HOME'];
+    const hermesRoot = join(testDir, 'hermes-root');
+    const nativeCronDir = join(hermesRoot, 'profiles', 'alice', 'cron');
+    mkdirSync(nativeCronDir, { recursive: true });
+    writeFileSync(join(nativeCronDir, 'jobs.json'), JSON.stringify({
+      jobs: [{ id: 'native-heartbeat', enabled: true }],
+    }));
+    process.env['HERMES_HOME'] = hermesRoot;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+      const fakeProcess = {
+        config: {
+          runtime: 'hermes',
+          hermes_profile: 'alice',
+          hermes_cron_ownership: 'cortextos',
+        },
+      } as any;
+      (am as any).agents.set('alice', { process: fakeProcess, checker: {} });
+
+      expect(am.reloadCrons('alice')).toBe(false);
+      expect((am as any).cronSchedulers.has('alice')).toBe(false);
+      expect(errorSpy.mock.calls.flat().join('\n')).toContain('Cron ownership collision');
+    } finally {
+      if (originalHermesHome === undefined) delete process.env['HERMES_HOME'];
+      else process.env['HERMES_HOME'] = originalHermesHome;
+    }
+  });
+
+  it('stops an existing cortextOS scheduler when a native Hermes cron appears later', () => {
+    const originalHermesHome = process.env['HERMES_HOME'];
+    const hermesRoot = join(testDir, 'hermes-root');
+    const nativeCronDir = join(hermesRoot, 'profiles', 'alice', 'cron');
+    mkdirSync(nativeCronDir, { recursive: true });
+    writeFileSync(join(nativeCronDir, 'jobs.json'), JSON.stringify({ jobs: [] }));
+    process.env['HERMES_HOME'] = hermesRoot;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+      const fakeProcess = {
+        config: {
+          runtime: 'hermes',
+          hermes_profile: 'alice',
+          hermes_cron_ownership: 'cortextos',
+        },
+      } as any;
+      (am as any).agents.set('alice', { process: fakeProcess, checker: {} });
+
+      expect(am.reloadCrons('alice')).toBe(true);
+      const scheduler = (am as any).cronSchedulers.get('alice');
+      const stopSpy = vi.spyOn(scheduler, 'stop');
+
+      writeFileSync(join(nativeCronDir, 'jobs.json'), JSON.stringify({
+        jobs: [{ id: 'native-heartbeat', enabled: true }],
+      }));
+
+      expect(am.reloadCrons('alice')).toBe(false);
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+      expect((am as any).cronSchedulers.has('alice')).toBe(false);
+      expect(errorSpy.mock.calls.flat().join('\n')).toContain('Cron ownership collision');
+    } finally {
+      if (originalHermesHome === undefined) delete process.env['HERMES_HOME'];
+      else process.env['HERMES_HOME'] = originalHermesHome;
+    }
+  });
+
   it('fires a cortextOS-owned cron into a Hermes agent through injectAgent', async () => {
     vi.useFakeTimers();
     try {
@@ -545,6 +612,54 @@ describe('AgentManager.reloadCrons - silent-success bug fix (iter 7)', () => {
       );
       (am as any).cronSchedulers.get('alice').stop();
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('blocks a cortextOS cron fire when a native Hermes job appears after scheduler start', async () => {
+    vi.useFakeTimers();
+    const originalHermesHome = process.env['HERMES_HOME'];
+    const hermesRoot = join(testDir, 'hermes-root');
+    const nativeCronDir = join(hermesRoot, 'profiles', 'alice', 'cron');
+    mkdirSync(nativeCronDir, { recursive: true });
+    writeFileSync(join(nativeCronDir, 'jobs.json'), JSON.stringify({ jobs: [] }));
+    process.env['HERMES_HOME'] = hermesRoot;
+    try {
+      const cronDir = join(ctxRoot, '.cortextOS', 'state', 'agents', 'alice');
+      mkdirSync(cronDir, { recursive: true });
+      writeFileSync(join(cronDir, 'crons.json'), JSON.stringify({
+        updated_at: new Date().toISOString(),
+        crons: [{
+          name: 'hermes-heartbeat',
+          prompt: 'Run the isolated heartbeat canary.',
+          schedule: '1m',
+          enabled: true,
+          created_at: new Date().toISOString(),
+        }],
+      }));
+
+      const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+      const fakeProcess = {
+        config: {
+          runtime: 'hermes',
+          hermes_profile: 'alice',
+          hermes_cron_ownership: 'cortextos',
+        },
+      } as any;
+      (am as any).agents.set('alice', { process: fakeProcess, checker: {} });
+      const injectSpy = vi.spyOn(am, 'injectAgent').mockReturnValue(true);
+
+      expect(am.reloadCrons('alice')).toBe(true);
+      writeFileSync(join(nativeCronDir, 'jobs.json'), JSON.stringify({
+        jobs: [{ id: 'native-heartbeat', enabled: true }],
+      }));
+      await vi.advanceTimersByTimeAsync(90_000);
+
+      expect(injectSpy).not.toHaveBeenCalled();
+      (am as any).cronSchedulers.get('alice').stop();
+    } finally {
+      if (originalHermesHome === undefined) delete process.env['HERMES_HOME'];
+      else process.env['HERMES_HOME'] = originalHermesHome;
       vi.useRealTimers();
     }
   });
