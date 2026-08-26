@@ -16,6 +16,13 @@ export type HermesLaunchPins = {
   reasoning: string;
 };
 
+/** Reject selectors whose resolution may move without a config change. */
+export function isMovingHermesModelAlias(value: string): boolean {
+  const model = value.trim();
+  return model.startsWith('~')
+    || /(?:^|[\/._-])(latest|auto)(?:$|[\/._-])/i.test(model);
+}
+
 /** Resolve and validate every routing pin required before a Hermes spawn. */
 export function resolveHermesLaunchPins(config: AgentConfig, agentName: string): HermesLaunchPins {
   const profile = resolveHermesProfile(config.hermes_profile, agentName);
@@ -25,6 +32,9 @@ export function resolveHermesLaunchPins(config: AgentConfig, agentName: string):
 
   if (!model) throw new Error('Hermes runtime requires an explicit fixed model pin');
   validateModel(model);
+  if (isMovingHermesModelAlias(model)) {
+    throw new Error(`Hermes runtime requires a fixed model pin; moving alias forbidden (${model})`);
+  }
   if (!provider || !HERMES_PROVIDER_PATTERN.test(provider)) {
     throw new Error('Hermes runtime requires a non-empty provider pin containing only letters, numbers, dots, underscores, or hyphens');
   }
