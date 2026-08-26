@@ -32,8 +32,16 @@ export default function CityPage() {
           src="/agent-city/index.html"
           title="Agent City — live fleet view"
           className="h-full w-full border-0"
-          /* The scene is first-party and same-origin: it needs same-origin to
-             send the session cookie with its own /api/city-state polls. */
+          /* NOT A SECURITY BOUNDARY — do not read it as one.
+             allow-scripts and allow-same-origin TOGETHER defeat the sandbox: a
+             framed document granted both can reach out and remove its own
+             sandbox attribute, so this pair confers no containment whatsoever.
+             It is here because the scene needs same-origin to send the session
+             cookie with its own /api/city-state polls, and scripts to run at
+             all — i.e. it is a capability declaration, not a restriction.
+             What actually makes framing this safe is that the document is
+             first-party content we build and serve ourselves, not the sandbox.
+             (Flagged by guard, 2026-08-26.) */
           sandbox="allow-scripts allow-same-origin"
         />
       ) : (
