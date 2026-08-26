@@ -14,6 +14,7 @@ import {
 import { getHeartbeat, getHealthStatus } from '@/lib/data/heartbeats';
 import { getTasksByAgent } from '@/lib/data/tasks';
 import { parseIdentityMd } from '@/lib/markdown-parser';
+import { displayField } from '@/lib/utils';
 import type {
   AgentSummary,
   AgentDetail,
@@ -106,12 +107,33 @@ export async function getAgentIdentity(
   }
 
   const { fields } = parseIdentityMd(raw);
+  // Sanitize HERE, at the single point where IDENTITY.md becomes DISPLAY data.
+  //
+  // An un-onboarded agent's IDENTITY.md still holds the template's HTML comments
+  // ("<!-- Optional emoji identifier -->", "<!-- Agent name (set during
+  // onboarding) -->"). parseIdentityMd takes section bodies verbatim — correctly,
+  // it is a faithful parser — so those comments arrived in the data model and
+  // rendered as literal text on the fleet cards.
+  //
+  // ⚠ WHY THIS POINT AND NOT THE RENDER SITES: four components read these fields
+  // (agent-card, overview/agent-status-grid, analytics/fleet-health,
+  // analytics/agent-effectiveness) and only one had been patched. Fixing at each
+  // render site is the same defect as security headers set on one middleware exit:
+  // it looks complete while covering whichever paths you happened to think of, and
+  // the next consumer added re-opens it. One sanitation point covers all readers,
+  // present and future.
+  //
+  // ⚠ AND NOT IN parseIdentityMd ITSELF: the profile EDITOR reads the raw markdown
+  // via `parsed` (see app/api/agents/[name]/route.ts). Stripping at the parser
+  // would blank the editor's fields and then SAVE the blanks, destroying the very
+  // template hints that tell a human what to fill in. `raw` below stays raw for
+  // exactly that reason.
   return {
-    name: fields.name || name,
-    role: fields.role,
-    emoji: fields.emoji,
-    vibe: fields.vibe,
-    workStyle: fields.workStyle,
+    name: displayField(fields.name, name),
+    role: displayField(fields.role, ''),
+    emoji: displayField(fields.emoji, ''),
+    vibe: displayField(fields.vibe, ''),
+    workStyle: displayField(fields.workStyle, ''),
     raw,
   };
 }
