@@ -31,17 +31,37 @@ describe('hermes-runtime-failover plan validator', () => {
   let planPath: string;
   let hermesRoot: string;
   let frameworkRoot: string;
+  let usageCliPath: string;
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'hermes-failover-skill-'));
     const plan = JSON.parse(readFileSync(examplePlan, 'utf8'));
     const now = new Date().toISOString();
     plan.trigger.observed_at_utc = now;
-    plan.trigger.source = 'oauth-usage-primary-receipt';
+    plan.trigger.source = 'cortextos-check-usage-api:anthropic-oauth';
     plan.restore.occurrence_utc = nextSunday1500Chicago();
     plan.live_changes = 0;
     hermesRoot = join(tempDir, 'hermes-root');
     frameworkRoot = join(tempDir, 'framework-root');
+    usageCliPath = join(frameworkRoot, 'dist', 'cli.js');
+    mkdirSync(join(frameworkRoot, 'dist'), { recursive: true });
+    writeFileSync(usageCliPath, `
+const expected = ['bus', 'check-usage-api', '--json', '--force', '--no-store'];
+if (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(expected)) {
+  console.error('unexpected usage CLI arguments');
+  process.exit(2);
+}
+console.log(JSON.stringify({
+  account: 'test-primary',
+  five_hour_utilization: 0.5,
+  seven_day_utilization: 0.91,
+  cached: false,
+  fetched_at: new Date().toISOString(),
+  provider: 'anthropic',
+  endpoint: 'https://api.anthropic.com/api/oauth/usage',
+  authentication: 'oauth-bearer',
+}));
+`);
 
     const triggerReceipt = {
       schema_version: 1,
@@ -660,6 +680,120 @@ describe('hermes-runtime-failover plan validator', () => {
     expect(errors).toContain('trigger.source does not match byte-bound trigger receipt');
     expect(errors).toContain('trigger.observed_value does not match byte-bound trigger receipt');
     expect(errors).toContain('trigger.observed_at_utc does not match byte-bound trigger receipt');
+  });
+
+  it('rejects a jointly forged plan, receipt, and recalculated hash against authenticated usage', () => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    const forgedAt = new Date().toISOString();
+    const receipt = {
+      schema_version: 1,
+      metric: 'claude_weekly_remaining_percent',
+      denominator: 'percent_remaining',
+      observed_value: 0,
+      observed_at_utc: forgedAt,
+      source: 'fabricated-no-receipt',
+    };
+    const receiptBytes = JSON.stringify(receipt, null, 2) + '\n';
+    writeFileSync(triggerPath, receiptBytes);
+    plan.trigger = {
+      ...plan.trigger,
+      metric: receipt.metric,
+      denominator: receipt.denominator,
+      observed_value: receipt.observed_value,
+      observed_at_utc: receipt.observed_at_utc,
+      source: receipt.source,
+    };
+    plan.trigger_receipt.sha256 = hash(receiptBytes);
+    const invalidPath = join(tempDir, 'jointly-forged-trigger.json');
+    writeFileSync(invalidPath, JSON.stringify(plan));
+
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    const errors = JSON.parse(result.stderr).errors.join('\n');
+    expect(errors).toContain('trigger.source must be cortextos-check-usage-api:anthropic-oauth');
+    expect(errors).toContain('trigger.observed_value does not match authenticated usage measurement');
+    expect(errors).toContain('trigger receipt observed_value does not match authenticated usage measurement');
+  });
+
+  it('fails closed when the canonical authenticated usage read returns 401', () => {
+    writeFileSync(usageCliPath, `
+console.error('Error: Usage API returned 401: OAuth access token expired');
+process.exit(1);
+`);
+
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr).errors.join('\n'))
+      .toContain('authenticated usage measurement unavailable (RC 1)');
+  });
+
+  it('fails closed when the canonical usage measurement path is missing', () => {
+    rmSync(usageCliPath);
+
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr).errors.join('\n'))
+      .toContain('authenticated usage measurement unavailable: canonical cortextOS CLI is missing');
+  });
+
+  it('fails closed when authenticated usage omits a utilization field', () => {
+    writeFileSync(usageCliPath, `
+console.log(JSON.stringify({
+  account: 'test-primary', five_hour_utilization: 0.5, cached: false,
+  fetched_at: new Date().toISOString(), provider: 'anthropic',
+  endpoint: 'https://api.anthropic.com/api/oauth/usage', authentication: 'oauth-bearer',
+}));
+`);
+
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr).errors.join('\n'))
+      .toContain('authenticated usage measurement is missing valid utilization fields');
+  });
+
+  it('fails closed when the authenticated usage measurement is stale', () => {
+    writeFileSync(usageCliPath, `
+console.log(JSON.stringify({
+  account: 'test-primary', five_hour_utilization: 0.5, seven_day_utilization: 0.91,
+  cached: false, fetched_at: '2020-01-01T00:00:00Z', provider: 'anthropic',
+  endpoint: 'https://api.anthropic.com/api/oauth/usage', authentication: 'oauth-bearer',
+}));
+`);
+
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr).errors.join('\n'))
+      .toContain('authenticated usage measurement fetched_at is stale or future-dated');
+  });
+
+  it('fails closed when the usage measurement is unauthenticated', () => {
+    writeFileSync(usageCliPath, `
+console.log(JSON.stringify({
+  account: 'test-primary', five_hour_utilization: 0.5, seven_day_utilization: 0.91,
+  cached: false, fetched_at: new Date().toISOString(), provider: 'anthropic',
+  endpoint: 'https://api.anthropic.com/api/oauth/usage', authentication: 'none',
+}));
+`);
+
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr).errors.join('\n'))
+      .toContain('usage measurement is unauthenticated, cached, or from an unexpected origin');
+  });
+
+  it('fails closed when the usage measurement is cached instead of freshly authenticated', () => {
+    writeFileSync(usageCliPath, `
+console.log(JSON.stringify({
+  account: 'test-primary', five_hour_utilization: 0.5, seven_day_utilization: 0.91,
+  cached: true, fetched_at: new Date().toISOString(), provider: 'anthropic',
+  endpoint: 'https://api.anthropic.com/api/oauth/usage', authentication: 'oauth-bearer',
+}));
+`);
+
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr).errors.join('\n'))
+      .toContain('usage measurement is unauthenticated, cached, or from an unexpected origin');
   });
 
   it('rejects a decoy cron receipt when the canonical profile jobs file is active', () => {

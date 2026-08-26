@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -47,6 +48,8 @@ const fixedModelPattern = /^[a-zA-Z0-9._-]+(?:\/[a-zA-Z0-9._-]+)*$/;
 const profilePattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const providerPattern = /^[a-zA-Z0-9._-]+$/;
 const mcpNamePattern = /^[a-zA-Z0-9._-]+$/;
+const usageApiEndpoint = 'https://api.anthropic.com/api/oauth/usage';
+const canonicalTriggerSource = 'cortextos-check-usage-api:anthropic-oauth';
 const reasoningLevels = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 const runtimes = new Set(['claude-code', 'hermes', 'codex-app-server', 'opencode']);
 const isMovingModelAlias = (value) => {
@@ -90,6 +93,35 @@ const normalizedHermesRoot = basename(dirname(daemonHermesHome)) === 'profiles'
   : daemonHermesHome;
 const canonicalProfilesRoot = join(normalizedHermesRoot, 'profiles');
 const evidenceMaxAgeMinutes = plan?.evidence_max_age_minutes;
+
+const readCanonicalUsage = () => {
+  if (!nonEmpty(frameworkRoot) || !isAbsolute(frameworkRoot)) return null;
+  const cliPath = join(resolve(frameworkRoot), 'dist', 'cli.js');
+  if (!existsSync(cliPath)) {
+    errors.push('authenticated usage measurement unavailable: canonical cortextOS CLI is missing');
+    return null;
+  }
+  const result = spawnSync(process.execPath, [
+    cliPath, 'bus', 'check-usage-api', '--json', '--force', '--no-store',
+  ], {
+    encoding: 'utf8',
+    env: process.env,
+    timeout: 30_000,
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) {
+    errors.push(`authenticated usage measurement unavailable (RC ${result.status ?? 'none'})`);
+    return null;
+  }
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    errors.push('authenticated usage measurement returned invalid JSON');
+    return null;
+  }
+};
+
+const canonicalUsage = readCanonicalUsage();
 
 if (!Number.isInteger(evidenceMaxAgeMinutes) || evidenceMaxAgeMinutes < 1 || evidenceMaxAgeMinutes > 1440) {
   errors.push('evidence_max_age_minutes must be an integer from 1 to 1440');
@@ -213,7 +245,9 @@ if (plan?.trigger?.metric !== 'claude_weekly_remaining_percent') {
 }
 if (plan?.trigger?.at_or_below !== 10) errors.push('trigger.at_or_below must be exactly 10');
 if (plan?.trigger?.denominator !== 'percent_remaining') errors.push('trigger.denominator must be percent_remaining');
-if (!nonEmpty(plan?.trigger?.source)) errors.push('trigger.source is required');
+if (plan?.trigger?.source !== canonicalTriggerSource) {
+  errors.push(`trigger.source must be ${canonicalTriggerSource}`);
+}
 if (typeof plan?.trigger?.observed_value !== 'number'
   || !Number.isFinite(plan.trigger.observed_value)
   || plan.trigger.observed_value < 0
@@ -235,6 +269,40 @@ if (!Number.isInteger(maxAgeMinutes) || maxAgeMinutes < 1 || maxAgeMinutes > 60)
   const ageMs = Date.now() - Date.parse(plan.trigger.observed_at_utc);
   if (ageMs < -5 * 60_000 || ageMs > maxAgeMinutes * 60_000) {
     errors.push(`trigger observation is stale or future-dated (max ${maxAgeMinutes} minutes)`);
+  }
+}
+let canonicalRemainingPercent;
+if (canonicalUsage) {
+  const originIsAuthenticated = canonicalUsage.provider === 'anthropic'
+    && canonicalUsage.endpoint === usageApiEndpoint
+    && canonicalUsage.authentication === 'oauth-bearer'
+    && canonicalUsage.cached === false
+    && nonEmpty(canonicalUsage.account);
+  if (!originIsAuthenticated) {
+    errors.push('usage measurement is unauthenticated, cached, or from an unexpected origin');
+  }
+  const fiveHour = canonicalUsage.five_hour_utilization;
+  const sevenDay = canonicalUsage.seven_day_utilization;
+  if (typeof fiveHour !== 'number' || !Number.isFinite(fiveHour) || fiveHour < 0 || fiveHour > 1
+    || typeof sevenDay !== 'number' || !Number.isFinite(sevenDay) || sevenDay < 0 || sevenDay > 1) {
+    errors.push('authenticated usage measurement is missing valid utilization fields');
+  } else {
+    canonicalRemainingPercent = Number(((1 - sevenDay) * 100).toFixed(6));
+    if (plan?.trigger?.observed_value !== canonicalRemainingPercent) {
+      errors.push('trigger.observed_value does not match authenticated usage measurement');
+    }
+    if (triggerReceipt?.observed_value !== canonicalRemainingPercent) {
+      errors.push('trigger receipt observed_value does not match authenticated usage measurement');
+    }
+  }
+  if (!validIso(canonicalUsage.fetched_at)) {
+    errors.push('authenticated usage measurement fetched_at is missing or invalid');
+  } else if (Number.isInteger(maxAgeMinutes) && maxAgeMinutes >= 1 && maxAgeMinutes <= 60) {
+    validateFreshTimestamp('authenticated usage measurement fetched_at', canonicalUsage.fetched_at, maxAgeMinutes, errors);
+    if (validIso(plan?.trigger?.observed_at_utc)
+      && Math.abs(Date.parse(canonicalUsage.fetched_at) - Date.parse(plan.trigger.observed_at_utc)) > maxAgeMinutes * 60_000) {
+      errors.push('trigger.observed_at_utc is not contemporaneous with authenticated usage measurement');
+    }
   }
 }
 
@@ -558,8 +626,9 @@ if (errors.length > 0) {
 
 console.log(JSON.stringify({
   ok: true,
-  trigger_percent: plan.trigger.observed_value,
-  trigger_observed_at_utc: plan.trigger.observed_at_utc,
+  trigger_percent: canonicalRemainingPercent,
+  trigger_observed_at_utc: canonicalUsage.fetched_at,
+  trigger_source: canonicalTriggerSource,
   trigger_receipt_sha256: triggerBinding.sha256,
   restore_occurrence_utc: plan.restore.occurrence_utc,
   restore_snapshot_sha256: binding.sha256,

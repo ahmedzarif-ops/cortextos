@@ -6,7 +6,7 @@
     "observed_at_utc": "REPLACE_WITH_FRESH_UTC_TIMESTAMP",
     "max_age_minutes": 30,
     "denominator": "percent_remaining",
-    "source": "REPLACE_WITH_PRIMARY_USAGE_RECEIPT"
+    "source": "cortextos-check-usage-api:anthropic-oauth"
   },
   "trigger_receipt": {
     "path": "/absolute/path/to/TRIGGER-RECEIPT.json",
