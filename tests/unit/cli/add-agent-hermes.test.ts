@@ -94,7 +94,8 @@ describe('add-agent --runtime hermes isolation contract', () => {
     },
   );
 
-  it('rejects moving model aliases before creating files', async () => {
+  it.each(['~deepseek/deepseek-v4-flash', 'auto', 'latest', 'deepseek/latest', 'gpt-5-auto'])(
+    'rejects moving model alias %s before creating files', async (model) => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`__TEST_PROCESS_EXIT_${code}__`);
@@ -102,7 +103,7 @@ describe('add-agent --runtime hermes isolation contract', () => {
 
     await expect(addAgentCommand.parseAsync([
       'node', 'cli', 'hermes-alias', '--runtime', 'hermes', '--org', 'testorg',
-      '--model', '~deepseek/deepseek-v4-flash',
+      '--model', model,
     ])).rejects.toThrow(/__TEST_PROCESS_EXIT_1__/);
     expect(existsSync(join(tempRoot, 'orgs', 'testorg', 'agents', 'hermes-alias'))).toBe(false);
   });
