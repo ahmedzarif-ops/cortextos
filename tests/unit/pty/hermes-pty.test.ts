@@ -235,6 +235,20 @@ describe('HermesPTY', () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
+  it.each(['auto', 'latest', 'deepseek/latest', 'gpt-5-auto'])(
+    'fails before the real spawn seam for moving model alias %s',
+    async (model) => {
+      const spawnMock = vi.fn();
+      const pty = new HermesPTY(mockEnv, {
+        hermes_profile: 'hermes-agent', model, hermes_provider: 'nous', hermes_reasoning: 'high',
+      });
+      (pty as unknown as { spawnFn: typeof spawnMock }).spawnFn = spawnMock;
+
+      await expect(pty.spawn('fresh', 'bootstrap')).rejects.toThrow(/moving alias forbidden/);
+      expect(spawnMock).not.toHaveBeenCalled();
+    },
+  );
+
   it('uses the agent name as the isolated profile for legacy Hermes configs', () => {
     const pty = new HermesPTY(mockEnv, {
       model: 'deepseek/deepseek-v4-flash', hermes_provider: 'nous', hermes_reasoning: 'high',

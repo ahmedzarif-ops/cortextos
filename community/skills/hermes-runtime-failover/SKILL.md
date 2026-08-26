@@ -19,19 +19,23 @@ Use this workflow only for a standing cortextOS fleet. It is dry-run-first and f
 
 ## 1. Validate the plan without changing state
 
-Copy `references/ygs-routes.example.json` to a new evidence path and replace every `REPLACE` value. The validator requires a fresh trigger receipt, a byte-bound restore snapshot, per-seat MCP transcript and usage receipts, a native-cron scan, and an explicit city-first/chief-last order. The example itself is deliberately not executable until those receipts are supplied.
+Copy `references/ygs-routes.example.json` to a new evidence path and replace every `REPLACE` value. Capture separate byte-bound fleet, restore, and spend snapshots. The validator requires the authoritative six-seat YGS roster, a fresh trigger receipt, per-seat and total weekly spend, per-seat MCP transcript and usage receipts, a canonical native-cron scan, and an explicit city-first/chief-last order. The example itself is deliberately not executable until those receipts are supplied.
 
 ```bash
 node scripts/validate-plan.mjs \
   --plan references/ygs-routes.example.json \
-  --restore /absolute/path/to/RESTORE-STATE.json
+  --restore /absolute/path/to/RESTORE-STATE.json \
+  --fleet-snapshot /absolute/path/to/FLEET-SNAPSHOT.json \
+  --spend /absolute/path/to/SPEND-ESTIMATE.json
 ```
 
-The validator performs no writes and prints no credentials. It hashes every referenced restore/MCP/cron artifact and rejects stale trigger, snapshot, MCP, or cron evidence; a past/non-next Sunday restore; null or moving models; invalid restore runtimes or missing Hermes restore pins; whitespace pins; absent tool effects; enabled native crons; incomplete ordering; or a snapshot-path/hash mismatch. `evidence_max_age_minutes` is mandatory and capped at 24 hours. Any error blocks the switch.
+The validator performs no writes and prints no credentials. It hashes every referenced fleet/restore/spend/MCP artifact and rejects stale evidence; any roster other than the authoritative six YGS seats; a past/non-next Sunday restore; null or moving models; invalid restore runtimes or missing Hermes restore pins; whitespace pins; missing or inconsistent spend; reused or cross-profile MCP evidence; a tool from the wrong required server; enabled native crons at the canonical profile path; incomplete ordering; or a snapshot-path/hash mismatch. `evidence_max_age_minutes` is mandatory and capped at 24 hours. Any error blocks the switch.
 
 ## 2. Re-read live state immediately before preflight
 
-Capture each seat's current `runtime`, explicit fixed `model`, config hash, process PID/status, profile, cron count, and next fire time. The snapshot must include schema version, absolute UTC capture/restore timestamps, capture reason/source, and a config SHA-256 for every seat. Save it to a new timestamped file. Do not overwrite an earlier snapshot.
+Capture each seat's current `runtime`, explicit fixed `model`, config hash, process PID/status, profile, cron count, and next fire time. The fleet snapshot must identify `ygs-cortex-fleet` and contain exactly `chief`, `city`, `growth`, `guard`, `sentinel`, and `social`; the restore snapshot must contain the same set. Each fleet row must include the canonical `${CTX_FRAMEWORK_ROOT}/orgs/ygs-cortex-fleet/agents/<seat>/config.json` path and its byte hash. Validation rereads those canonical files and rejects decoys or drift. The fleet snapshot must also list `intended_hermes_seats` exactly as `chief`, `city`, `growth`, `sentinel`, and `social`; both cutover orders are derived from that byte-bound set. Both snapshots include schema version, absolute UTC capture/restore timestamps, `captured_from: live-seat-configs`, and a config SHA-256 for every seat. Save them to new timestamped files. Do not overwrite an earlier snapshot.
+
+Create a separate spend receipt with `schema_version: 1`, a fresh `generated_at_utc`, `currency: USD`, a named estimation method, the exact six-seat set, and for each seat the planned runtime/model/provider plus finite non-negative `expected_weekly_usd`. `total_expected_weekly_usd` must equal the per-seat sum. Bind its exact path and SHA-256 into the plan.
 
 For each proposed Hermes seat:
 
@@ -40,8 +44,8 @@ For each proposed Hermes seat:
 3. Write `--usage-file` output into the evidence directory.
 4. Put a unique nonce into profile A. Query profile A, profile B, and global `~/.hermes/state.db`; require counts `>0`, `0`, `0` respectively.
 5. Enable only required MCPs in that profile, run `hermes --profile <name> mcp test <server>`, then require a real model-invoked MCP tool row in that profile DB.
-   Preserve a transcript containing the tool name and result marker plus a hashed usage receipt matching the planned model/provider; the validator binds both files.
-6. Read `<profile>/cron/jobs.json`. Require zero enabled native jobs before selecting `hermes_cron_ownership: cortextos`; the runtime adapter independently refuses to start the external scheduler when the native file is active, malformed, or unreadable.
+   Preserve dedicated JSON transcript and usage receipts for each seat/server pair. Both receipts must contain the exact seat, profile, required server, unique invocation ID, profile session ID, tested timestamp, and success state; the transcript also binds the server-specific `mcp__<server>__*` tool and result marker, while usage binds model/provider. Evidence paths and hashes cannot be reused across seats or servers.
+6. Read the canonical `<HERMES_HOME root>/profiles/<profile>/cron/jobs.json`. The validator derives this path from `HERMES_HOME` and the planned profile; a plan cannot substitute a decoy path. Require zero enabled native jobs before selecting `hermes_cron_ownership: cortextos`; the runtime adapter independently refuses to start the external scheduler when the native file is active, malformed, or unreadable.
 7. Run `hermes --profile <name> prompt-size --json`. Reject a model whose usable context cannot comfortably hold fixed bootstrap plus the expected task input and output.
 
 ## 3. Prove the cortextOS adapter
@@ -71,7 +75,7 @@ Required effects:
 Send chief one consolidated packet containing:
 
 - verified trigger reading and timestamp;
-- exact per-seat routes and expected weekly spend;
+- exact per-seat routes, byte-bound per-seat weekly spend, and byte-bound total weekly spend;
 - restore snapshot path and hash;
 - build/test denominators;
 - two-profile nonce counts;

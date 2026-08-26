@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
@@ -25,7 +25,11 @@ const nextSunday1500Chicago = () => {
 describe('hermes-runtime-failover plan validator', () => {
   let tempDir: string;
   let restorePath: string;
+  let fleetPath: string;
+  let spendPath: string;
   let planPath: string;
+  let hermesRoot: string;
+  let frameworkRoot: string;
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'hermes-failover-skill-'));
@@ -35,6 +39,73 @@ describe('hermes-runtime-failover plan validator', () => {
     plan.trigger.source = 'oauth-usage-primary-receipt';
     plan.restore.occurrence_utc = nextSunday1500Chicago();
     plan.live_changes = 0;
+    hermesRoot = join(tempDir, 'hermes-root');
+    frameworkRoot = join(tempDir, 'framework-root');
+
+    const liveConfigs = Object.fromEntries(Object.keys(plan.seats).map((seat) => {
+      const configPath = join(frameworkRoot, 'orgs', 'ygs-cortex-fleet', 'agents', seat, 'config.json');
+      const config = { runtime: 'codex-app-server', model: 'gpt-5-codex' };
+      const configBytes = JSON.stringify(config, null, 2) + '\n';
+      mkdirSync(join(frameworkRoot, 'orgs', 'ygs-cortex-fleet', 'agents', seat), { recursive: true });
+      writeFileSync(configPath, configBytes);
+      return [seat, { path: configPath, bytes: configBytes }];
+    }));
+
+    const fleet = {
+      schema_version: 1,
+      org: 'ygs-cortex-fleet',
+      taken_at_utc: now,
+      captured_from: 'live-seat-configs',
+      intended_hermes_seats: ['chief', 'city', 'growth', 'sentinel', 'social'],
+      seats: Object.fromEntries(Object.keys(plan.seats).map((seat) => [
+        seat,
+        {
+          runtime: 'codex-app-server',
+          model: 'gpt-5-codex',
+          config_path: liveConfigs[seat].path,
+          config_sha256: hash(liveConfigs[seat].bytes),
+        },
+      ])),
+    };
+    fleetPath = join(tempDir, 'fleet-snapshot.json');
+    const fleetBytes = JSON.stringify(fleet, null, 2) + '\n';
+    writeFileSync(fleetPath, fleetBytes);
+    plan.fleet_snapshot = {
+      path: fleetPath,
+      sha256: hash(fleetBytes),
+      taken_at_utc: now,
+      captured_from: fleet.captured_from,
+    };
+
+    const spendSeats = Object.fromEntries(Object.entries<any>(plan.seats).map(([seat, route], index) => [
+      seat,
+      {
+        runtime: route.runtime,
+        model: route.model,
+        provider: route.provider ?? null,
+        expected_weekly_usd: index + 0.25,
+      },
+    ]));
+    const totalExpected = Object.values<any>(spendSeats)
+      .reduce((total, seat) => total + seat.expected_weekly_usd, 0);
+    const spend = {
+      schema_version: 1,
+      generated_at_utc: now,
+      currency: 'USD',
+      method: 'measured tokens multiplied by pinned model prices',
+      seats: spendSeats,
+      total_expected_weekly_usd: totalExpected,
+    };
+    spendPath = join(tempDir, 'spend-estimate.json');
+    const spendBytes = JSON.stringify(spend, null, 2) + '\n';
+    writeFileSync(spendPath, spendBytes);
+    plan.spend_snapshot = {
+      path: spendPath,
+      sha256: hash(spendBytes),
+      generated_at_utc: now,
+      currency: 'USD',
+      total_expected_weekly_usd: totalExpected,
+    };
 
     const restore = {
       schema_version: 1,
@@ -47,7 +118,7 @@ describe('hermes-runtime-failover plan validator', () => {
         {
           runtime: 'codex-app-server',
           model: 'gpt-5-codex',
-          config_sha256: hash(`config:${seat}`),
+          config_sha256: hash(liveConfigs[seat].bytes),
         },
       ])),
     };
@@ -67,15 +138,35 @@ describe('hermes-runtime-failover plan validator', () => {
     for (const [seat, route] of Object.entries<any>(plan.seats)) {
       if (route.runtime !== 'hermes') continue;
       const usagePath = join(tempDir, `${seat}-usage.json`);
+      const invocationId = `${seat}-context7-invocation`;
+      const sessionId = `${seat}-profile-session`;
       const usageBytes = JSON.stringify({
+        schema_version: 1,
+        seat,
+        profile: route.profile,
+        server: 'context7',
+        invocation_id: invocationId,
+        session_id: sessionId,
+        tested_at_utc: now,
         model: route.model,
         provider: route.provider,
         completed: true,
         failed: false,
       }, null, 2) + '\n';
       writeFileSync(usagePath, usageBytes);
-      const transcriptPath = join(tempDir, `${seat}-mcp-transcript.txt`);
-      const transcriptBytes = 'tool=mcp__context7__resolve_library_id\nresult=/colinhacks/zod\n';
+      const transcriptPath = join(tempDir, `${seat}-mcp-transcript.json`);
+      const transcriptBytes = JSON.stringify({
+        schema_version: 1,
+        seat,
+        profile: route.profile,
+        server: 'context7',
+        invocation_id: invocationId,
+        session_id: sessionId,
+        tested_at_utc: now,
+        tool_name: 'mcp__context7__resolve_library_id',
+        result_marker: '/colinhacks/zod',
+        success: true,
+      }, null, 2) + '\n';
       writeFileSync(transcriptPath, transcriptBytes);
       plan.mcp_evidence[seat] = {
         context7: {
@@ -83,6 +174,8 @@ describe('hermes-runtime-failover plan validator', () => {
           tested_at_utc: now,
           connected: true,
           tools_discovered: 2,
+          invocation_id: invocationId,
+          session_id: sessionId,
           tool_name: 'mcp__context7__resolve_library_id',
           result_marker: '/colinhacks/zod',
           transcript_file: transcriptPath,
@@ -91,7 +184,8 @@ describe('hermes-runtime-failover plan validator', () => {
           usage_sha256: hash(usageBytes),
         },
       };
-      const jobsPath = join(tempDir, `${seat}-jobs.json`);
+      const jobsPath = join(hermesRoot, 'profiles', route.profile, 'cron', 'jobs.json');
+      mkdirSync(join(hermesRoot, 'profiles', route.profile, 'cron'), { recursive: true });
       const jobsBytes = JSON.stringify({ jobs: [] }) + '\n';
       writeFileSync(jobsPath, jobsBytes);
       plan.cron_evidence[seat] = {
@@ -111,7 +205,11 @@ describe('hermes-runtime-failover plan validator', () => {
 
   const run = (candidatePlan = planPath) => spawnSync(process.execPath, [
     validator, '--plan', candidatePlan, '--restore', restorePath,
-  ], { encoding: 'utf8' });
+    '--fleet-snapshot', fleetPath, '--spend', spendPath,
+  ], {
+    encoding: 'utf8',
+    env: { ...process.env, HERMES_HOME: hermesRoot, CTX_FRAMEWORK_ROOT: frameworkRoot },
+  });
 
   it('accepts a fully bound route, restore snapshot, MCP proof, cron scan, and ordered canary', () => {
     const result = run();
@@ -170,10 +268,12 @@ describe('hermes-runtime-failover plan validator', () => {
 
   it('rejects tampered MCP usage and native-cron artifacts', () => {
     const plan = JSON.parse(readFileSync(planPath, 'utf8'));
-    writeFileSync(plan.mcp_evidence.city.context7.usage_file, JSON.stringify({
-      model: 'wrong/model', provider: 'nous', completed: true, failed: false,
-    }));
-    writeFileSync(plan.mcp_evidence.city.context7.transcript_file, 'no MCP effect here\n');
+    const usage = JSON.parse(readFileSync(plan.mcp_evidence.city.context7.usage_file, 'utf8'));
+    usage.model = 'wrong/model';
+    writeFileSync(plan.mcp_evidence.city.context7.usage_file, JSON.stringify(usage));
+    const transcript = JSON.parse(readFileSync(plan.mcp_evidence.city.context7.transcript_file, 'utf8'));
+    transcript.result_marker = 'wrong-result';
+    writeFileSync(plan.mcp_evidence.city.context7.transcript_file, JSON.stringify(transcript));
     writeFileSync(plan.cron_evidence.city.jobs_path, JSON.stringify({ jobs: [{ enabled: true }] }));
     const invalidPath = join(tempDir, 'tampered-artifacts.json');
     writeFileSync(invalidPath, JSON.stringify(plan));
@@ -182,9 +282,9 @@ describe('hermes-runtime-failover plan validator', () => {
     expect(result.status).toBe(1);
     const errors = JSON.parse(result.stderr).errors.join('\n');
     expect(errors).toContain('city/context7: usage file hash mismatch');
-    expect(errors).toContain('city/context7: usage receipt does not prove the pinned successful route');
+    expect(errors).toContain('city/context7: usage receipt is not bound to the exact successful pinned invocation');
     expect(errors).toContain('city/context7: MCP transcript hash mismatch');
-    expect(errors).toContain('city/context7: transcript does not contain the required tool and result effect');
+    expect(errors).toContain('city/context7: transcript bytes are not bound to the exact seat/profile/server/invocation/effect');
     expect(errors).toContain('city: native cron jobs hash mismatch');
     expect(errors).toContain('city: native cron jobs file is invalid or contains enabled jobs');
   });
@@ -238,5 +338,143 @@ describe('hermes-runtime-failover plan validator', () => {
     expect(errors).toContain('city: valid restorable Hermes provider required');
     expect(errors).toContain('city: valid restorable Hermes reasoning required');
     expect(errors).toContain('city: valid restorable Hermes cron ownership required');
+  });
+
+  it('rejects a complete-looking plan with no byte-bound spend estimate', () => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    delete plan.spend_snapshot;
+    const invalidPath = join(tempDir, 'no-spend.json');
+    writeFileSync(invalidPath, JSON.stringify(plan));
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr).errors.join('\n')).toContain('spend_snapshot binding is required');
+  });
+
+  it('rejects guard omitted consistently from plan and restore', () => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    const restore = JSON.parse(readFileSync(restorePath, 'utf8'));
+    delete plan.seats.guard;
+    delete restore.seats.guard;
+    writeFileSync(restorePath, JSON.stringify(restore));
+    plan.restore_snapshot.sha256 = hash(readFileSync(restorePath));
+    const invalidPath = join(tempDir, 'omit-guard.json');
+    writeFileSync(invalidPath, JSON.stringify(plan));
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr).errors.join('\n')).toContain('authoritative six-seat roster');
+  });
+
+  it('rejects sentinel omitted from plan, restore, evidence, and both orders', () => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    const restore = JSON.parse(readFileSync(restorePath, 'utf8'));
+    delete plan.seats.sentinel;
+    delete restore.seats.sentinel;
+    delete plan.mcp_evidence.sentinel;
+    delete plan.cron_evidence.sentinel;
+    plan.cutover.order = plan.cutover.order.filter((seat: string) => seat !== 'sentinel');
+    plan.cutover.restore_order = plan.cutover.restore_order.filter((seat: string) => seat !== 'sentinel');
+    writeFileSync(restorePath, JSON.stringify(restore));
+    plan.restore_snapshot.sha256 = hash(readFileSync(restorePath));
+    const invalidPath = join(tempDir, 'omit-sentinel.json');
+    writeFileSync(invalidPath, JSON.stringify(plan));
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    const errors = JSON.parse(result.stderr).errors.join('\n');
+    expect(errors).toContain('authoritative six-seat roster');
+    expect(errors).toContain('Hermes routes must be exactly');
+    expect(errors).toContain('cutover.order must contain every Hermes seat exactly once');
+  });
+
+  it('rejects a fleet snapshot that is not bound to canonical live config bytes', () => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    const fleet = JSON.parse(readFileSync(fleetPath, 'utf8'));
+    fleet.seats.city.config_path = join(tempDir, 'decoy-config.json');
+    fleet.seats.city.config_sha256 = hash('fabricated-live-config');
+    writeFileSync(fleetPath, JSON.stringify(fleet));
+    plan.fleet_snapshot.sha256 = hash(readFileSync(fleetPath));
+    const invalidPath = join(tempDir, 'fake-fleet-snapshot.json');
+    writeFileSync(invalidPath, JSON.stringify(plan));
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    const errors = JSON.parse(result.stderr).errors.join('\n');
+    expect(errors).toContain('fleet snapshot config_path must equal canonical live config path');
+    expect(errors).toContain('fleet snapshot config hash does not match live bytes');
+  });
+
+  it('rejects duplicate MCP invocation and session identities even with unique files', () => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    const chief = plan.mcp_evidence.chief.context7;
+    const growth = plan.mcp_evidence.growth.context7;
+    growth.invocation_id = chief.invocation_id;
+    growth.session_id = chief.session_id;
+    for (const key of ['transcript', 'usage']) {
+      const fileKey = `${key}_file`;
+      const hashKey = `${key}_sha256`;
+      const receipt = JSON.parse(readFileSync(growth[fileKey], 'utf8'));
+      receipt.invocation_id = chief.invocation_id;
+      receipt.session_id = chief.session_id;
+      writeFileSync(growth[fileKey], JSON.stringify(receipt));
+      growth[hashKey] = hash(readFileSync(growth[fileKey]));
+    }
+    const invalidPath = join(tempDir, 'duplicate-mcp-identity.json');
+    writeFileSync(invalidPath, JSON.stringify(plan));
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    const errors = JSON.parse(result.stderr).errors.join('\n');
+    expect(errors).toContain('MCP invocation_id must be globally unique');
+    expect(errors).toContain('MCP session_id must be globally unique');
+  });
+
+  it('rejects MCP transcript and usage reuse across profiles', () => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    const chief = plan.mcp_evidence.chief.context7;
+    const growth = plan.mcp_evidence.growth.context7;
+    growth.transcript_file = chief.transcript_file;
+    growth.transcript_sha256 = chief.transcript_sha256;
+    growth.usage_file = chief.usage_file;
+    growth.usage_sha256 = chief.usage_sha256;
+    const invalidPath = join(tempDir, 'reuse-mcp.json');
+    writeFileSync(invalidPath, JSON.stringify(plan));
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    const errors = JSON.parse(result.stderr).errors.join('\n');
+    expect(errors).toContain('MCP transcript evidence cannot be reused');
+    expect(errors).toContain('MCP usage evidence cannot be reused');
+    expect(errors).toContain('transcript bytes are not bound to the exact seat/profile/server');
+    expect(errors).toContain('usage receipt is not bound to the exact successful pinned invocation');
+  });
+
+  it('rejects a required context7 proof using a fake non-context7 tool', () => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    const proof = plan.mcp_evidence.city.context7;
+    proof.tool_name = 'mcp__not_context7__fake';
+    const transcript = JSON.parse(readFileSync(proof.transcript_file, 'utf8'));
+    transcript.tool_name = proof.tool_name;
+    writeFileSync(proof.transcript_file, JSON.stringify(transcript));
+    proof.transcript_sha256 = hash(readFileSync(proof.transcript_file));
+    const invalidPath = join(tempDir, 'wrong-mcp-server.json');
+    writeFileSync(invalidPath, JSON.stringify(plan));
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr).errors.join('\n'))
+      .toContain('MCP tool name must be bound to required server context7');
+  });
+
+  it('rejects a decoy cron receipt when the canonical profile jobs file is active', () => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    const canonicalPath = plan.cron_evidence.city.jobs_path;
+    writeFileSync(canonicalPath, JSON.stringify({ jobs: [{ id: 'native', enabled: true }] }));
+    const decoyPath = join(tempDir, 'decoy-jobs.json');
+    const decoyBytes = JSON.stringify({ jobs: [] });
+    writeFileSync(decoyPath, decoyBytes);
+    plan.cron_evidence.city.jobs_path = decoyPath;
+    plan.cron_evidence.city.jobs_sha256 = hash(decoyBytes);
+    const invalidPath = join(tempDir, 'decoy-cron.json');
+    writeFileSync(invalidPath, JSON.stringify(plan));
+    const result = run(invalidPath);
+    expect(result.status).toBe(1);
+    const errors = JSON.parse(result.stderr).errors.join('\n');
+    expect(errors).toContain('native cron jobs_path must equal canonical profile path');
+    expect(errors).toContain('native cron jobs file is invalid or contains enabled jobs');
   });
 });

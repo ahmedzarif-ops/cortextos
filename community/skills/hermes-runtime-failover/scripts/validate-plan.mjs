@@ -2,7 +2,8 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 const args = process.argv.slice(2);
 const valueFor = (flag) => {
@@ -12,8 +13,10 @@ const valueFor = (flag) => {
 
 const planPath = valueFor('--plan');
 const restorePath = valueFor('--restore');
-if (!planPath || !restorePath) {
-  console.error('Usage: validate-plan.mjs --plan <plan.json> --restore <RESTORE-STATE.json>');
+const fleetPath = valueFor('--fleet-snapshot');
+const spendPath = valueFor('--spend');
+if (!planPath || !restorePath || !fleetPath || !spendPath) {
+  console.error('Usage: validate-plan.mjs --plan <plan.json> --restore <RESTORE-STATE.json> --fleet-snapshot <FLEET-SNAPSHOT.json> --spend <SPEND-ESTIMATE.json>');
   process.exit(2);
 }
 
@@ -59,15 +62,118 @@ const validateFreshTimestamp = (label, value, maxAgeMinutes, errors) => {
 
 const planBytes = readBytes(planPath);
 const restoreBytes = readBytes(restorePath);
+const fleetBytes = readBytes(fleetPath);
+const spendBytes = readBytes(spendPath);
 const plan = readJsonBytes(planPath, planBytes);
 const restore = readJsonBytes(restorePath, restoreBytes);
+const fleet = readJsonBytes(fleetPath, fleetBytes);
+const spend = readJsonBytes(spendPath, spendBytes);
 const errors = [];
 const profiles = new Set();
+const requiredSeats = ['chief', 'city', 'growth', 'guard', 'sentinel', 'social'].sort();
+const requiredHermesSeats = ['chief', 'city', 'growth', 'sentinel', 'social'].sort();
+const sameSet = (actual, expected) => JSON.stringify([...actual].sort()) === JSON.stringify([...expected].sort());
+const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT;
+const canonicalAgentsRoot = nonEmpty(frameworkRoot) && isAbsolute(frameworkRoot)
+  ? join(frameworkRoot, 'orgs', 'ygs-cortex-fleet', 'agents')
+  : '';
+const daemonHermesHome = process.env.HERMES_HOME || join(homedir(), '.hermes');
+const normalizedHermesRoot = basename(dirname(daemonHermesHome)) === 'profiles'
+  ? dirname(dirname(daemonHermesHome))
+  : daemonHermesHome;
+const canonicalProfilesRoot = join(normalizedHermesRoot, 'profiles');
 const evidenceMaxAgeMinutes = plan?.evidence_max_age_minutes;
 
 if (!Number.isInteger(evidenceMaxAgeMinutes) || evidenceMaxAgeMinutes < 1 || evidenceMaxAgeMinutes > 1440) {
   errors.push('evidence_max_age_minutes must be an integer from 1 to 1440');
 }
+
+const fleetBinding = plan?.fleet_snapshot;
+if (!fleetBinding || typeof fleetBinding !== 'object') {
+  errors.push('fleet_snapshot binding is required');
+} else {
+  if (!isAbsolute(fleetBinding.path ?? '') || resolve(fleetBinding.path ?? '') !== resolve(fleetPath)) {
+    errors.push('fleet_snapshot.path must be absolute and match --fleet-snapshot');
+  }
+  if (!shaPattern.test(fleetBinding.sha256 ?? '') || fleetBinding.sha256 !== sha256(fleetBytes)) {
+    errors.push('fleet_snapshot.sha256 does not match fleet snapshot bytes');
+  }
+  if (Number.isInteger(evidenceMaxAgeMinutes) && evidenceMaxAgeMinutes >= 1 && evidenceMaxAgeMinutes <= 1440) {
+    validateFreshTimestamp('fleet_snapshot.taken_at_utc', fleetBinding.taken_at_utc, evidenceMaxAgeMinutes, errors);
+  }
+  if (fleetBinding.taken_at_utc !== fleet?.taken_at_utc) errors.push('fleet snapshot taken_at_utc provenance mismatch');
+  if (fleetBinding.captured_from !== 'live-seat-configs' || fleet?.captured_from !== 'live-seat-configs') {
+    errors.push('fleet snapshot captured_from provenance mismatch');
+  }
+}
+if (fleet?.schema_version !== 1) errors.push('fleet snapshot schema_version must be 1');
+if (fleet?.org !== 'ygs-cortex-fleet') errors.push('fleet snapshot org must be ygs-cortex-fleet');
+if (!validIso(fleet?.taken_at_utc)) errors.push('fleet snapshot taken_at_utc must be an absolute UTC ISO timestamp');
+if (!canonicalAgentsRoot) errors.push('CTX_FRAMEWORK_ROOT must be an absolute path to verify live fleet configs');
+const fleetSeats = fleet?.seats && typeof fleet.seats === 'object' && !Array.isArray(fleet.seats) ? fleet.seats : {};
+const fleetNames = Object.keys(fleetSeats).sort();
+if (!sameSet(fleetNames, requiredSeats)) {
+  errors.push(`fleet snapshot must contain the authoritative six-seat roster: ${requiredSeats.join(',')}`);
+}
+const intendedHermesSeats = Array.isArray(fleet?.intended_hermes_seats) ? fleet.intended_hermes_seats : [];
+if (!sameSet(intendedHermesSeats, requiredHermesSeats)) {
+  errors.push(`fleet snapshot intended_hermes_seats must be exactly: ${requiredHermesSeats.join(',')}`);
+}
+for (const seat of requiredSeats) {
+  const route = fleetSeats[seat];
+  if (!route || !runtimes.has(route.runtime)) errors.push(`${seat}: fleet snapshot runtime is invalid or missing`);
+  if (!nonEmpty(route?.model) || !fixedModelPattern.test(route.model.trim()) || isMovingModelAlias(route.model)) {
+    errors.push(`${seat}: fleet snapshot requires a fixed model`);
+  }
+  if (!shaPattern.test(route?.config_sha256 ?? '')) errors.push(`${seat}: fleet snapshot config_sha256 required`);
+  const canonicalConfigPath = canonicalAgentsRoot ? join(canonicalAgentsRoot, seat, 'config.json') : '';
+  if (route?.config_path !== canonicalConfigPath) {
+    errors.push(`${seat}: fleet snapshot config_path must equal canonical live config path`);
+  }
+  if (canonicalConfigPath && existsSync(canonicalConfigPath)) {
+    const configBytes = readBytes(canonicalConfigPath);
+    const config = readJsonBytes(canonicalConfigPath, configBytes);
+    if (route.config_sha256 !== sha256(configBytes)) errors.push(`${seat}: fleet snapshot config hash does not match live bytes`);
+    if (route.runtime !== config.runtime || route.model !== config.model) {
+      errors.push(`${seat}: fleet snapshot runtime/model do not match live config bytes`);
+    }
+    if (route.runtime === 'hermes' && (
+      route.profile !== config.hermes_profile
+      || route.provider !== config.hermes_provider
+      || route.reasoning !== config.hermes_reasoning
+      || route.cron_ownership !== config.hermes_cron_ownership
+    )) {
+      errors.push(`${seat}: fleet snapshot Hermes pins do not match live config bytes`);
+    }
+  } else if (canonicalConfigPath) {
+    errors.push(`${seat}: canonical live config is missing`);
+  }
+}
+
+const spendBinding = plan?.spend_snapshot;
+if (!spendBinding || typeof spendBinding !== 'object') {
+  errors.push('spend_snapshot binding is required');
+} else {
+  if (!isAbsolute(spendBinding.path ?? '') || resolve(spendBinding.path ?? '') !== resolve(spendPath)) {
+    errors.push('spend_snapshot.path must be absolute and match --spend');
+  }
+  if (!shaPattern.test(spendBinding.sha256 ?? '') || spendBinding.sha256 !== sha256(spendBytes)) {
+    errors.push('spend_snapshot.sha256 does not match spend bytes');
+  }
+  if (spendBinding.generated_at_utc !== spend?.generated_at_utc) errors.push('spend snapshot generated_at_utc provenance mismatch');
+  if (spendBinding.currency !== 'USD' || spend?.currency !== 'USD') errors.push('spend currency must be USD');
+  if (spendBinding.total_expected_weekly_usd !== spend?.total_expected_weekly_usd) {
+    errors.push('spend total provenance mismatch');
+  }
+  if (Number.isInteger(evidenceMaxAgeMinutes) && evidenceMaxAgeMinutes >= 1 && evidenceMaxAgeMinutes <= 1440) {
+    validateFreshTimestamp('spend_snapshot.generated_at_utc', spendBinding.generated_at_utc, evidenceMaxAgeMinutes, errors);
+  }
+}
+if (spend?.schema_version !== 1) errors.push('spend schema_version must be 1');
+if (!nonEmpty(spend?.method)) errors.push('spend method is required');
+const spendSeats = spend?.seats && typeof spend.seats === 'object' && !Array.isArray(spend.seats) ? spend.seats : {};
+const spendNames = Object.keys(spendSeats).sort();
+if (!sameSet(spendNames, requiredSeats)) errors.push('spend estimate must contain every authoritative seat exactly once');
 
 if (plan?.live_changes !== 0) errors.push('live_changes must be exactly 0 before approval');
 if (plan?.trigger?.metric !== 'claude_weekly_remaining_percent') {
@@ -129,7 +235,7 @@ if (!binding || typeof binding !== 'object') {
     errors.push('restore_snapshot.taken_at_utc must be an absolute UTC ISO timestamp');
   }
   if (!nonEmpty(binding.reason)) errors.push('restore_snapshot.reason is required');
-  if (!nonEmpty(binding.captured_from)) errors.push('restore_snapshot.captured_from is required');
+  if (binding.captured_from !== 'live-seat-configs') errors.push('restore_snapshot.captured_from must be live-seat-configs');
 }
 if (restore?.schema_version !== 1) errors.push('restore.schema_version must be 1');
 if (Number.isInteger(evidenceMaxAgeMinutes) && evidenceMaxAgeMinutes >= 1 && evidenceMaxAgeMinutes <= 1440) {
@@ -138,7 +244,7 @@ if (Number.isInteger(evidenceMaxAgeMinutes) && evidenceMaxAgeMinutes >= 1 && evi
   errors.push('restore.taken_at_utc must be an absolute UTC ISO timestamp');
 }
 if (!nonEmpty(restore?.reason)) errors.push('restore.reason is required');
-if (!nonEmpty(restore?.captured_from)) errors.push('restore.captured_from is required');
+if (restore?.captured_from !== 'live-seat-configs') errors.push('restore.captured_from must be live-seat-configs');
 if (!validIso(restore?.restore_at_utc)) errors.push('restore.restore_at_utc must be an absolute UTC ISO timestamp');
 if (binding?.taken_at_utc !== restore?.taken_at_utc) errors.push('restore snapshot taken_at_utc provenance mismatch');
 if (binding?.reason !== restore?.reason) errors.push('restore snapshot reason provenance mismatch');
@@ -149,9 +255,10 @@ const planSeats = plan?.seats && typeof plan.seats === 'object' && !Array.isArra
 const restoreSeats = restore?.seats && typeof restore.seats === 'object' && !Array.isArray(restore.seats) ? restore.seats : {};
 const planNames = Object.keys(planSeats).sort();
 const restoreNames = Object.keys(restoreSeats).sort();
-if (planNames.length === 0) errors.push('plan.seats must not be empty');
-if (JSON.stringify(planNames) !== JSON.stringify(restoreNames)) {
-  errors.push(`seat sets differ: plan=[${planNames.join(',')}] restore=[${restoreNames.join(',')}]`);
+if (!sameSet(planNames, requiredSeats)) errors.push('plan.seats must contain the authoritative six-seat roster exactly');
+if (!sameSet(restoreNames, requiredSeats)) errors.push('restore.seats must contain the authoritative six-seat roster exactly');
+if (!sameSet(planNames, fleetNames) || !sameSet(restoreNames, fleetNames)) {
+  errors.push(`seat sets differ from fleet snapshot: fleet=[${fleetNames.join(',')}] plan=[${planNames.join(',')}] restore=[${restoreNames.join(',')}]`);
 }
 
 const hermesSeats = [];
@@ -194,6 +301,13 @@ for (const [seat, route] of Object.entries(planSeats)) {
   if (!nonEmpty(restoreRoute?.model) || !fixedModelPattern.test(restoreRoute.model.trim())) errors.push(`${seat}: valid restorable model required`);
   if (isMovingModelAlias(restoreRoute?.model)) errors.push(`${seat}: moving restorable model alias forbidden (${restoreRoute.model})`);
   if (!shaPattern.test(restoreRoute?.config_sha256 ?? '')) errors.push(`${seat}: restore config_sha256 required`);
+  const fleetRoute = fleetSeats[seat];
+  if (!fleetRoute
+    || restoreRoute?.runtime !== fleetRoute.runtime
+    || restoreRoute?.model !== fleetRoute.model
+    || restoreRoute?.config_sha256 !== fleetRoute.config_sha256) {
+    errors.push(`${seat}: restore route must match the byte-verified live fleet snapshot`);
+  }
   if (restoreRoute?.runtime === 'hermes') {
     if (!profilePattern.test(restoreRoute.profile ?? '') || restoreRoute.profile === 'default' || restoreRoute.profile === 'shared') {
       errors.push(`${seat}: valid isolated restorable Hermes profile required`);
@@ -210,10 +324,33 @@ for (const [seat, route] of Object.entries(planSeats)) {
       errors.push(`${seat}: valid restorable Hermes cron ownership required`);
     }
   }
+
+  const spendRoute = spendSeats[seat];
+  if (!spendRoute || spendRoute.runtime !== route.runtime || spendRoute.model !== route.model
+    || (spendRoute.provider ?? null) !== (route.provider ?? null)) {
+    errors.push(`${seat}: spend estimate route does not match plan`);
+  }
+  if (typeof spendRoute?.expected_weekly_usd !== 'number'
+    || !Number.isFinite(spendRoute.expected_weekly_usd)
+    || spendRoute.expected_weekly_usd < 0) {
+    errors.push(`${seat}: expected_weekly_usd must be a finite non-negative number`);
+  }
+}
+
+const spendTotal = requiredSeats.reduce((total, seat) => total + (
+  typeof spendSeats[seat]?.expected_weekly_usd === 'number' ? spendSeats[seat].expected_weekly_usd : 0
+), 0);
+if (typeof spend?.total_expected_weekly_usd !== 'number'
+  || !Number.isFinite(spend.total_expected_weekly_usd)
+  || Math.abs(spendTotal - spend.total_expected_weekly_usd) > 0.000001) {
+  errors.push('spend total_expected_weekly_usd must equal the per-seat sum');
 }
 
 const cutover = plan?.cutover;
-const expectedOrder = [...hermesSeats].sort();
+if (!sameSet(hermesSeats, requiredHermesSeats)) {
+  errors.push(`Hermes routes must be exactly: ${requiredHermesSeats.join(',')}`);
+}
+const expectedOrder = intendedHermesSeats;
 const validateOrder = (label, value) => {
   if (!Array.isArray(value) || value.length !== expectedOrder.length || new Set(value).size !== value.length
     || JSON.stringify([...value].sort()) !== JSON.stringify(expectedOrder)) {
@@ -239,6 +376,12 @@ if (!cutover || typeof cutover !== 'object') {
 
 const mcpEvidence = plan?.mcp_evidence && typeof plan.mcp_evidence === 'object' ? plan.mcp_evidence : {};
 const cronEvidence = plan?.cron_evidence && typeof plan.cron_evidence === 'object' ? plan.cron_evidence : {};
+const usedTranscriptPaths = new Set();
+const usedTranscriptHashes = new Set();
+const usedUsagePaths = new Set();
+const usedUsageHashes = new Set();
+const usedInvocations = new Set();
+const usedSessions = new Set();
 for (const seat of hermesSeats) {
   const route = planSeats[seat];
   const proofs = mcpEvidence[seat];
@@ -257,31 +400,71 @@ for (const seat of hermesSeats) {
     if (proof.connected !== true || !Number.isInteger(proof.tools_discovered) || proof.tools_discovered < 1) {
       errors.push(`${seat}/${server}: MCP connection and discovered tools required`);
     }
-    if (!nonEmpty(proof.tool_name) || !proof.tool_name.startsWith('mcp__')) errors.push(`${seat}/${server}: real MCP tool name required`);
+    const serverToken = server.replace(/[^a-zA-Z0-9_]/g, '_');
+    if (!nonEmpty(proof.tool_name) || !proof.tool_name.startsWith(`mcp__${serverToken}__`)) {
+      errors.push(`${seat}/${server}: MCP tool name must be bound to required server ${server}`);
+    }
     if (!nonEmpty(proof.result_marker)) errors.push(`${seat}/${server}: real MCP result marker required`);
+    if (!nonEmpty(proof.invocation_id) || !nonEmpty(proof.session_id)) {
+      errors.push(`${seat}/${server}: invocation_id and session_id are required`);
+    }
+    if (usedInvocations.has(proof.invocation_id)) errors.push(`${seat}/${server}: MCP invocation_id must be globally unique`);
+    usedInvocations.add(proof.invocation_id);
+    if (usedSessions.has(proof.session_id)) errors.push(`${seat}/${server}: MCP session_id must be globally unique`);
+    usedSessions.add(proof.session_id);
     if (!isAbsolute(proof.transcript_file ?? '') || !existsSync(proof.transcript_file ?? '')) {
       errors.push(`${seat}/${server}: readable absolute MCP transcript_file required`);
     } else {
       const transcriptBytes = readBytes(proof.transcript_file);
-      if (!shaPattern.test(proof.transcript_sha256 ?? '') || proof.transcript_sha256 !== sha256(transcriptBytes)) {
+      const transcriptHash = sha256(transcriptBytes);
+      if (!shaPattern.test(proof.transcript_sha256 ?? '') || proof.transcript_sha256 !== transcriptHash) {
         errors.push(`${seat}/${server}: MCP transcript hash mismatch`);
       }
-      const transcript = transcriptBytes.toString('utf8');
-      if (!nonEmpty(proof.tool_name) || !nonEmpty(proof.result_marker)
-        || !transcript.includes(proof.tool_name) || !transcript.includes(proof.result_marker)) {
-        errors.push(`${seat}/${server}: transcript does not contain the required tool and result effect`);
+      if (usedTranscriptPaths.has(resolve(proof.transcript_file)) || usedTranscriptHashes.has(transcriptHash)) {
+        errors.push(`${seat}/${server}: MCP transcript evidence cannot be reused across seat/server proofs`);
+      }
+      usedTranscriptPaths.add(resolve(proof.transcript_file));
+      usedTranscriptHashes.add(transcriptHash);
+      const transcript = readJsonBytes(proof.transcript_file, transcriptBytes);
+      if (transcript.schema_version !== 1
+        || transcript.seat !== seat
+        || transcript.profile !== route.profile
+        || transcript.server !== server
+        || transcript.invocation_id !== proof.invocation_id
+        || transcript.session_id !== proof.session_id
+        || transcript.tested_at_utc !== proof.tested_at_utc
+        || transcript.tool_name !== proof.tool_name
+        || transcript.result_marker !== proof.result_marker
+        || transcript.success !== true) {
+        errors.push(`${seat}/${server}: transcript bytes are not bound to the exact seat/profile/server/invocation/effect`);
       }
     }
     if (!isAbsolute(proof.usage_file ?? '') || !existsSync(proof.usage_file ?? '')) {
       errors.push(`${seat}/${server}: readable absolute usage_file required`);
     } else {
       const usageBytes = readBytes(proof.usage_file);
-      if (!shaPattern.test(proof.usage_sha256 ?? '') || proof.usage_sha256 !== sha256(usageBytes)) {
+      const usageHash = sha256(usageBytes);
+      if (!shaPattern.test(proof.usage_sha256 ?? '') || proof.usage_sha256 !== usageHash) {
         errors.push(`${seat}/${server}: usage file hash mismatch`);
       }
+      if (usedUsagePaths.has(resolve(proof.usage_file)) || usedUsageHashes.has(usageHash)) {
+        errors.push(`${seat}/${server}: MCP usage evidence cannot be reused across seat/server proofs`);
+      }
+      usedUsagePaths.add(resolve(proof.usage_file));
+      usedUsageHashes.add(usageHash);
       const usage = readJsonBytes(proof.usage_file, usageBytes);
-      if (usage.model !== route.model || usage.provider !== route.provider || usage.completed !== true || usage.failed !== false) {
-        errors.push(`${seat}/${server}: usage receipt does not prove the pinned successful route`);
+      if (usage.schema_version !== 1
+        || usage.seat !== seat
+        || usage.profile !== route.profile
+        || usage.server !== server
+        || usage.invocation_id !== proof.invocation_id
+        || usage.session_id !== proof.session_id
+        || usage.tested_at_utc !== proof.tested_at_utc
+        || usage.model !== route.model
+        || usage.provider !== route.provider
+        || usage.completed !== true
+        || usage.failed !== false) {
+        errors.push(`${seat}/${server}: usage receipt is not bound to the exact successful pinned invocation`);
       }
     }
   }
@@ -297,9 +480,12 @@ for (const seat of hermesSeats) {
       errors.push(`${seat}: native cron checked_at_utc must be an absolute UTC ISO timestamp`);
     }
     if (cron.enabled_native_jobs !== 0) errors.push(`${seat}: enabled native Hermes crons collide with cortextOS ownership`);
-    if (!isAbsolute(cron.jobs_path ?? '')) errors.push(`${seat}: native cron jobs_path must be absolute`);
-    else if (existsSync(cron.jobs_path)) {
-      const jobBytes = readBytes(cron.jobs_path);
+    const canonicalJobsPath = join(canonicalProfilesRoot, route.profile, 'cron', 'jobs.json');
+    if (cron.jobs_path !== canonicalJobsPath) {
+      errors.push(`${seat}: native cron jobs_path must equal canonical profile path ${canonicalJobsPath}`);
+    }
+    if (existsSync(canonicalJobsPath)) {
+      const jobBytes = readBytes(canonicalJobsPath);
       if (!shaPattern.test(cron.jobs_sha256 ?? '') || cron.jobs_sha256 !== sha256(jobBytes)) {
         errors.push(`${seat}: native cron jobs hash mismatch`);
       }
@@ -329,6 +515,8 @@ console.log(JSON.stringify({
   trigger_observed_at_utc: plan.trigger.observed_at_utc,
   restore_occurrence_utc: plan.restore.occurrence_utc,
   restore_snapshot_sha256: binding.sha256,
+  fleet_snapshot_sha256: fleetBinding.sha256,
+  total_expected_weekly_usd: spend.total_expected_weekly_usd,
   seats: planNames.length,
   hermes_profiles: profiles.size,
   mcp_receipts: hermesSeats.reduce((count, seat) => count + planSeats[seat].mcp_required.length, 0),

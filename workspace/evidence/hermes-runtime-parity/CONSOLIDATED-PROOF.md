@@ -138,4 +138,3 @@ All six agents are still reported running. No standing-seat mutation occurred.
 4. Apply one low-risk live canary seat and verify process/profile/model/inbox/cron/MCP effects.
 5. Only after the live canary passes, migrate other seats one at a time; coordinator last.
 6. Arm the Sunday 15:00 America/Chicago one-shot restore only with explicit approval and verified `next_fire_at`.
-
