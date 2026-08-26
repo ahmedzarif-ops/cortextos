@@ -24,6 +24,9 @@ const mockHermesDbExists = vi.fn().mockReturnValue(false);
 
 vi.mock('../../../src/pty/hermes-pty.js', () => ({
   HermesPTY: function HermesPTY() { return mockPty; },
+}));
+
+vi.mock('../../../src/utils/hermes-runtime.js', () => ({
   hermesDbExists: (...args: unknown[]) => mockHermesDbExists(...args),
 }));
 

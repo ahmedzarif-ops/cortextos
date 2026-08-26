@@ -17,6 +17,7 @@ import { resolveEnv } from '../utils/env.js';
 import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHistory } from '../telegram/logging.js';
 import { collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
 import { stripControlChars } from '../utils/validate.js';
+import { assertNoHermesNativeCronCollision } from '../utils/hermes-runtime.js';
 import { processMediaMessage } from '../telegram/media.js';
 import { stripBom } from '../utils/strip-bom.js';
 import { BuzzRelayClient, BuzzDispatcher, loadBuzzConfig, type NostrEvent } from '../buzz/index.js';
@@ -1869,6 +1870,22 @@ export class AgentManager {
   reloadCrons(agentName: string): boolean {
     const scheduler = this.cronSchedulers.get(agentName);
     if (scheduler) {
+      const entry = this.agents.get(agentName);
+      if (entry?.process['config']?.runtime === 'hermes'
+        && entry.process['config']?.hermes_cron_ownership === 'cortextos') {
+        try {
+          assertNoHermesNativeCronCollision(
+            entry.process['config']?.hermes_profile,
+            agentName,
+            process.env['HERMES_HOME'],
+          );
+        } catch (err) {
+          scheduler.stop();
+          this.cronSchedulers.delete(agentName);
+          console.error(`[daemon] Stopped external cron scheduler for Hermes agent "${agentName}": ${err}`);
+          return false;
+        }
+      }
       scheduler.reload();
       console.log(`[agent-manager] Cron scheduler reloaded for ${agentName}`);
       return true;
@@ -1923,8 +1940,27 @@ export class AgentManager {
       console.log(`[daemon] Skipping external cron scheduler for Hermes agent "${agentName}"`);
       return;
     }
+    if (entry.process['config']?.runtime === 'hermes') {
+      try {
+        assertNoHermesNativeCronCollision(
+          entry.process['config']?.hermes_profile,
+          agentName,
+          process.env['HERMES_HOME'],
+        );
+      } catch (err) {
+        console.error(`[daemon] Refusing external cron scheduler for Hermes agent "${agentName}": ${err}`);
+        return;
+      }
+    }
 
     const onFire = async (cron: CronDefinition): Promise<void> => {
+      if (entry.process['config']?.runtime === 'hermes') {
+        assertNoHermesNativeCronCollision(
+          entry.process['config']?.hermes_profile,
+          agentName,
+          process.env['HERMES_HOME'],
+        );
+      }
       // DELIBERATE EXCEPTION to the identity rule: this fires on a timer long
       // after any await and injects by NAME, so a cron fires into whichever
       // instance currently holds the name. That is the intended routing — a cron

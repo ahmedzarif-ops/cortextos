@@ -106,4 +106,17 @@ describe('add-agent --runtime hermes isolation contract', () => {
     ])).rejects.toThrow(/__TEST_PROCESS_EXIT_1__/);
     expect(existsSync(join(tempRoot, 'orgs', 'testorg', 'agents', 'hermes-alias'))).toBe(false);
   });
+
+  it('rejects a whitespace provider before creating files', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`__TEST_PROCESS_EXIT_${code}__`);
+    }) as never);
+
+    await expect(addAgentCommand.parseAsync([
+      'node', 'cli', 'hermes-provider', '--runtime', 'hermes', '--org', 'testorg',
+      '--model', 'deepseek/deepseek-v4-flash', '--provider', '   ',
+    ])).rejects.toThrow(/__TEST_PROCESS_EXIT_1__/);
+    expect(existsSync(join(tempRoot, 'orgs', 'testorg', 'agents', 'hermes-provider'))).toBe(false);
+  });
 });

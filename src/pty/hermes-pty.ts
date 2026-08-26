@@ -1,10 +1,17 @@
-import { existsSync, writeFileSync } from 'fs';
-import { basename, dirname, join } from 'path';
-import { homedir } from 'os';
+import { writeFileSync } from 'fs';
+import { join } from 'path';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { AgentPTY } from './agent-pty.js';
 import { KEYS } from './inject.js';
-import { resolveHermesProfile, stripControlChars } from '../utils/validate.js';
+import { stripControlChars } from '../utils/validate.js';
+import {
+  assertHermesProfileExists,
+  hermesDbExists,
+  hermesProfileHome,
+  resolveHermesLaunchPins,
+} from '../utils/hermes-runtime.js';
+
+export { assertHermesProfileExists, hermesDbExists, hermesProfileHome } from '../utils/hermes-runtime.js';
 
 // Hermes bootstrap signal: the prompt character that appears when Hermes is
 // ready for input. The full prompt is "⚔ ❯ " but we check for "❯" as a
@@ -62,18 +69,13 @@ export class HermesPTY extends AgentPTY {
    * temp file to avoid bracketed paste issues (see class-level comment).
    */
   protected buildClaudeArgs(mode: 'fresh' | 'continue', _prompt: string): string[] {
-    const profile = this.getProfile();
-    const args = ['--profile', profile];
-
-    if (this.config.model) {
-      args.push('--model', this.config.model);
-    }
-    if (this.config.hermes_provider) {
-      args.push('--provider', this.config.hermes_provider);
-    }
-    if (this.config.hermes_reasoning) {
-      args.push('--reasoning', this.config.hermes_reasoning);
-    }
+    const pins = this.getPins();
+    const args = [
+      '--profile', pins.profile,
+      '--model', pins.model,
+      '--provider', pins.provider,
+      '--reasoning', pins.reasoning,
+    ];
 
     // mode='continue' means shouldContinue() returned true — Hermes DB exists.
     // We pass --continue so Hermes resumes the last session.
@@ -90,9 +92,9 @@ export class HermesPTY extends AgentPTY {
    * the PTY cannot resolve different databases.
    */
   protected customizeEnv(env: Record<string, string>): void {
-    const profile = this.getProfile();
-    env['HERMES_HOME'] = hermesProfileHome(profile, process.env['HERMES_HOME']);
-    env['HERMES_PROFILE'] = profile;
+    const pins = this.getPins();
+    env['HERMES_HOME'] = hermesProfileHome(pins.profile, process.env['HERMES_HOME']);
+    env['HERMES_PROFILE'] = pins.profile;
   }
 
   /**
@@ -109,7 +111,7 @@ export class HermesPTY extends AgentPTY {
     // Hermes exits before argparse when --profile names a missing directory.
     // Fail once with an actionable error instead of launching a process that
     // immediately exits and looks like a runtime crash loop.
-    assertHermesProfileExists(this.getProfile(), process.env['HERMES_HOME']);
+    assertHermesProfileExists(this.getPins().profile, process.env['HERMES_HOME']);
     this.startupPrompt = prompt;
     // Write startup prompt to temp file BEFORE spawn so Hermes can read it
     this.writeStartupFile(prompt);
@@ -181,40 +183,10 @@ export class HermesPTY extends AgentPTY {
     this.write(`Read ${STARTUP_PROMPT_FILE} and follow the instructions there.\r`);
   }
 
-  private getProfile(): string {
-    return resolveHermesProfile(this.config.hermes_profile, this.agentName);
+  private getPins() {
+    return resolveHermesLaunchPins(this.config, this.agentName);
   }
 
-}
-
-/**
- * Return the isolated Hermes home for a named standing-agent profile.
- * Hermes itself sets HERMES_HOME to this directory after pre-parsing
- * `--profile`; resolving it here keeps daemon continuation checks aligned.
- */
-export function hermesProfileHome(profile: string | undefined, hermesRoot?: string, fallbackAgentName = ''): string {
-  const validProfile = resolveHermesProfile(profile, fallbackAgentName);
-  const candidateRoot = hermesRoot || join(homedir(), '.hermes');
-  const normalizedRoot = basename(dirname(candidateRoot)) === 'profiles'
-    ? dirname(dirname(candidateRoot))
-    : candidateRoot;
-  return join(normalizedRoot, 'profiles', validProfile);
-}
-
-/** Check whether the configured Hermes profile has a session database. */
-export function hermesDbExists(profile: string | undefined, hermesRoot?: string, fallbackAgentName = ''): boolean {
-  return existsSync(join(hermesProfileHome(profile, hermesRoot, fallbackAgentName), 'state.db'));
-}
-
-/** Fail before spawn when Hermes's hidden profile parser would exit immediately. */
-export function assertHermesProfileExists(profile: string, hermesRoot?: string): void {
-  const profileHome = hermesProfileHome(profile, hermesRoot);
-  if (!existsSync(profileHome)) {
-    throw new Error(
-      `Hermes profile "${profile}" does not exist at ${profileHome}. ` +
-      `Create it before starting this seat: hermes profile create ${profile} --clone --no-alias`,
-    );
-  }
 }
 
 function sleep(ms: number): Promise<void> {
