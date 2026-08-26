@@ -101,6 +101,11 @@ describe('checkUsageApi', () => {
     expect(result.five_hour_utilization).toBe(0.42);
     expect(result.seven_day_utilization).toBe(0.18);
     expect(result.cached).toBe(false);
+    expect(result).toMatchObject({
+      provider: 'anthropic',
+      endpoint: 'https://api.anthropic.com/api/oauth/usage',
+      authentication: 'oauth-bearer',
+    });
     expect(mockFetch).toHaveBeenCalledOnce();
   });
 
@@ -151,6 +156,33 @@ describe('checkUsageApi', () => {
     });
 
     await expect(checkUsageApi(tmpDir, { force: true })).rejects.toThrow('401');
+  });
+
+  it('fails closed when either utilization field is missing', async () => {
+    writeStore();
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ five_hour_utilization: 0.1 }),
+    });
+
+    await expect(checkUsageApi(tmpDir, { force: true }))
+      .rejects.toThrow('missing valid seven_day_utilization');
+  });
+
+  it('supports an authenticated fresh read without writing cache or account state', async () => {
+    writeStore();
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ five_hour_utilization: 0.4, seven_day_utilization: 0.91 }),
+    });
+
+    const result = await checkUsageApi(tmpDir, { force: true, noStore: true });
+    expect(result.cached).toBe(false);
+    expect(result.authentication).toBe('oauth-bearer');
+    expect(existsSync(join(tmpDir, 'state', 'usage', 'cache.json'))).toBe(false);
+    const stored = JSON.parse(readFileSync(join(tmpDir, 'state', 'oauth', 'accounts.json'), 'utf8'));
+    expect(stored.accounts.primary.five_hour_utilization).toBe(0.3);
+    expect(stored.accounts.primary.seven_day_utilization).toBe(0.2);
   });
 
   it('uses Bearer token from active account', async () => {

@@ -2532,11 +2532,16 @@ busCommand
   .description('Fetch Claude OAuth utilization from Anthropic usage API (3-min TTL cache)')
   .option('--account <name>', 'Check specific account (default: active account)')
   .option('--force', 'Bypass cache and fetch fresh data')
+  .option('--no-store', 'Do not write usage cache or account state')
   .option('--json', 'Output as JSON')
-  .action(async (opts: { account?: string; force?: boolean; json?: boolean }) => {
+  .action(async (opts: { account?: string; force?: boolean; noStore?: boolean; json?: boolean }) => {
     const env = resolveEnv();
     try {
-      const result = await checkUsageApi(env.ctxRoot, { force: opts.force, account: opts.account });
+      const result = await checkUsageApi(env.ctxRoot, {
+        force: opts.force,
+        account: opts.account,
+        noStore: opts.noStore,
+      });
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));
       } else {
