@@ -9,6 +9,7 @@ import {
   getTaskDir,
   getApprovalDir,
   getAgentDir,
+  getOrgs,
 } from '@/lib/config';
 import { getHeartbeat } from '@/lib/data/heartbeats';
 
@@ -37,7 +38,16 @@ export const dynamic = 'force-dynamic';
  *      stopped agent from an unmeasured one, so the whole field goes unknown.
  */
 
-const ORG_DEFAULT = process.env.CTX_ORG || 'REDACTED-ORG';
+/* Resolve the org from the environment, then from what is actually installed.
+   It previously fell back to a hardcoded org name, which was wrong twice over:
+   it published one deployment's private org name into a shipped file, and it
+   made every OTHER install silently query an org that does not exist there —
+   returning empty roster/tasks/events that are indistinguishable from a quiet
+   fleet. Absent is renderable as unknown; a wrong-org empty is renderable as a
+   lie, which is the same failure this whole endpoint is built to avoid. */
+function resolveOrg(): string | null {
+  return process.env.CTX_ORG || getOrgs()[0] || null;
+}
 const INSTANCE = process.env.CTX_INSTANCE_ID || 'default';
 
 /* Heartbeat is written by a cron plus incidental session activity, so its
@@ -379,7 +389,14 @@ function activity(evs: ReturnType<typeof events>) {
 
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
-  const org = searchParams.get('org') || ORG_DEFAULT;
+  const org = searchParams.get('org') || resolveOrg();
+  if (!org) {
+    console.error('[api/city-state] No org: CTX_ORG unset and no orgs installed');
+    return Response.json(
+      { error: 'No organization configured — set CTX_ORG or install an org' },
+      { status: 503 }
+    );
+  }
   const limit = Math.min(Math.max(parseInt(searchParams.get('limit') ?? '60', 10) || 60, 1), 500);
   const windowHours = Math.min(
     Math.max(parseInt(searchParams.get('window') ?? '24', 10) || 24, 1),
