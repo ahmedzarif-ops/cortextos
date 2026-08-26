@@ -19,17 +19,18 @@ Use this workflow only for a standing cortextOS fleet. It is dry-run-first and f
 
 ## 1. Validate the plan without changing state
 
-Copy `references/ygs-routes.example.json` to a new evidence path and replace every `REPLACE` value. Capture separate byte-bound fleet, restore, and spend snapshots. The validator requires the authoritative six-seat YGS roster, a fresh trigger receipt, per-seat and total weekly spend, per-seat MCP transcript and usage receipts, a canonical native-cron scan, and an explicit city-first/chief-last order. The example itself is deliberately not executable until those receipts are supplied.
+Copy `references/ygs-routes.example.json` to a new evidence path and replace every `REPLACE` value. Capture separate byte-bound fleet, restore, spend, and trigger receipts. The validator requires the authoritative six-seat YGS roster, a fresh trigger receipt whose bytes independently bind the metric, denominator, value, time, and source, per-seat and total weekly spend, per-seat MCP transcript and usage receipts, a canonical native-cron scan, and an explicit city-first/chief-last order. The example itself is deliberately not executable until those receipts are supplied.
 
 ```bash
 node scripts/validate-plan.mjs \
   --plan references/ygs-routes.example.json \
   --restore /absolute/path/to/RESTORE-STATE.json \
   --fleet-snapshot /absolute/path/to/FLEET-SNAPSHOT.json \
-  --spend /absolute/path/to/SPEND-ESTIMATE.json
+  --spend /absolute/path/to/SPEND-ESTIMATE.json \
+  --trigger-receipt /absolute/path/to/TRIGGER-RECEIPT.json
 ```
 
-The validator performs no writes and prints no credentials. It hashes every referenced fleet/restore/spend/MCP artifact and rejects stale evidence; any roster other than the authoritative six YGS seats; a past/non-next Sunday restore; null or moving models (including whitespace-padded aliases); invalid restore runtimes; any Hermes restore pin that differs from byte-verified live config; whitespace-padded model/provider pins; missing or inconsistent spend; reused or cross-profile MCP evidence; a tool from the wrong required server; enabled native crons at the canonical profile path; incomplete ordering; or a snapshot-path/hash mismatch. `evidence_max_age_minutes` is mandatory and capped at 24 hours. Any error blocks the switch.
+The validator performs no writes and prints no credentials. It hashes every referenced fleet/restore/spend/trigger/MCP artifact and rejects stale evidence; any plan trigger whose metric, denominator, value, time, or source differs from the separate receipt bytes; any roster other than the authoritative six YGS seats; a past/non-next Sunday restore; null or moving models (including whitespace-padded aliases); invalid restore runtimes; any Hermes restore pin that differs from byte-verified live config; whitespace-padded model/provider/MCP-server pins or normalized MCP duplicates; missing or inconsistent spend; reused or cross-profile MCP evidence; a tool from the wrong required server; enabled native crons at the canonical profile path; incomplete ordering; or a snapshot-path/hash mismatch. `evidence_max_age_minutes` is mandatory and capped at 24 hours. Any error blocks the switch.
 
 ## 2. Re-read live state immediately before preflight
 
