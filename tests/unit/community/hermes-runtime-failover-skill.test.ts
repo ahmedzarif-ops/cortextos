@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
@@ -32,6 +32,8 @@ describe('hermes-runtime-failover plan validator', () => {
   let hermesRoot: string;
   let frameworkRoot: string;
   let usageCliPath: string;
+  let usageResponsePath: string;
+  let fetchBootstrapPath: string;
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'hermes-failover-skill-'));
@@ -45,22 +47,27 @@ describe('hermes-runtime-failover plan validator', () => {
     frameworkRoot = join(tempDir, 'framework-root');
     usageCliPath = join(frameworkRoot, 'dist', 'cli.js');
     mkdirSync(join(frameworkRoot, 'dist'), { recursive: true });
-    writeFileSync(usageCliPath, `
-const expected = ['bus', 'check-usage-api', '--json', '--force', '--no-store'];
-if (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(expected)) {
-  console.error('unexpected usage CLI arguments');
-  process.exit(2);
-}
-console.log(JSON.stringify({
-  account: 'test-primary',
-  five_hour_utilization: 0.5,
-  seven_day_utilization: 0.91,
-  cached: false,
-  fetched_at: new Date().toISOString(),
-  provider: 'anthropic',
-  endpoint: 'https://api.anthropic.com/api/oauth/usage',
-  authentication: 'oauth-bearer',
-}));
+    usageResponsePath = join(tempDir, 'usage-api-response.json');
+    writeFileSync(usageResponsePath, JSON.stringify({
+      ok: true,
+      status: 200,
+      body: {
+        five_hour: { utilization: 0.5 },
+        seven_day: { utilization: 0.91 },
+      },
+    }));
+    fetchBootstrapPath = join(tempDir, 'usage-fetch-bootstrap.mjs');
+    writeFileSync(fetchBootstrapPath, `
+import { readFileSync } from 'node:fs';
+globalThis.fetch = async () => {
+  const fixture = JSON.parse(readFileSync(process.env.HERMES_TEST_USAGE_RESPONSE, 'utf8'));
+  return {
+    ok: fixture.ok,
+    status: fixture.status,
+    json: async () => fixture.body,
+    text: async () => fixture.text ?? '',
+  };
+};
 `);
 
     const triggerReceipt = {
@@ -237,13 +244,22 @@ console.log(JSON.stringify({
 
   afterEach(() => rmSync(tempDir, { recursive: true, force: true }));
 
-  const run = (candidatePlan = planPath) => spawnSync(process.execPath, [
+  const run = (candidatePlan = planPath, envOverrides: Record<string, string> = {}) => spawnSync(process.execPath, [
     validator, '--plan', candidatePlan, '--restore', restorePath,
     '--fleet-snapshot', fleetPath, '--spend', spendPath,
     '--trigger-receipt', triggerPath,
   ], {
     encoding: 'utf8',
-    env: { ...process.env, HERMES_HOME: hermesRoot, CTX_FRAMEWORK_ROOT: frameworkRoot },
+    env: {
+      ...process.env,
+      HERMES_HOME: hermesRoot,
+      CTX_ROOT: tempDir,
+      CTX_FRAMEWORK_ROOT: frameworkRoot,
+      CLAUDE_CODE_OAUTH_TOKEN: 'test-oauth-token',
+      HERMES_TEST_USAGE_RESPONSE: usageResponsePath,
+      NODE_OPTIONS: `--import=${fetchBootstrapPath}`,
+      ...envOverrides,
+    },
   });
 
   it('accepts a fully bound route, restore snapshot, MCP proof, cron scan, and ordered canary', () => {
@@ -715,85 +731,81 @@ console.log(JSON.stringify({
     expect(errors).toContain('trigger receipt observed_value does not match authenticated usage measurement');
   });
 
-  it('fails closed when the canonical authenticated usage read returns 401', () => {
+  it('rejects a caller-selected usage CLI that jointly forges the authenticated measurement and trigger evidence', () => {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    const forgedAt = new Date().toISOString();
+    const executedMarker = join(tempDir, 'caller-selected-cli-executed');
+    const receipt = {
+      schema_version: 1,
+      metric: 'claude_weekly_remaining_percent',
+      denominator: 'percent_remaining',
+      observed_value: 0,
+      observed_at_utc: forgedAt,
+      source: 'cortextos-check-usage-api:anthropic-oauth',
+    };
+    const receiptBytes = JSON.stringify(receipt, null, 2) + '\n';
+    writeFileSync(triggerPath, receiptBytes);
+    plan.trigger = {
+      ...plan.trigger,
+      metric: receipt.metric,
+      denominator: receipt.denominator,
+      observed_value: receipt.observed_value,
+      observed_at_utc: receipt.observed_at_utc,
+      source: receipt.source,
+    };
+    plan.trigger_receipt.sha256 = hash(receiptBytes);
     writeFileSync(usageCliPath, `
-console.error('Error: Usage API returned 401: OAuth access token expired');
-process.exit(1);
+require('node:fs').writeFileSync(${JSON.stringify(executedMarker)}, 'executed');
+const expected = ['bus', 'check-usage-api', '--json', '--force', '--no-store'];
+if (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(expected)) process.exit(2);
+console.log(JSON.stringify({
+  account: 'forged-primary',
+  five_hour_utilization: 0.5,
+  seven_day_utilization: 1,
+  cached: false,
+  fetched_at: '${forgedAt}',
+  provider: 'anthropic',
+  endpoint: 'https://api.anthropic.com/api/oauth/usage',
+  authentication: 'oauth-bearer',
+}));
 `);
+    const invalidPath = join(tempDir, 'substituted-cli-forged-chain.json');
+    writeFileSync(invalidPath, JSON.stringify(plan));
 
-    const result = run();
+    const result = run(invalidPath);
     expect(result.status).toBe(1);
+    expect(existsSync(executedMarker)).toBe(false);
     expect(JSON.parse(result.stderr).errors.join('\n'))
-      .toContain('authenticated usage measurement unavailable (RC 1)');
+      .toContain('trigger.observed_value does not match authenticated usage measurement');
   });
 
-  it('fails closed when the canonical usage measurement path is missing', () => {
-    rmSync(usageCliPath);
+  it('fails closed when the canonical authenticated usage read returns 401', () => {
+    writeFileSync(usageResponsePath, JSON.stringify({ ok: false, status: 401, text: 'Unauthorized' }));
 
     const result = run();
     expect(result.status).toBe(1);
     expect(JSON.parse(result.stderr).errors.join('\n'))
-      .toContain('authenticated usage measurement unavailable: canonical cortextOS CLI is missing');
+      .toContain('authenticated usage measurement unavailable: Usage API returned 401');
+  });
+
+  it('fails closed when no OAuth token is available to the reviewed usage reader', () => {
+    const result = run(planPath, { CLAUDE_CODE_OAUTH_TOKEN: '' });
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr).errors.join('\n'))
+      .toContain('authenticated usage measurement unavailable: No OAuth token available');
   });
 
   it('fails closed when authenticated usage omits a utilization field', () => {
-    writeFileSync(usageCliPath, `
-console.log(JSON.stringify({
-  account: 'test-primary', five_hour_utilization: 0.5, cached: false,
-  fetched_at: new Date().toISOString(), provider: 'anthropic',
-  endpoint: 'https://api.anthropic.com/api/oauth/usage', authentication: 'oauth-bearer',
-}));
-`);
+    writeFileSync(usageResponsePath, JSON.stringify({
+      ok: true,
+      status: 200,
+      body: { five_hour: { utilization: 0.5 } },
+    }));
 
     const result = run();
     expect(result.status).toBe(1);
     expect(JSON.parse(result.stderr).errors.join('\n'))
-      .toContain('authenticated usage measurement is missing valid utilization fields');
-  });
-
-  it('fails closed when the authenticated usage measurement is stale', () => {
-    writeFileSync(usageCliPath, `
-console.log(JSON.stringify({
-  account: 'test-primary', five_hour_utilization: 0.5, seven_day_utilization: 0.91,
-  cached: false, fetched_at: '2020-01-01T00:00:00Z', provider: 'anthropic',
-  endpoint: 'https://api.anthropic.com/api/oauth/usage', authentication: 'oauth-bearer',
-}));
-`);
-
-    const result = run();
-    expect(result.status).toBe(1);
-    expect(JSON.parse(result.stderr).errors.join('\n'))
-      .toContain('authenticated usage measurement fetched_at is stale or future-dated');
-  });
-
-  it('fails closed when the usage measurement is unauthenticated', () => {
-    writeFileSync(usageCliPath, `
-console.log(JSON.stringify({
-  account: 'test-primary', five_hour_utilization: 0.5, seven_day_utilization: 0.91,
-  cached: false, fetched_at: new Date().toISOString(), provider: 'anthropic',
-  endpoint: 'https://api.anthropic.com/api/oauth/usage', authentication: 'none',
-}));
-`);
-
-    const result = run();
-    expect(result.status).toBe(1);
-    expect(JSON.parse(result.stderr).errors.join('\n'))
-      .toContain('usage measurement is unauthenticated, cached, or from an unexpected origin');
-  });
-
-  it('fails closed when the usage measurement is cached instead of freshly authenticated', () => {
-    writeFileSync(usageCliPath, `
-console.log(JSON.stringify({
-  account: 'test-primary', five_hour_utilization: 0.5, seven_day_utilization: 0.91,
-  cached: true, fetched_at: new Date().toISOString(), provider: 'anthropic',
-  endpoint: 'https://api.anthropic.com/api/oauth/usage', authentication: 'oauth-bearer',
-}));
-`);
-
-    const result = run();
-    expect(result.status).toBe(1);
-    expect(JSON.parse(result.stderr).errors.join('\n'))
-      .toContain('usage measurement is unauthenticated, cached, or from an unexpected origin');
+      .toContain('authenticated usage measurement unavailable: Usage API response missing valid seven_day_utilization');
   });
 
   it('rejects a decoy cron receipt when the canonical profile jobs file is active', () => {
