@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { readAuthenticatedUsage, usageApiEndpoint } from './read-authenticated-usage.mjs';
 
 const args = process.argv.slice(2);
 const valueFor = (flag) => {
@@ -48,7 +48,6 @@ const fixedModelPattern = /^[a-zA-Z0-9._-]+(?:\/[a-zA-Z0-9._-]+)*$/;
 const profilePattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const providerPattern = /^[a-zA-Z0-9._-]+$/;
 const mcpNamePattern = /^[a-zA-Z0-9._-]+$/;
-const usageApiEndpoint = 'https://api.anthropic.com/api/oauth/usage';
 const canonicalTriggerSource = 'cortextos-check-usage-api:anthropic-oauth';
 const reasoningLevels = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 const runtimes = new Set(['claude-code', 'hermes', 'codex-app-server', 'opencode']);
@@ -94,34 +93,16 @@ const normalizedHermesRoot = basename(dirname(daemonHermesHome)) === 'profiles'
 const canonicalProfilesRoot = join(normalizedHermesRoot, 'profiles');
 const evidenceMaxAgeMinutes = plan?.evidence_max_age_minutes;
 
-const readCanonicalUsage = () => {
-  if (!nonEmpty(frameworkRoot) || !isAbsolute(frameworkRoot)) return null;
-  const cliPath = join(resolve(frameworkRoot), 'dist', 'cli.js');
-  if (!existsSync(cliPath)) {
-    errors.push('authenticated usage measurement unavailable: canonical cortextOS CLI is missing');
-    return null;
-  }
-  const result = spawnSync(process.execPath, [
-    cliPath, 'bus', 'check-usage-api', '--json', '--force', '--no-store',
-  ], {
-    encoding: 'utf8',
-    env: process.env,
-    timeout: 30_000,
-    maxBuffer: 1024 * 1024,
-  });
-  if (result.error || result.status !== 0) {
-    errors.push(`authenticated usage measurement unavailable (RC ${result.status ?? 'none'})`);
-    return null;
-  }
+const readCanonicalUsage = async () => {
   try {
-    return JSON.parse(result.stdout);
-  } catch {
-    errors.push('authenticated usage measurement returned invalid JSON');
+    return await readAuthenticatedUsage(process.env.CTX_ROOT);
+  } catch (error) {
+    errors.push(`authenticated usage measurement unavailable: ${error.message}`);
     return null;
   }
 };
 
-const canonicalUsage = readCanonicalUsage();
+const canonicalUsage = await readCanonicalUsage();
 
 if (!Number.isInteger(evidenceMaxAgeMinutes) || evidenceMaxAgeMinutes < 1 || evidenceMaxAgeMinutes > 1440) {
   errors.push('evidence_max_age_minutes must be an integer from 1 to 1440');
