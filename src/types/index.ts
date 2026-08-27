@@ -164,6 +164,8 @@ export interface AgentConfig {
    */
   crash_window?: { seconds: number; max_crashes?: number };
   model?: string;
+  /** Codex app-server reasoning effort applied to resumed threads and every turn. */
+  reasoning_effort?: string;
   /**
    * Whether to launch Claude Code with `--dangerously-skip-permissions`.
    * Defaults to true (back-compat: agents run unattended). Set to false to keep
@@ -836,7 +838,14 @@ export interface AgentStatus {
   lastHeartbeat?: string;
   sessionStart?: string;
   crashCount?: number;
+  /** Executing model when the runtime exposes it; otherwise the configured model. */
   model?: string;
+  /** Requested model when it differs conceptually from the runtime observation. */
+  configuredModel?: string;
+  /** False when a runtime supports actual-model reporting but has not produced a reading yet. */
+  modelObserved?: boolean;
+  /** True only when both configured and observed models are known and disagree. */
+  modelMismatch?: boolean;
   awaitingConfirmation?: boolean; // first-run observability fix: PTY parked on an
   // interactive first-run prompt past the auto-accept backstop (wedged, not bootstrapped)
   dormant?: boolean; // silent-dormancy fix: enabled agent whose heartbeat is stale

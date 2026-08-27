@@ -970,6 +970,111 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
 });
 
 describe('CodexAppServerPTY thread lifecycle', () => {
+  it('applies config.reasoning_effort to the resumed thread and every turn', async () => {
+    fsMocks.existsSync.mockReturnValue(true);
+    fsMocks.readFileSync.mockReturnValue(JSON.stringify({
+      threadId: 'ultra-thread',
+      cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
+      updatedAt: '2026-08-27T00:00:00Z',
+    }));
+    requestMock.mockResolvedValue({ result: { thread: { id: 'ultra-thread' } } });
+    const pty = new CodexAppServerPTY(mockEnv, { reasoning_effort: 'ultra' });
+    (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
+
+    await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('continue');
+
+    expect(requestMock).toHaveBeenCalledWith('thread/settings/update', {
+      threadId: 'ultra-thread',
+      effort: 'ultra',
+    });
+
+    (pty as unknown as { _alive: boolean })._alive = true;
+    const pending = (pty as unknown as { startTurn(input: unknown[]): Promise<void> })
+      .startTurn([{ type: 'text', text: 'probe', text_elements: [] }]);
+    await Promise.resolve();
+    expect(requestMock).toHaveBeenCalledWith('turn/start', expect.objectContaining({
+      threadId: 'ultra-thread',
+      effort: 'ultra',
+    }));
+    (pty as unknown as { handleRpcMessage(message: unknown): void }).handleRpcMessage({
+      method: 'turn/completed',
+      params: {},
+    });
+    await pending;
+  });
+
+  it('reasserts config.model on every turn start', async () => {
+    requestMock.mockResolvedValue({ result: {} });
+    const pty = new CodexAppServerPTY(mockEnv, { model: 'gpt-5.6-sol' });
+    (pty as unknown as { _alive: boolean })._alive = true;
+    (pty as unknown as { _threadId: string })._threadId = 'turn-model-thread';
+    (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
+
+    const pending = (pty as unknown as { startTurn(input: unknown[]): Promise<void> })
+      .startTurn([{ type: 'text', text: 'probe', text_elements: [] }]);
+    await Promise.resolve();
+
+    expect(requestMock).toHaveBeenCalledWith('turn/start', {
+      threadId: 'turn-model-thread',
+      input: [{ type: 'text', text: 'probe', text_elements: [] }],
+      model: 'gpt-5.6-sol',
+      approvalPolicy: 'never',
+      sandboxPolicy: { type: 'dangerFullAccess' },
+    });
+
+    (pty as unknown as { handleRpcMessage(message: unknown): void }).handleRpcMessage({
+      method: 'turn/completed',
+      params: {},
+    });
+    await pending;
+  });
+
+  it('applies config.model to fresh threads and records the model reported by app-server', async () => {
+    requestMock.mockResolvedValue({
+      result: {
+        thread: { id: 'model-thread' },
+        model: 'gpt-5.6-sol',
+        modelProvider: 'openai',
+      },
+    });
+    const pty = new CodexAppServerPTY(mockEnv, { model: 'gpt-5.6-sol' });
+    (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
+
+    await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('fresh');
+
+    expect(requestMock).toHaveBeenCalledWith('thread/start', expect.objectContaining({
+      model: 'gpt-5.6-sol',
+    }));
+    expect(pty.getActualModel()).toBe('gpt-5.6-sol');
+    expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('codex-app-server-thread.json'),
+      expect.stringContaining('"actualModel": "gpt-5.6-sol"'),
+      'utf-8',
+    );
+  });
+
+  it('applies config.model when resuming a persisted thread', async () => {
+    fsMocks.existsSync.mockReturnValue(true);
+    fsMocks.readFileSync.mockReturnValue(JSON.stringify({
+      threadId: 'persisted-model-thread',
+      cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
+      updatedAt: '2026-05-07T00:00:00Z',
+    }));
+    requestMock.mockResolvedValue({
+      result: { thread: { id: 'persisted-model-thread' }, model: 'gpt-5.6-sol' },
+    });
+    const pty = new CodexAppServerPTY(mockEnv, { model: 'gpt-5.6-sol' });
+    (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
+
+    await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('continue');
+
+    expect(requestMock).toHaveBeenCalledWith('thread/resume', expect.objectContaining({
+      threadId: 'persisted-model-thread',
+      model: 'gpt-5.6-sol',
+    }));
+    expect(pty.getActualModel()).toBe('gpt-5.6-sol');
+  });
+
   it('starts a new thread in fresh mode', async () => {
     requestMock.mockResolvedValue({ result: { thread: { id: 'fresh-thread' } } });
     const pty = new CodexAppServerPTY(mockEnv, {});
@@ -1302,6 +1407,7 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
   it('appends a JSONL line to <ctxRoot>/logs/<agent>/codex-tokens.jsonl on tokenUsage', () => {
     const pty = new CodexAppServerPTY(mockEnv, { model: 'gpt-5-codex' });
     (pty as unknown as { _threadId: string })._threadId = 'thread-9';
+    (pty as unknown as { _actualModel: string })._actualModel = 'gpt-5.6-sol';
     feedTokenUsage(pty, {
       last: { cachedInputTokens: 0, inputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
       total: { cachedInputTokens: 1234, inputTokens: 5000, outputTokens: 800, reasoningOutputTokens: 0, totalTokens: 7034 },
@@ -1314,7 +1420,8 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
     expect(line.endsWith('\n')).toBe(true);
 
     const entry = lastAppendedEntry()!;
-    expect(entry.model).toBe('gpt-5-codex');
+    expect(entry.model).toBe('gpt-5.6-sol');
+    expect(entry.configured_model).toBe('gpt-5-codex');
     expect(entry.input_tokens).toBe(5000);
     expect(entry.output_tokens).toBe(800);
     expect(entry.cache_read_tokens).toBe(1234);
@@ -1324,7 +1431,7 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
     expect(typeof entry.timestamp).toBe('string');
   });
 
-  it('defaults model to gpt-5-codex when config.model is unset', () => {
+  it('reports unknown rather than echoing config when app-server has not exposed the actual model', () => {
     const pty = new CodexAppServerPTY(mockEnv, {});
     (pty as unknown as { _threadId: string })._threadId = 'thread-9';
     feedTokenUsage(pty, {
@@ -1334,12 +1441,20 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
     });
 
     const entry = lastAppendedEntry()!;
-    expect(entry.model).toBe('gpt-5-codex');
+    expect(entry.model).toBe('unknown');
+    expect(entry.configured_model).toBeNull();
   });
 
-  it('preserves config.model override when set', () => {
+  it('updates the observed model from thread/settings/updated', () => {
     const pty = new CodexAppServerPTY(mockEnv, { model: 'gpt-5-codex-preview' });
     (pty as unknown as { _threadId: string })._threadId = 'thread-9';
+    (pty as unknown as { handleRpcMessage(message: unknown): void }).handleRpcMessage({
+      method: 'thread/settings/updated',
+      params: {
+        threadId: 'thread-9',
+        threadSettings: { model: 'gpt-5.6-sol', modelProvider: 'openai' },
+      },
+    });
     feedTokenUsage(pty, {
       last: { cachedInputTokens: 0, inputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
       total: { cachedInputTokens: 0, inputTokens: 100, outputTokens: 50, reasoningOutputTokens: 0, totalTokens: 150 },
@@ -1347,7 +1462,36 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
     });
 
     const entry = lastAppendedEntry()!;
-    expect(entry.model).toBe('gpt-5-codex-preview');
+    expect(entry.model).toBe('gpt-5.6-sol');
+    expect(entry.configured_model).toBe('gpt-5-codex-preview');
+    expect(entry.model_provider).toBe('openai');
+    expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('codex-app-server-thread.json'),
+      expect.stringContaining('"actualModel": "gpt-5.6-sol"'),
+      'utf-8',
+    );
+  });
+
+  it('records and persists the destination model from model/rerouted', () => {
+    const pty = new CodexAppServerPTY(mockEnv, { model: 'gpt-5.6-sol' });
+    (pty as unknown as { _threadId: string })._threadId = 'thread-9';
+    (pty as unknown as { handleRpcMessage(message: unknown): void }).handleRpcMessage({
+      method: 'model/rerouted',
+      params: {
+        threadId: 'thread-9',
+        turnId: 'turn-1',
+        fromModel: 'gpt-5.6-sol',
+        toModel: 'gpt-5.6-terra',
+        reason: 'highRiskCyberActivity',
+      },
+    });
+
+    expect(pty.getActualModel()).toBe('gpt-5.6-terra');
+    expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('codex-app-server-thread.json'),
+      expect.stringContaining('"actualModel": "gpt-5.6-terra"'),
+      'utf-8',
+    );
   });
 
   it('skips append when turnId is missing', () => {

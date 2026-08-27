@@ -104,7 +104,11 @@ export function displayStatuses(statuses: AgentStatus[]): void {
     const status = label.padEnd(12);
     const pid = (s.pid?.toString() || '-').padEnd(10);
     const uptime = s.uptime ? formatUptime(s.uptime).padEnd(12) : '-'.padEnd(12);
-    const model = s.model || 'default';
+    const model = s.modelObserved === false
+      ? `${s.configuredModel || 'default'} -> unknown ?`
+      : s.modelMismatch
+        ? `${s.configuredModel || 'default'} -> ${s.model || 'unknown'} !`
+        : (s.model || 'default');
     console.log(`  ${name}${status}${pid}${uptime}${model}`);
   }
 

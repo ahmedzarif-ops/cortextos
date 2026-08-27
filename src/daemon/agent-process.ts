@@ -458,6 +458,16 @@ export class AgentProcess {
    * Get current agent status.
    */
   getStatus(): AgentStatus {
+    const pty = this.pty;
+    const observesActualModel = (
+      pty
+      && 'getActualModel' in pty
+      && typeof pty.getActualModel === 'function'
+    );
+    const actualModel = observesActualModel
+      ? pty.getActualModel()
+      : undefined;
+    const configuredModel = this.config.model;
     return {
       name: this.name,
       status: this.status,
@@ -467,7 +477,11 @@ export class AgentProcess {
         : undefined,
       sessionStart: this.sessionStart?.toISOString(),
       crashCount: this.crashCount,
-      model: this.config.model,
+      model: observesActualModel ? actualModel : configuredModel,
+      ...(observesActualModel ? { configuredModel, modelObserved: actualModel !== undefined } : {}),
+      ...(actualModel !== undefined && configuredModel !== undefined
+        ? { modelMismatch: actualModel !== configuredModel }
+        : {}),
       awaitingConfirmation:
         this.pty && 'isAwaitingInteractiveConfirmation' in this.pty
           ? this.pty.isAwaitingInteractiveConfirmation()

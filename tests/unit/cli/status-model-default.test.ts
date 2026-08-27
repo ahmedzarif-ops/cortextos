@@ -39,4 +39,28 @@ describe('cortextos status: Model column', () => {
     expect(output).toContain('claude-opus-4-8');
     expect(output).not.toContain('default');
   });
+
+  it('renders configured and actual models when they disagree', () => {
+    const output = captureOutput([{
+      name: 'alice',
+      status: 'running',
+      pid: 123,
+      uptime: 42,
+      model: 'gpt-5.6-sol',
+      configuredModel: 'gpt-5-codex',
+      modelMismatch: true,
+    }]);
+    expect(output).toContain('gpt-5-codex -> gpt-5.6-sol !');
+  });
+
+  it('renders an explicit unknown marker when the runtime has not reported a model', () => {
+    const output = captureOutput([{
+      name: 'alice',
+      status: 'starting',
+      configuredModel: 'gpt-5-codex',
+      modelObserved: false,
+    }]);
+    expect(output).toContain('gpt-5-codex -> unknown ?');
+    expect(output).not.toMatch(/gpt-5-codex\s*$/m);
+  });
 });

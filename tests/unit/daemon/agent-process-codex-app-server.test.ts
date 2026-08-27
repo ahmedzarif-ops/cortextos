@@ -7,6 +7,7 @@ const mockCodexAppServerPty = {
   kill: vi.fn(),
   write: vi.fn(),
   getPid: vi.fn().mockReturnValue(24680),
+  getActualModel: vi.fn().mockReturnValue(undefined),
   isAlive: vi.fn().mockReturnValue(true),
   onExit: vi.fn().mockImplementation((cb: (exitCode: number, signal?: number) => void) => {
     capturedOnExit = cb;
@@ -98,6 +99,7 @@ beforeEach(() => {
     pty.kill.mockClear();
     pty.write.mockClear();
     pty.getPid.mockClear();
+    pty.getActualModel.mockReset().mockReturnValue(undefined);
     pty.isAlive.mockReset().mockReturnValue(true);
     pty.onExit.mockClear();
     pty.getOutputBuffer.mockClear();
@@ -118,6 +120,35 @@ describe('AgentProcess codex-app-server runtime', () => {
 
     expect(mockCodexAppServerPty.spawn).toHaveBeenCalledWith('fresh', expect.any(String));
     expect(ap.getStatus().pid).toBe(24680);
+  });
+
+  it('reports the observed Codex model and exposes configured-vs-actual mismatch', async () => {
+    mockCodexAppServerPty.getActualModel.mockReturnValue('gpt-5.6-sol');
+    const ap = new AgentProcess('codex-app-agent', mockEnv, {
+      runtime: 'codex-app-server',
+      model: 'gpt-5-codex',
+    });
+    await ap.start();
+
+    expect(ap.getStatus()).toMatchObject({
+      model: 'gpt-5.6-sol',
+      configuredModel: 'gpt-5-codex',
+      modelMismatch: true,
+    });
+  });
+
+  it('reports an unobserved Codex model as unknown instead of echoing config', async () => {
+    const ap = new AgentProcess('codex-app-agent', mockEnv, {
+      runtime: 'codex-app-server',
+      model: 'gpt-5-codex',
+    });
+    await ap.start();
+
+    expect(ap.getStatus()).toMatchObject({
+      model: undefined,
+      configuredModel: 'gpt-5-codex',
+      modelObserved: false,
+    });
   });
 
   it('wires Telegram handle to CodexAppServerPTY before start', async () => {
