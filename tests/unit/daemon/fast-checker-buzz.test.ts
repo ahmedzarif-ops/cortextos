@@ -12,6 +12,7 @@ function createMockAgent(name = 'test-agent') {
     name,
     hasEverBootstrapped: vi.fn().mockReturnValue(true),
     injectMessage: vi.fn().mockReturnValue(true),
+    injectMessageDetailed: vi.fn().mockReturnValue({ ok: true }),
     write: vi.fn(),
   } as any;
 }
@@ -92,6 +93,7 @@ describe('FastChecker — Buzz (Nostr/NIP-29) additions', () => {
 
       const injectedCalls = [
         ...agent.injectMessage.mock.calls.map((c: unknown[]) => String(c[0])),
+        ...agent.injectMessageDetailed.mock.calls.map((c: unknown[]) => String(c[0])),
         ...agent.write.mock.calls.map((c: unknown[]) => String(c[0])),
       ];
       const sawBuzzMessage = injectedCalls.some((text) => text.includes('queued message'));
