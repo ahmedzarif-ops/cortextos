@@ -1927,7 +1927,7 @@ export class AgentManager {
       // instance currently holds the name. That is the intended routing — a cron
       // belongs to the agent name, not to one PTY lifecycle, and binding it to a
       // captured entry would silently stop firing across every restart.
-      const prompt = cron.prompt ?? `[cron] ${cron.name} fired`;
+      const prompt = resolveCronPrompt(cron);
       // Salt with the fire timestamp so MessageDedup (which hashes the last 100
       // injects) does not reject identical cron prompts on subsequent fires.
       // Without the salt, every recurring cron after its first fire would be
@@ -2059,6 +2059,36 @@ export class AgentManager {
       return {};
     }
   }
+}
+
+/**
+ * Resolve the text a cron fire injects.
+ *
+ * ⛔ `??` WAS THE DEFECT AND `||` IS NOT THE WHOLE FIX.
+ * The call site read `cron.prompt ?? \`[cron] ${cron.name} fired\``. `??` falls
+ * back only on null/undefined, so an EMPTY STRING already on disk is passed
+ * through and the cron injects a bare header with no instruction — a scheduled
+ * job that fires exactly on time and does nothing, while every liveness signal
+ * stays green. `bus/crons.ts` now refuses to WRITE one, but that guards the
+ * write path only; nothing guarded FIRE TIME, so every empty prompt already on
+ * disk kept firing empty.
+ *
+ * `||` would catch `''` and still pass `'   '` through, because a whitespace-only
+ * string is truthy. This uses the predicate the rest of the codebase already
+ * uses for exactly this value — `validateCronPrompt` (src/utils/validate.ts:203)
+ * and the IPC path (src/daemon/ipc-server.ts:380) both test `.trim()`. Matching
+ * the existing idiom is the point: three call sites disagreeing about what
+ * "empty" means is how the write guard and the fire path drifted apart.
+ *
+ * Self-healing by design: the fallback is computed at every fire, so a cron with
+ * a bad prompt already on disk starts injecting a usable header immediately,
+ * with no migration and no rewrite of anyone's state.
+ *
+ * Exported for unit testing; the call site uses it via `onFire`.
+ */
+export function resolveCronPrompt(cron: { name: string; prompt?: string }): string {
+  const p = cron.prompt;
+  return typeof p === 'string' && p.trim() !== '' ? p : `[cron] ${cron.name} fired`;
 }
 
 /**
