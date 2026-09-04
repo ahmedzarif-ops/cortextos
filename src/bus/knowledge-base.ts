@@ -275,7 +275,7 @@ export function ingestKnowledgeBase(
 
   // Correctness fix: if the KB is not configured for this org, the underlying
   // python MMRAG tool exits with "Config not found. Run setup first" and
-  // execFileSync (below, stdio: inherit) throws a non-zero-exit error. That
+  // execFileSync (below, stdio ['inherit','pipe','pipe']) throws a non-zero-exit error. That
   // throw used to bubble up through the CLI action handler as an unhandled
   // exception, dumping a full Node stack trace on top of the python error
   // message — ugly and alarming for operators who were just running ingest
@@ -332,6 +332,10 @@ export function ingestKnowledgeBase(
   // than a single Gemini call needs.
   const KB_INGEST_TIMEOUT_FLOOR_MS = 60_000;
   const KB_INGEST_TIMEOUT_DEFAULT_MS = 600_000;
+  // Ceiling for the captured output. Deliberately generous: on overflow spawnSync
+  // KILLS the child, so an undersized buffer does not truncate a log — it aborts
+  // the work. 64MB is far beyond any real ingest transcript.
+  const KB_INGEST_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
   const requestedTimeout = Number(process.env.KB_INGEST_TIMEOUT_MS);
   const ingestTimeoutMs = Math.max(
     KB_INGEST_TIMEOUT_FLOOR_MS,
@@ -345,12 +349,24 @@ export function ingestKnowledgeBase(
   // printed "Done!", this printed "Ingest complete", and both were unconditional.
   // Captured and echoed instead: operators still see everything, and the result
   // is now something we can actually check.
+  //
+  // TRADE-OFF, stated because it is a real loss: piping means the output arrives
+  // when the run ENDS, not as it goes. A long ingest now looks silent while it
+  // works. That is the price of being able to read the result at all.
+  //
+  // maxBuffer is NOT optional here. execFileSync defaults to 1MB, and on overflow
+  // spawnSync KILLS THE CHILD with ENOBUFS — so capturing the output in order to
+  // check it would, on a large ingest, turn a SUCCEEDING run into a KILLED,
+  // PARTIALLY-INDEXED one. Measured: 2MB of child output throws ENOBUFS with
+  // stdout truncated at 1114112 bytes; the same run returns cleanly at 64MB.
+  // Retry logging on this same stdout makes large outputs likelier, not rarer.
   let output = '';
   try {
     output = execFileSync(pythonPath, args, {
       encoding: 'utf-8',
       timeout: ingestTimeoutMs,
       env,
+      maxBuffer: KB_INGEST_MAX_BUFFER_BYTES,
       stdio: ['inherit', 'pipe', 'pipe'],
     }) as unknown as string;
     if (output) process.stdout.write(output);

@@ -113,11 +113,14 @@ for path in "${PATHS[@]}"; do
   echo "  Source: $path"
 done
 
+# `set -e` (line 17) aborts on any non-zero exit, so an unguarded call here made
+# the failure branch below UNREACHABLE: the script died at this line and never
+# printed "Ingest failed (exit N)". `|| exit_code=$?` suspends -e for this command
+# so the exit code can actually be inspected and reported.
+exit_code=0
 "$VENV_DIR/bin/python3" "$MMRAG_PY" ingest "${PATHS[@]}" \
   --collection "$COLLECTION" \
-  ${FORCE}
-
-exit_code=$?
+  ${FORCE} || exit_code=$?
 if [[ $exit_code -eq 0 ]]; then
   echo ""
   echo "Ingest complete → collection: $COLLECTION"
