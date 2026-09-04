@@ -277,10 +277,56 @@ describe('template regression guard: ONE VOICE survives a fresh onboarding', () 
     expect(carriers).toEqual([INVERTED_TEMPLATE]);
   });
 
+  /**
+   * The three section names the Step-7b preserve instruction must carry.
+   *
+   * ⛔ THE THIRD ONE WAS MISSING AND THE GUARD COULD NOT SEE ITS OWN GAP.
+   * Measured 2026-09-04 by guard: stripping `**Lifecycle communication — ONE
+   * VOICE**, ` from all four ONBOARDING.md that carry it left this suite at
+   * 35/35 GREEN, while the same edit to `**Communication**, ` failed 1/34.
+   * The control fired, so the green was a real hole and not a dead run.
+   *
+   * That section IS the countermand. A later edit dropping it from the preserve
+   * list shipped green, and the failure mode is the exact one this file's header
+   * says it exists to prevent: a whole-file onboarding write deletes ONE VOICE
+   * and the suite reports clean.
+   */
+  const PRESERVED_SECTIONS = [
+    { label: 'Communication', re: /\*\*Communication\*\*/ },
+    { label: 'Lifecycle communication — ONE VOICE', re: /Lifecycle communication — ONE VOICE/ },
+    { label: 'Day/Night Mode', re: /Day\/Night Mode/ },
+  ];
+
+  /** Names absent from a preserve clause. Factored out so the guard can be tested. */
+  function missingFromPreserveClause(clause: string): string[] {
+    return PRESERVED_SECTIONS.filter((s) => !s.re.test(clause)).map((s) => s.label);
+  }
+
+  it('the guard itself fails when a section name is dropped — mutant set with a green arm', () => {
+    // GUARD'S OWN MUTANTS, kept as tests rather than as a paragraph in a report.
+    // A report says the check was tried once; a test says it is still true.
+    const complete =
+      'Do NOT delete System-First, **Communication**, ' +
+      '**Lifecycle communication — ONE VOICE**, or **Day/Night Mode** sections.';
+
+    // ⭐ THE MUST-STAY-GREEN ARM, and it is the one that makes the rest mean
+    // something: an all-red mutant set proves SENSITIVITY and says nothing about
+    // SPECIFICITY. Without this arm, a check that rejected every input would score
+    // a perfect result.
+    expect(missingFromPreserveClause(complete)).toEqual([]);
+
+    // Three firing arms: drop each name in turn, and the guard must name THAT one.
+    for (const s of PRESERVED_SECTIONS) {
+      const mutant = complete.replace(s.re, 'REMOVED');
+      expect(mutant, `mutant for ${s.label} did not change the clause`).not.toBe(complete);
+      expect(missingFromPreserveClause(mutant)).toEqual([s.label]);
+    }
+  });
+
   it('the Step-7b whole-file SOUL.md write preserves the sections holding the rule', () => {
-    // The write that regenerates SOUL.md must name Communication and Day/Night
-    // Mode among its preserved sections, or it silently deletes the countermand
-    // and the closed exception list and reports success.
+    // The write that regenerates SOUL.md must name ALL THREE sections among its
+    // preserved sections, or it silently deletes the countermand and the closed
+    // exception list and reports success.
     const onboardings = templateDirs()
       .map((d) => ({ dir: d, body: read(`${d}/ONBOARDING.md`) }))
       .filter((x): x is { dir: string; body: string } => x.body !== null)
@@ -300,10 +346,8 @@ describe('template regression guard: ONE VOICE survives a fresh onboarding', () 
       expect(preserveClause, `${dir}/ONBOARDING.md has no preserve instruction at all`)
         .not.toBeNull();
       const clause = (preserveClause ?? []).join('\n');
-      expect(clause, `${dir}: preserve instruction omits Communication`)
-        .toMatch(/Communication/);
-      expect(clause, `${dir}: preserve instruction omits Day/Night Mode`)
-        .toMatch(/Day\/Night Mode/);
+      const missing = missingFromPreserveClause(clause);
+      expect(missing, `${dir}: preserve instruction omits ${missing.join(', ')}`).toEqual([]);
     }
   });
 });

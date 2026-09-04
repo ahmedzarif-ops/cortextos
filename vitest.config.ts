@@ -1,4 +1,5 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
+import { ACCEPTANCE_TESTS } from './tests/acceptance-tests.js';
 import path from 'path';
 
 export default defineConfig({
@@ -20,5 +21,14 @@ export default defineConfig({
       'tests/**/*.test.ts',
       'dashboard/src/**/__tests__/**/*.test.ts',
     ],
+    // The acceptance lane runs the SAME assertions under `npm run test:acceptance`.
+    // Nothing is deleted and nothing is weakened — they are excluded HERE only,
+    // because they read source from sibling worktrees named by two mandatory env
+    // vars, so a clean clone (and CI) cannot run them at all. Under the default
+    // glob that is not a strict suite, it is a suite that fails for everyone who
+    // is not the author.
+    // Membership lives in tests/acceptance-tests.ts alone, so the two lanes
+    // cannot drift into a file belonging to neither.
+    exclude: [...configDefaults.exclude, ...ACCEPTANCE_TESTS],
   },
 });
