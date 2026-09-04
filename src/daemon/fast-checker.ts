@@ -109,6 +109,15 @@ export class FastChecker {
   private ctxSessionBaselinePct: number | null = null;
   // Per-session (NOT persisted): once-per-session throttle for the futile-handoff alert.
   private ctxBaselineAlertFiredAt: number = 0;
+  // ⛔ CONTEXT MONITORING CAN STOP WITHOUT ANYTHING SAYING SO. checkContextStatus() returns
+  // silently when the status file is missing or older than CTX_STATUS_MAX_AGE_MS. Both branches
+  // are CORRECT — a stale percentage must never drive a handoff — but a silent return makes a
+  // seat that has fallen out of monitoring look exactly like a seat that is fine. Measured
+  // 2026-09-04: two hermes seats ran 203 messages with a frozen status file and nothing reported
+  // it, because no runtime hook writes that file for hermes.
+  // ⭐ A CORRECT GUARD THAT SAYS NOTHING IS INDISTINGUISHABLE FROM A GUARD THAT NEVER RAN.
+  private ctxUnmonitoredSince: number = 0;      // 0 = monitoring is live
+  private ctxUnmonitoredReportedAt: number = 0; // rate-limit: re-report, do not spam every tick
   // Accepted edge: on the null-session_id restart path the new-session block is skipped,
   // so these two fields (like the other per-session ctx fields) can carry a prior session's
   // value across a cooperative restart. forceContextRestart resets them, and the guard is
@@ -1138,6 +1147,80 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
    * Reads context_status.json written by the statusLine bridge hook and takes
    * action when thresholds are crossed.
    */
+  /**
+   * Report that context monitoring is NOT running for this seat.
+   *
+   * ⛔ WHY THIS EXISTS. checkContextStatus() returns early when the status file is
+   * missing or older than the age cut-off. Both returns are CORRECT — acting on a
+   * stale percentage would fire handoffs on numbers nobody wrote. What was wrong is
+   * that they returned in SILENCE, so a seat that had fallen out of monitoring and a
+   * seat sitting comfortably below threshold produced identical output: none.
+   *
+   * Measured 2026-09-04: two hermes seats ran 203 messages with a frozen status file.
+   * No runtime hook writes that file for hermes, so it never updated, the age cut-off
+   * fired on every tick, and nothing anywhere said the seats were unmonitored.
+   *
+   * ⭐ A CORRECT GUARD THAT SAYS NOTHING IS INDISTINGUISHABLE FROM A GUARD THAT NEVER
+   * RAN. The defect was never in the check; it was in what the check DID WHEN IT FIRED.
+   *
+   * Writes `context_monitor.json` beside the status file so the dashboard, the
+   * heartbeat and any operator can SEE the unknown, and logs on a cooldown so a
+   * permanently-unmonitored seat says so periodically without flooding the log.
+   */
+  private reportContextUnmonitored(reason: string, detail: Record<string, unknown>): void {
+    const now = Date.now();
+    const firstTime = this.ctxUnmonitoredSince === 0;
+    if (firstTime) this.ctxUnmonitoredSince = now;
+
+    // Always refresh the file: a reader must be able to tell "unmonitored right now"
+    // from "was unmonitored an hour ago", and only a moving timestamp does that.
+    try {
+      writeFileSync(
+        join(this.paths.stateDir, 'context_monitor.json'),
+        JSON.stringify({
+          monitored: false,
+          state: 'UNKNOWN',
+          reason,
+          unmonitored_since: new Date(this.ctxUnmonitoredSince).toISOString(),
+          checked_at: new Date(now).toISOString(),
+          detail,
+        }) + '\n',
+        'utf-8',
+      );
+    } catch { /* never let reporting a fault become a fault */ }
+
+    const COOLDOWN_MS = 30 * 60_000;
+    if (firstTime || now - this.ctxUnmonitoredReportedAt >= COOLDOWN_MS) {
+      this.ctxUnmonitoredReportedAt = now;
+      const mins = Math.round((now - this.ctxUnmonitoredSince) / 60_000);
+      this.log(
+        `CONTEXT MONITORING UNKNOWN (${reason}) — no usable context_status for ${mins}m. ` +
+        `Tier 1/Tier 2 cannot fire for this seat; its context is unwatched, not low.`,
+      );
+    }
+    // NOTE: an analytics event belongs here too, but logEvent() needs the ORG and
+    // FastChecker does not carry one — only BusPaths, which has no org field. Plumbing
+    // it is a separate change and this one is going in behind a freeze; the log line
+    // and the state file are both durable and neither needs it. Recorded rather than
+    // silently dropped, because "I meant to" is exactly what this method exists to stop.
+  }
+
+  /** Monitoring is live again — clear the UNKNOWN so the file cannot go stale in the other direction. */
+  private clearContextUnmonitored(): void {
+    if (this.ctxUnmonitoredSince === 0) return;
+    const mins = Math.round((Date.now() - this.ctxUnmonitoredSince) / 60_000);
+    this.ctxUnmonitoredSince = 0;
+    this.ctxUnmonitoredReportedAt = 0;
+    try {
+      writeFileSync(
+        join(this.paths.stateDir, 'context_monitor.json'),
+        JSON.stringify({ monitored: true, state: 'OK', checked_at: new Date().toISOString() }) + '\n',
+        'utf-8',
+      );
+    } catch { /* ignore */ }
+    this.log(`Context monitoring resumed after ${mins}m unknown`);
+  }
+
   private async checkContextStatus(): Promise<void> {
     const now = Date.now();
 
@@ -1156,7 +1239,10 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
     // Read the bridge file written by hook-context-status
     const statusPath = join(this.paths.stateDir, 'context_status.json');
-    if (!existsSync(statusPath)) return;
+    if (!existsSync(statusPath)) {
+      this.reportContextUnmonitored('no-status-file', { path: statusPath });
+      return;
+    }
 
     let pct: number | null = null;
     let exceeds200k = false;
@@ -1164,7 +1250,19 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       const raw = readFileSync(statusPath, 'utf-8');
       const data = JSON.parse(raw);
       const age = now - new Date(data.written_at || 0).getTime();
-      if (age > 10 * 60_000) return; // stale file — skip
+      if (age > 10 * 60_000) {
+        // Skipping is right; skipping SILENTLY is not. The threshold logic below is unchanged.
+        this.reportContextUnmonitored('status-stale', {
+          age_ms: age,
+          written_at: data.written_at ?? null,
+          last_percentage: typeof data.used_percentage === 'number' ? data.used_percentage : null,
+          // Which runtime is unmonitored is the first question anyone reading this asks.
+          // getConfig() is the PUBLIC accessor; this.agent.config is private (tsc caught that).
+          runtime: this.agent.getConfig()?.runtime ?? null,
+        });
+        return;
+      }
+      this.clearContextUnmonitored();
       pct = typeof data.used_percentage === 'number' ? data.used_percentage : null;
       exceeds200k = Boolean(data.exceeds_200k_tokens);
 
