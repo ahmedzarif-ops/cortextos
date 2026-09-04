@@ -12,27 +12,66 @@
  */
 
 import { loadEnv } from './index.js';
+import {
+  isLifecycleTelegramAuthorized,
+  readLifecycleNotificationsPreference,
+  readTelegramPollingPreference,
+  recordLifecycleTelegramReceipt,
+} from '../telegram/lifecycle.js';
+import { resolvePaths } from '../utils/paths.js';
 
-async function main(): Promise<void> {
+export async function runCompactTelegram(): Promise<void> {
   const env = loadEnv();
 
   if (!env.botToken || !env.chatId) return;
 
   const agentName = env.agentName || 'agent';
+  const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT;
+  const org = process.env.CTX_ORG;
+  if (!frameworkRoot || !org) return;
+
+  // Compaction is lifecycle churn, not an inbound reply. Only the exact org
+  // orchestrator may initiate this owner-facing update, and its routine
+  // lifecycle preference remains an additional opt-out.
+  if (readTelegramPollingPreference(process.env.CTX_AGENT_DIR || process.cwd()) === false) {
+    return;
+  }
+  if (!isLifecycleTelegramAuthorized({
+    agentName,
+    frameworkRoot,
+    org,
+    lifecycleNotificationsEnabled: readLifecycleNotificationsPreference(
+      process.env.CTX_AGENT_DIR || process.cwd(),
+    ),
+  })) return;
+
+  const text = `[${agentName}] Context compacting... resuming shortly`;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 5000);
 
   try {
     const url = `https://api.telegram.org/bot${env.botToken}/sendMessage`;
-    await fetch(url, {
+    const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chat_id: env.chatId,
-        text: `[${agentName}] Context compacting... resuming shortly`,
+        text,
       }),
       signal: controller.signal,
+    });
+    const result = await response.json() as any;
+    if (!response.ok || result?.ok === false) return;
+    recordLifecycleTelegramReceipt({
+      paths: resolvePaths(agentName, process.env.CTX_INSTANCE_ID || 'default', org),
+      ctxRoot: env.ctxRoot,
+      agentName,
+      org,
+      chatId: env.chatId,
+      text,
+      messageId: result?.result?.message_id ?? 0,
+      parseMode: 'none',
     });
   } catch {
     // Never fail — compaction must not be blocked
@@ -41,4 +80,4 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch(() => process.exit(0));
+runCompactTelegram().catch(() => process.exit(0));

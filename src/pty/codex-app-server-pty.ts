@@ -31,6 +31,8 @@ type SpawnFn = (file: string, args: string[], options: IPtySpawnOptions) => IPty
 interface ThreadState {
   threadId: string;
   cwd: string;
+  actualModel?: string;
+  modelProvider?: string;
   updatedAt: string;
 }
 
@@ -42,6 +44,8 @@ interface SocketPointer {
 }
 
 interface ThreadResponse {
+  model?: string;
+  modelProvider?: string;
   thread: {
     id: string;
     status?: unknown;
@@ -119,6 +123,8 @@ export class CodexAppServerPTY {
   private _threadStatePath: string;
   private _socketPointerPath: string;
   private _threadId: string | null = null;
+  private _actualModel: string | null = null;
+  private _modelProvider: string | null = null;
   private _telegramApi: TelegramAPI | null = null;
   private _chatId: string | null = null;
   private _typingLastSent = 0;
@@ -209,6 +215,11 @@ export class CodexAppServerPTY {
 
   getPid(): number | null {
     return this._appServerPty?.pid ?? null;
+  }
+
+  /** Model reported by app-server for the active thread, never a config echo. */
+  getActualModel(): string | undefined {
+    return this._actualModel ?? undefined;
   }
 
   onExit(handler: (exitCode: number, signal?: number) => void): void {
@@ -487,12 +498,14 @@ export class CodexAppServerPTY {
           const resumed = await this.request<ThreadResponse>('thread/resume', {
             threadId: persisted.threadId,
             cwd: this._cwd,
+            ...this.modelOverride(),
             ...THREAD_PERMISSION_OVERRIDES,
             config: { features: { goals: true } },
             excludeTurns: true,
             persistExtendedHistory: true,
           });
-          this.setThreadId(resumed.result?.thread.id || persisted.threadId);
+          this.recordThreadResponse(resumed, persisted.threadId);
+          await this.applyReasoningEffort();
           return;
         } catch (err) {
           this._outputBuffer.push(`[codex-app-server] persisted resume failed: ${err}\n`);
@@ -504,25 +517,29 @@ export class CodexAppServerPTY {
         const resumed = await this.request<ThreadResponse>('thread/resume', {
           threadId: latest,
           cwd: this._cwd,
+          ...this.modelOverride(),
           ...THREAD_PERMISSION_OVERRIDES,
           config: { features: { goals: true } },
           excludeTurns: true,
           persistExtendedHistory: true,
         });
-        this.setThreadId(resumed.result?.thread.id || latest);
+        this.recordThreadResponse(resumed, latest);
+        await this.applyReasoningEffort();
         return;
       }
     }
 
     const started = await this.request<ThreadResponse>('thread/start', {
       cwd: this._cwd,
+      ...this.modelOverride(),
       ...THREAD_PERMISSION_OVERRIDES,
       config: { features: { goals: true } },
       sessionStartSource: 'startup',
       experimentalRawEvents: false,
       persistExtendedHistory: true,
     });
-    this.setThreadId(started.result!.thread.id);
+    this.recordThreadResponse(started);
+    await this.applyReasoningEffort();
   }
 
   private async findLatestThreadForCwd(): Promise<string | null> {
@@ -599,7 +616,13 @@ export class CodexAppServerPTY {
   private async startTurn(input: unknown[]): Promise<void> {
     if (!this._threadId) throw new Error('No Codex app-server thread is active');
     const completion = this.createTurnCompletion();
-    await this.request('turn/start', { threadId: this._threadId, input, ...TURN_PERMISSION_OVERRIDES });
+    await this.request('turn/start', {
+      threadId: this._threadId,
+      input,
+      ...this.modelOverride(),
+      ...this.effortOverride(),
+      ...TURN_PERMISSION_OVERRIDES,
+    });
     await completion;
   }
 
@@ -690,6 +713,16 @@ export class CodexAppServerPTY {
     switch (method) {
       case 'thread/started':
         this._outputBuffer.push('[codex-app-server] thread started\n');
+        break;
+      case 'thread/settings/updated':
+        if (isRecord(params.threadSettings)) {
+          this.recordObservedModel(params.threadSettings.model, params.threadSettings.modelProvider);
+        }
+        this._outputBuffer.push(`[codex-app-server:event] ${method}\n`);
+        break;
+      case 'model/rerouted':
+        this.recordObservedModel(params.toModel, undefined);
+        this._outputBuffer.push(`[codex-app-server:event] ${method}\n`);
         break;
       case 'thread/status/changed':
         this._outputBuffer.push(`[codex-app-server] status ${JSON.stringify(params.status)}\n`);
@@ -817,12 +850,56 @@ export class CodexAppServerPTY {
 
   private setThreadId(threadId: string): void {
     this._threadId = threadId;
+    this.persistThreadState();
+  }
+
+  private persistThreadState(): void {
+    if (!this._threadId) return;
     const state: ThreadState = {
-      threadId,
+      threadId: this._threadId,
       cwd: this._cwd,
+      ...(this._actualModel ? { actualModel: this._actualModel } : {}),
+      ...(this._modelProvider ? { modelProvider: this._modelProvider } : {}),
       updatedAt: new Date().toISOString(),
     };
     writeFileSync(this._threadStatePath, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
+  }
+
+  private modelOverride(): { model: string } | Record<string, never> {
+    return this._config.model ? { model: this._config.model } : {};
+  }
+
+  private effortOverride(): { effort: string } | Record<string, never> {
+    return this._config.reasoning_effort ? { effort: this._config.reasoning_effort } : {};
+  }
+
+  private async applyReasoningEffort(): Promise<void> {
+    if (!this._threadId || !this._config.reasoning_effort) return;
+    await this.request('thread/settings/update', {
+      threadId: this._threadId,
+      effort: this._config.reasoning_effort,
+    });
+  }
+
+  private recordThreadResponse(response: JsonRpcResponse<ThreadResponse>, fallbackThreadId?: string): void {
+    const result = response.result;
+    const threadId = result?.thread.id || fallbackThreadId;
+    if (!threadId) throw new Error('Codex app-server response omitted thread id');
+    this.recordObservedModel(result?.model, result?.modelProvider);
+    this.setThreadId(threadId);
+  }
+
+  private recordObservedModel(model: unknown, provider: unknown): void {
+    let changed = false;
+    if (typeof model === 'string' && model.trim() && model !== this._actualModel) {
+      this._actualModel = model;
+      changed = true;
+    }
+    if (typeof provider === 'string' && provider.trim() && provider !== this._modelProvider) {
+      this._modelProvider = provider;
+      changed = true;
+    }
+    if (changed) this.persistThreadState();
   }
 
   /**
@@ -897,7 +974,9 @@ export class CodexAppServerPTY {
 
     const entry = {
       timestamp: new Date().toISOString(),
-      model: this._config.model || 'gpt-5-codex',
+      model: this._actualModel || 'unknown',
+      configured_model: this._config.model || null,
+      model_provider: this._modelProvider,
       input_tokens: typeof total.inputTokens === 'number' ? total.inputTokens : 0,
       output_tokens: typeof total.outputTokens === 'number' ? total.outputTokens : 0,
       cache_read_tokens: typeof total.cachedInputTokens === 'number' ? total.cachedInputTokens : 0,
@@ -1007,6 +1086,8 @@ export class CodexAppServerPTY {
     this.loadEnvFile(join(this._env.agentDir, '.env'), env);
 
     if (env['CHAT_ID']) env['CTX_TELEGRAM_CHAT_ID'] = env['CHAT_ID'];
+    // Same daemon-provenance variable AgentPTY injects (telegram/lifecycle.ts).
+    env['CTX_DAEMON_PID'] = String(process.pid);
     if (this._config.timezone) {
       env['CTX_TIMEZONE'] = this._config.timezone;
       env['TZ'] = this._config.timezone;

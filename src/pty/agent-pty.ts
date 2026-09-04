@@ -134,6 +134,10 @@ export class AgentPTY {
     if (ptyEnv['CHAT_ID']) {
       ptyEnv['CTX_TELEGRAM_CHAT_ID'] = ptyEnv['CHAT_ID'];
     }
+    // CTX_DAEMON_PID: provenance for daemon-owned lifecycle notifications. The
+    // SessionEnd hook only defers crash delivery to AgentManager when this PID
+    // matches the owner marker the same daemon wrote (see telegram/lifecycle.ts).
+    ptyEnv['CTX_DAEMON_PID'] = String(process.pid);
     // CTX_TIMEZONE: from config.json timezone field, falls back to system TZ
     const configTimezone = this.config.timezone;
     if (configTimezone) {

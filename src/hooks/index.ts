@@ -254,7 +254,11 @@ export function isClaudeDirOperation(
   // thing left to vet.
   const canonAgentDir = canonicalizePath(resolve(base));
   const claudeRoot = join(canonAgentDir, '.claude');
-  const target = resolve(canonAgentDir, filePath);
+  // Canonicalize the target the same way, so a symlinked component on the
+  // install path (/var -> /private/var) cannot break containment. Symlinks that
+  // resolve OUT of the tree now fail the containment check below; a *dangling*
+  // symlink survives canonicalization and is caught by hasSymlinkComponent.
+  const target = canonicalizePath(resolve(canonAgentDir, filePath));
 
   // Lexical containment within the agent's own .claude/.
   if (target !== claudeRoot && !target.startsWith(claudeRoot + sep)) return false;

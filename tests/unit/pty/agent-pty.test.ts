@@ -97,6 +97,20 @@ describe('AgentPTY working_directory validation', () => {
   });
 });
 
+describe('AgentPTY daemon lifecycle provenance env', () => {
+  beforeEach(() => { vi.useFakeTimers(); mockPty.write.mockClear(); });
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+
+  it('injects CTX_DAEMON_PID as the spawning daemon pid so hooks can prove provenance', async () => {
+    let captured: any = null;
+    const pty = new AgentPTY(mockEnv, {});
+    (pty as any).spawnFn = (_cmd: string, _args: string[], opts: any) => { captured = opts; return mockPty; };
+    await pty.spawn('fresh', 'P');
+    pty.kill();
+    expect(captured?.env?.CTX_DAEMON_PID).toBe(String(process.pid));
+  });
+});
+
 describe('AgentPTY first-run wedge detection (awaiting interactive confirmation)', () => {
   beforeEach(() => { vi.useFakeTimers(); mockPty.write.mockClear(); });
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });

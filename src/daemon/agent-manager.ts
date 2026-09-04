@@ -14,7 +14,12 @@ import { SlackSocketModeClient } from '../slack/socket-mode.js';
 import { dispatchSlackMessage, makeUserNameResolver, type DispatchTarget } from '../slack/dispatcher.js';
 import { resolvePaths } from '../utils/paths.js';
 import { resolveEnv } from '../utils/env.js';
+import { sendMessage } from '../bus/message.js';
 import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHistory } from '../telegram/logging.js';
+import {
+  resolveConfiguredOrchestrator,
+  sendLifecycleTelegramWithReceipt,
+} from '../telegram/lifecycle.js';
 import { collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
 import { stripControlChars } from '../utils/validate.js';
 import { processMediaMessage } from '../telegram/media.js';
@@ -64,6 +69,110 @@ function isPidAlive(pid: number): boolean {
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === 'EPERM';
   }
+}
+
+/**
+ * Build the manager-owned crash/halt/recovery status handler.
+ *
+ * The configured orchestrator is the only agent allowed to send these
+ * lifecycle alerts to the owner. A specialist routes the same actionable text
+ * to that orchestrator over the internal bus instead. A missing authority
+ * yields no external or internal send.
+ */
+export function createAgentLifecycleStatusHandler(opts: {
+  agentName: string;
+  frameworkRoot: string;
+  lifecycleNotificationsEnabled: boolean | undefined;
+  telegramPollingEnabled: boolean | undefined;
+  telegramApi?: TelegramAPI;
+  telegramChatId?: string;
+  paths: BusPaths;
+  ctxRoot: string;
+  org: string;
+}): (status: AgentStatus) => void {
+  let previousStatus: AgentStatus['status'] | null = null;
+
+  return (status: AgentStatus) => {
+    let text = '';
+    let actionableFault = false;
+    if (status.status === 'crashed') {
+      const crashNum = status.crashCount ?? '?';
+      text = `Agent ${opts.agentName} crashed (crash #${crashNum}) — auto-restarting`;
+      actionableFault = true;
+    } else if (status.status === 'halted') {
+      text = `Agent ${opts.agentName} HALTED — exceeded crash limit. Restart manually with: cortextos start ${opts.agentName}`;
+      actionableFault = true;
+    } else if (status.status === 'running' && previousStatus === 'crashed') {
+      text = `Agent ${opts.agentName} recovered and is back online`;
+    }
+
+    if (text) {
+      const notificationEnabled = actionableFault || opts.lifecycleNotificationsEnabled !== false;
+      routeAgentAlertThroughOneVoice({
+        ...opts,
+        text,
+        notificationEnabled,
+      });
+    }
+
+    previousStatus = status.status;
+  };
+}
+
+/**
+ * Route a daemon-initiated alert without letting Telegram credentials grant
+ * owner-channel authority. Specialists always use the internal bus; only the
+ * exact configured orchestrator can use Telegram. Missing authority is a
+ * fail-closed no-op after the caller's durable local log.
+ */
+export function routeAgentAlertThroughOneVoice(opts: {
+  agentName: string;
+  frameworkRoot: string;
+  telegramPollingEnabled: boolean | undefined;
+  telegramApi?: TelegramAPI;
+  telegramChatId?: string;
+  paths: BusPaths;
+  ctxRoot: string;
+  org: string;
+  text: string;
+  notificationEnabled?: boolean;
+}): void {
+  if (opts.notificationEnabled === false) return;
+
+  // Authority is deliberately resolved at the instant of every send. A daemon
+  // that outlives a removed, malformed, blank, or changed context.json must not
+  // retain startup-snapshot authority.
+  const orchestratorName = resolveConfiguredOrchestrator(opts.frameworkRoot, opts.org);
+  if (orchestratorName === null) return;
+
+  if (opts.agentName !== orchestratorName) {
+    try {
+      sendMessage(
+        opts.paths,
+        opts.agentName,
+        orchestratorName,
+        'high',
+        opts.text,
+      );
+    } catch { /* best-effort internal escalation */ }
+    return;
+  }
+
+  // telegram_polling=false is the global direct lifecycle opt-out, including
+  // actionable Chief alerts. It never blocks the specialist internal branch
+  // above, so real specialist faults still reach the configured orchestrator.
+  if (opts.telegramPollingEnabled === false) return;
+  if (!opts.telegramApi || !opts.telegramChatId) return;
+
+  sendLifecycleTelegramWithReceipt({
+    api: opts.telegramApi,
+    paths: opts.paths,
+    ctxRoot: opts.ctxRoot,
+    agentName: opts.agentName,
+    org: opts.org,
+    chatId: opts.telegramChatId,
+    text: opts.text,
+  }).catch(() => { /* best-effort daemon alert */ });
 }
 
 /**
@@ -564,7 +673,6 @@ export class AgentManager {
     };
 
     const paths = resolvePaths(name, this.instanceId, resolvedOrg);
-
     const log = (msg: string) => {
       console.log(`[${name}] ${msg}`);
     };
@@ -614,12 +722,17 @@ export class AgentManager {
       // whitelists their numeric user ID.
       if (botToken && !allowedUserId) {
         log(`SECURITY: BOT_TOKEN is set but ALLOWED_USER is missing. Refusing to enable Telegram. Set ALLOWED_USER to your numeric Telegram user ID in .env, or remove BOT_TOKEN to start the agent without Telegram.`);
-        if (chatId) {
-          const alertApi = new TelegramAPI(botToken);
-          alertApi.sendMessage(chatId,
-            `⚠️ WATCHDOG: ${name} has BOT_TOKEN but ALLOWED_USER is missing or malformed in .env. Telegram is DISABLED for this agent. Fix ALLOWED_USER and restart.`,
-          ).catch(() => {});
-        }
+        routeAgentAlertThroughOneVoice({
+          agentName: name,
+          frameworkRoot: this.frameworkRoot,
+          telegramPollingEnabled: config.telegram_polling,
+          telegramApi: chatId ? new TelegramAPI(botToken) : undefined,
+          telegramChatId: chatId,
+          paths,
+          ctxRoot: this.ctxRoot,
+          org: resolvedOrg,
+          text: `⚠️ WATCHDOG: ${name} has BOT_TOKEN but ALLOWED_USER is missing or malformed in .env. Telegram is DISABLED for this agent. Fix ALLOWED_USER and restart.`,
+        });
         botToken = undefined;
       }
 
@@ -641,28 +754,26 @@ export class AgentManager {
       log,
       telegramApi,
       chatId,
+      telegramPollingEnabled: config.telegram_polling,
       // FastChecker only needs the first ID for its single-recipient typing
       // indicator / quick-checks. Multi-user is enforced by the gates above.
       allowedUserId: allowedUserId ? parseInt(allowedUserId.split(',')[0].trim(), 10) : undefined,
     });
 
-    // Send Telegram notification on crashes and session refreshes
-    if (telegramApi && chatId) {
-      const tgApi = telegramApi;
-      const tgChatId = chatId;
-      let prevStatus: string | null = null;
-      agentProcess.onStatusChanged((status) => {
-        if (status.status === 'crashed') {
-          const crashNum = status.crashCount ?? '?';
-          tgApi.sendMessage(tgChatId, `Agent ${name} crashed (crash #${crashNum}) — auto-restarting`).catch(() => {});
-        } else if (status.status === 'halted') {
-          tgApi.sendMessage(tgChatId, `Agent ${name} HALTED — exceeded crash limit. Restart manually with: cortextos start ${name}`).catch(() => {});
-        } else if (status.status === 'running' && prevStatus === 'crashed') {
-          tgApi.sendMessage(tgChatId, `Agent ${name} recovered and is back online`).catch(() => {});
-        }
-        prevStatus = status.status;
-      });
-    }
+    // ONE VOICE: lifecycle status notifications use org-context authority,
+    // independently of Telegram poller ownership. Specialists escalate over
+    // the internal bus; only the exact configured orchestrator may send direct.
+    agentProcess.onStatusChanged(createAgentLifecycleStatusHandler({
+      agentName: name,
+      frameworkRoot: this.frameworkRoot,
+      lifecycleNotificationsEnabled: config.telegram_lifecycle_notifications,
+      telegramPollingEnabled: config.telegram_polling,
+      telegramApi,
+      telegramChatId: chatId,
+      paths,
+      ctxRoot: this.ctxRoot,
+      org: resolvedOrg,
+    }));
 
     // map-entry-race fix: hold our own entry reference. Everything below runs
     // after at least one await, so looking the entry back up by name can return
@@ -788,9 +899,17 @@ export class AgentManager {
                   entry.telegramLastRejectAlertAt = now;
                   const alertText = `⚠️ WATCHDOG: ${name} rejected ${entry.telegramRejectCount} consecutive Telegram messages (ALLOWED_USER gate). Last from_id: ${fromId ?? 'unknown'}. Verify ALLOWED_USER in .env matches expected users, or this may be unsolicited contact.`;
                   log(alertText);
-                  if (telegramApi && chatId) {
-                    telegramApi.sendMessage(chatId, alertText).catch(() => {});
-                  }
+                  routeAgentAlertThroughOneVoice({
+                    agentName: name,
+                    frameworkRoot: this.frameworkRoot,
+                    telegramPollingEnabled: config.telegram_polling,
+                    telegramApi,
+                    telegramChatId: chatId,
+                    paths,
+                    ctxRoot: this.ctxRoot,
+                    org: resolvedOrg,
+                    text: alertText,
+                  });
                 }
               }
             }
@@ -930,9 +1049,17 @@ export class AgentManager {
                   entry.telegramLastRejectAlertAt = now;
                   const alertText = `⚠️ WATCHDOG: ${name} rejected ${entry.telegramRejectCount} consecutive Telegram interactions (ALLOWED_USER gate). Verify ALLOWED_USER in .env matches expected users, or this may be unsolicited contact.`;
                   log(alertText);
-                  if (telegramApi && chatId) {
-                    telegramApi.sendMessage(chatId, alertText).catch(() => {});
-                  }
+                  routeAgentAlertThroughOneVoice({
+                    agentName: name,
+                    frameworkRoot: this.frameworkRoot,
+                    telegramPollingEnabled: config.telegram_polling,
+                    telegramApi,
+                    telegramChatId: chatId,
+                    paths,
+                    ctxRoot: this.ctxRoot,
+                    org: resolvedOrg,
+                    text: alertText,
+                  });
                 }
               }
             }
@@ -1027,12 +1154,17 @@ export class AgentManager {
         // agent silently loses Telegram input — exactly the failure class
         // the 2026-05-16 audit flagged. Surface it to the operator chat so
         // they see "X poller crashed" instead of mysterious silence.
-        if (telegramApi && chatId) {
-          telegramApi.sendMessage(
-            String(chatId),
-            `${name}: Telegram poller wrapper crashed. Inbound messages may be dropped until restart. Check daemon log.`,
-          ).catch(() => { /* swallow alert failure; original log already captured */ });
-        }
+        routeAgentAlertThroughOneVoice({
+          agentName: name,
+          frameworkRoot: this.frameworkRoot,
+          telegramPollingEnabled: config.telegram_polling,
+          telegramApi,
+          telegramChatId: chatId,
+          paths,
+          ctxRoot: this.ctxRoot,
+          org: resolvedOrg,
+          text: `${name}: Telegram poller wrapper crashed. Inbound messages may be dropped until restart. Check daemon log.`,
+        });
       });
 
       // Store poller reference so stopAgent() can clean it up. Assigned to the
