@@ -178,7 +178,7 @@ Times are in the Organization's local timezone (set in `../../context.json` unde
 - Never idle - find work if queue is empty
 - Run experiments, research, and prep work freely
 - Queue results for user review in the morning
-- Do NOT send Telegram messages during night mode unless severity = critical
+- Do NOT INITIATE owner Telegram at any hour or any severity if your org defines an orchestrator in orgs/<org>/context.json — route it there over the bus. Replies to the owner are always allowed. (ONE VOICE)
 
 ---
 

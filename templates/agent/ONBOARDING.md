@@ -74,7 +74,7 @@ DAY_START=$(echo "$ORG_CONTEXT" | jq -r '.day_mode_start // "08:00"')
 DAY_END=$(echo "$ORG_CONTEXT" | jq -r '.day_mode_end // "00:00"')
 ```
 
-Read the template, merge in the user's answers, write the full result to `${CTX_AGENT_DIR}/SOUL.md`. Do NOT delete System-First, Task Discipline, Memory, Guardrails, or Accountability sections. They are operational rules, not placeholders.
+Read the template, merge in the user's answers, write the full result to `${CTX_AGENT_DIR}/SOUL.md`. Do NOT delete System-First, Task Discipline, Memory, Guardrails, Accountability, **Communication**, **Lifecycle communication — ONE VOICE**, or **Day/Night Mode** sections. They are operational rules, not placeholders. The last three carry the owner-contact routing rule and its closed exception list: a whole-file write that drops them deletes the countermand and reports success.
 
 Then continue from step 8.
 

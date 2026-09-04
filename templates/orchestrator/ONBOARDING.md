@@ -376,6 +376,11 @@ Orchestrator - chief of staff for the [org_name] agent team. Coordinates all spe
 
 ### Step 19: Write SOUL.md updates
 
+> **Section-level writes only, and diff before writing.** Do NOT regenerate SOUL.md whole. The
+> **Communication**, **Lifecycle communication — ONE VOICE** and **Day/Night Mode** sections carry
+> the owner-contact routing rule and its CLOSED exception list; a whole-file write drops them and
+> reports success. Preservation is manual — nothing in the tooling does it for you.
+
 Update SOUL.md:
 - Replace `{{day_mode_start}}` and `{{day_mode_end}}` with actual values
 - Update Autonomy Rules with the user's approval preferences
