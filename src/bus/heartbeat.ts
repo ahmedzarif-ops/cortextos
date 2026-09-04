@@ -162,7 +162,23 @@ export function detectDayNightMode(
   dayStart?: string,
   dayEnd?: string,
 ): 'day' | 'night' {
-  const startMin = parseClock(dayStart) ?? parseClock(DEFAULT_DAY_START)!;
+  // ⛔ 24:00 IS VALID AT THE END AND MEANINGLESS AT THE START, AND parseClock CANNOT KNOW WHICH IT
+  // IS PARSING. Found by guard (kbbb6) reviewing this PR: parseClock admits h === 24, so
+  // day_mode_start: "24:00" produced startMin = 1440 and the wrap branch
+  // `nowMin >= 1440 || nowMin < endMin` — PERMANENT NIGHT, the exact louder-wrong-answer this
+  // function's degenerate-window comment reasons against, reached by a different door.
+  // ⚠ THE OBVIOUS FIX (tighten parseClock to h > 23) IS WRONG FOR THIS REPO AND I CHECKED BEFORE
+  // APPLYING IT: this org declares its day window as 08:00-00:00, so day_mode_end: "24:00" is a
+  // LIVE config shape. Rejecting it would send endMin through the `?? DEFAULT_DAY_END` fallback and
+  // silently shorten the configured day — breaking the very case this PR exists to fix, while every
+  // test stayed green.
+  // ⇒ NORMALISE PER ROLE INSTEAD, which is what the two values actually mean:
+  //     START 24:00 -> 0     midnight as the OPENING of a day
+  //     END   24:00 -> 1440  midnight as the CLOSING of a day (kept; already correct)
+  // The start normalisation matches how `nowMin` below already folds 24 -> 0 with `% 24`, so the
+  // two clocks now agree instead of disagreeing only at one instant.
+  const rawStart = parseClock(dayStart);
+  const startMin = (rawStart === null ? parseClock(DEFAULT_DAY_START)! : rawStart % 1440);
   const endMin = parseClock(dayEnd) ?? parseClock(DEFAULT_DAY_END)!;
 
   let nowMin: number;
