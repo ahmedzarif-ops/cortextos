@@ -645,3 +645,75 @@ describe('COVERAGE — every live fleet schedule shape reaches a staleness verdi
     expect(cannotWarn).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// guard's review of PR #5 — the grace must be GATED ON PARSE SUCCESS.
+//
+// ⚠ THE 43 TESTS ABOVE PASSED BOTH BEFORE AND AFTER THIS FIX. They never covered
+// an unparseable schedule, so the defect guard found was invisible to my own suite
+// while I reported the suite as evidence. A test that cannot distinguish the fixed
+// code from the broken code is not coverage of it.
+// ---------------------------------------------------------------------------
+
+describe('computeHealth — unparseable schedules never get grace', () => {
+  // computeNextFire returns the literal 'unknown' when neither the interval shorthand
+  // nor the 5-field parser can read the schedule. Such a cron WILL NEVER FIRE.
+  const UNPARSEABLE = ['@daily', '0 9 * * MON', 'every monday', '*/5'];
+
+  for (const schedule of UNPARSEABLE) {
+    it(`${schedule} created moments ago is NEVER-FIRED, not healthy`, () => {
+      const row = makeRow({
+        schedule,
+        lastFire: null,
+        created_at: new Date(NOW_MS - 60_000).toISOString(),
+        nextFire: 'unknown',
+      });
+      const result = computeHealth(row, [], NOW_MS);
+      // Before the gate this returned 'healthy' for up to the 31-day fallback,
+      // i.e. a permanently dead cron read as fine for a month.
+      expect(result.state).toBe('never-fired');
+    });
+  }
+
+  it('CONTROL: a PARSEABLE schedule created moments ago still gets its grace', () => {
+    // Without this, "gate the grace" could be satisfied by removing the grace entirely,
+    // which would score every newly-created cron as a fault — the defect the third
+    // branch exists to prevent.
+    const row = makeRow({
+      schedule: '0 9 * * 1',
+      lastFire: null,
+      created_at: new Date(NOW_MS - 60_000).toISOString(),
+      nextFire: new Date(NOW_MS + 3 * DAY_MS).toISOString(),
+    });
+    const result = computeHealth(row, [], NOW_MS);
+    expect(result.state).toBe('healthy');
+    expect(result.reason).toMatch(/not due yet/);
+  });
+});
+
+describe('BLAST RADIUS — the never-fired split also changes SHORTHAND crons', () => {
+  // Declared, not discovered. I described PR #5 as an expression-cron fix; it also
+  // changes interval-shorthand crons, because the not-yet-due branch is keyed on
+  // created_at vs expectedIntervalMs regardless of how that interval was derived.
+  // This is what turned ipc-fleet-health.test.ts:215 red: a '7d' cron created 1 day
+  // ago with no execution log was never-fired on base and is healthy here.
+  it("a '7d' cron created 1 day ago with no fire is HEALTHY (base said never-fired)", () => {
+    const row = makeRow({
+      schedule: '7d',
+      lastFire: null,
+      created_at: new Date(NOW_MS - DAY_MS).toISOString(),
+    });
+    const result = computeHealth(row, [], NOW_MS);
+    expect(result.state).toBe('healthy');
+    expect(result.reason).toMatch(/not due yet/);
+  });
+
+  it("the same '7d' cron created 30 days ago with no fire is still NEVER-FIRED", () => {
+    const row = makeRow({
+      schedule: '7d',
+      lastFire: null,
+      created_at: new Date(NOW_MS - 30 * DAY_MS).toISOString(),
+    });
+    expect(computeHealth(row, [], NOW_MS).state).toBe('never-fired');
+  });
+});

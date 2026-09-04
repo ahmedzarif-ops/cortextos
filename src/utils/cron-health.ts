@@ -177,11 +177,20 @@ export function computeHealth(
         lastFireMs, expectedIntervalMs, gapMs, successRate24h, firesLast24h);
     }
 
+    // ⛔ THE GRACE IS GATED ON PARSE SUCCESS (guard's review of PR #5, 2026-09-04).
+    // computeNextFire returns the literal 'unknown' when neither the interval shorthand nor the
+    // 5-field parser can read the schedule. Such a cron WILL NEVER FIRE — the scheduler cannot
+    // schedule it — so `never-fired` is the honest verdict and grace is exactly wrong.
+    // Without this gate the fallback (31 days, deliberately long) HID a permanently dead cron for
+    // a month: guard reproduced '@daily' and '0 9 * * MON' reading HEALTHY on this branch while
+    // the base correctly said never-fired. My widening turned a true positive into a false clear,
+    // which is the failure direction this whole change exists to remove.
+    const parseable = nextFire !== 'unknown';
     const createdMs = cron.created_at ? new Date(cron.created_at).getTime() : null;
     const dueYet = createdMs !== null && !isNaN(createdMs)
       ? nowMs - createdMs > expectedIntervalMs
       : true;
-    if (!dueYet) {
+    if (parseable && !dueYet) {
       return makeHealth(agent, org, cron.name, nextFire, 'healthy',
         'created recently and not due yet — no fire expected',
         lastFireMs, expectedIntervalMs, gapMs, successRate24h, firesLast24h);
