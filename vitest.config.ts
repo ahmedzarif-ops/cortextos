@@ -1,5 +1,6 @@
 import { configDefaults, defineConfig } from 'vitest/config';
 import { SLOW_TESTS } from './tests/slow-tests.js';
+import { ACCEPTANCE_TESTS } from './tests/acceptance-tests.js';
 import path from 'path';
 
 export default defineConfig({
@@ -21,10 +22,15 @@ export default defineConfig({
       'tests/**/*.test.ts',
       'dashboard/src/**/__tests__/**/*.test.ts',
     ],
-    // The slow lane runs the SAME tests under `npm run test:slow`. Nothing is
-    // deleted and no assertion is weakened — they are excluded HERE only, and
-    // the single source of truth for membership is tests/slow-tests.ts so the
-    // two lanes cannot drift into a file belonging to neither.
-    exclude: [...configDefaults.exclude, ...SLOW_TESTS],
+    // TWO OPT-IN LANES, BOTH EXCLUDED HERE, FOR DIFFERENT REASONS. Neither is a
+    // weakening: each runs the SAME assertions under its own command, and each
+    // keeps membership in ONE file so a test cannot fall into neither lane.
+    //   SLOW_TESTS        -> `npm run test:slow`        (duration)
+    //   ACCEPTANCE_TESTS  -> `npm run test:acceptance`  (reads source from sibling
+    //                        worktrees named by two mandatory env vars, so a clean
+    //                        clone and every CI runner cannot run them at all)
+    // ⚠ The union is what the fast lane excludes. If the two lists ever overlap,
+    // a file is claimed by both lanes — assert they are disjoint, do not assume it.
+    exclude: [...configDefaults.exclude, ...SLOW_TESTS, ...ACCEPTANCE_TESTS],
   },
 });

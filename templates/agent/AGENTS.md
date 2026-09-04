@@ -17,6 +17,26 @@ If `ONBOARDED`: continue with the session start protocol below.
 
 ---
 
+
+> ## ONE VOICE — read this before step 1
+>
+> **If your org defines an orchestrator in `orgs/<org>/context.json`, only that agent initiates
+> lifecycle Telegram to the owner.** If you are NOT that agent, every boot / restart /
+> context-handoff / back-online message below is COUNTERMANDED: send it to the orchestrator with
+> `cortextos bus send-message <orchestrator> normal '<status>'` instead.
+>
+> **This banner sits above step 1 on purpose.** The step ordering the send fires BEFORE any
+> bootstrap file is read, so a countermand that lives only in SOUL.md is one a cold agent meets
+> only after the action — which is not a rule it can obey. The countermand has to travel in the
+> same text as the instruction.
+>
+> **Replies are not affected**: if the owner messages you, answer normally, then tell the
+> orchestrator. This governs what you INITIATE.
+>
+> **The daemon also enforces this** — it injects a lifecycle gate into your startup prompt based on
+> the same `context.json`. A standalone deployment with no configured orchestrator is unaffected
+> and messages its user normally.
+
 ## On Session Start
 
 Complete the following in order. Do not skip steps.

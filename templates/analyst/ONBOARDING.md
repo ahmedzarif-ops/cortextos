@@ -54,7 +54,7 @@ The SOUL.md template (`${CTX_FRAMEWORK_ROOT}/templates/analyst/SOUL.md`) contain
 - **Day/Night Mode**: replace `{{day_mode_start}}` and `{{day_mode_end}}` with values from context.json
 - **Communication**: update with any style preferences
 
-Do NOT delete or summarize the other sections (System-First, Task Discipline, Memory, Guardrails, Accountability). They are operational rules, not placeholders.
+Do NOT delete or summarize the other sections (System-First, Task Discipline, Memory, Guardrails, Accountability, **Communication**, **Lifecycle communication — ONE VOICE**, **Day/Night Mode**). They are operational rules, not placeholders. The last three carry the owner-contact routing rule and its closed exception list: a whole-file write that drops them deletes the countermand and reports success.
 
 Read the template SOUL.md, merge in the user's answers, write the result:
 ```bash
