@@ -1142,6 +1142,168 @@ def cmd_ingest(args):
     total = 0
     skipped = 0
     errors = 0
+    missing = 0
+    # Counted separately from `skipped` ON PURPOSE. `skipped` is incremented only in
+    # the directory branch, so a single already-present FILE leaves it at 0 — and an exit
+    # rule keyed on it calls a correct no-op a failure. `processed` means "this source was
+    # handled and did not raise", which is true whether it added chunks or had none to add.
+    processed = 0
+    paths_given = bool(args.paths)
+
+    # Per-file outcomes: (display_name, landed, error_or_None). A run that half-worked has to be
+    # able to SAY SO per file — an aggregate "Errors: 2" cannot tell you which file is now a
+    # partial document in the store, and a partial document is worse than a missing one because
+    # a query answers from it.
+    outcomes = []
+
+    # BASELINE, taken ONCE before any writing, through the same derivation `list` renders.
+    # This is what makes the partial recoverable at all: the chunk counter lives inside the
+    # handler frame and dies with it on a mid-file raise, so the only place the truth survives
+    # is THE STORE ITSELF. Measure the effect, not the operation.
+    try:
+        baseline, _ = chunks_by_source(collection)
+    except Exception:
+        baseline = None
+
+    def _landed_since_baseline(path):
+        """Chunks this run actually wrote for `path`, read back from the collection.
+
+        Returns None when it cannot be established — NEVER 0, because "nothing landed" and
+        "I could not tell" must not print the same number. A silent 0 here would recreate, one
+        layer down, the exact defect this change exists to remove.
+        """
+        if baseline is None:
+            return None
+        try:
+            now, _ = chunks_by_source(collection)
+        except Exception:
+            return None
+        src = str(Path(path).resolve())
+        before = baseline.get(src, {}).get("chunks", 0)
+        after = now.get(src, {}).get("chunks", 0)
+        # ⛔ NOT `max(after - before, 0)` (guard, 2026-09-04, on the first draft of this function).
+        # A NEGATIVE delta — chunks present at baseline and GONE at read-back — is not "nothing
+        # landed", it is "I cannot account for this". Clamping it to 0 printed the number that means
+        # nothing happened, which is the exact ambiguity the None below exists to prevent, and it
+        # made the COMMENT STRICTER THAN THE CODE.
+        # Not theoretical: a concurrent `--force` re-ingest of the same file removes and rewrites
+        # chunks, and the fleet-wide re-ingest after #6/#7 has several seats touching one collection.
+        if after < before:
+            return None
+        return after - before
+
+    def _ingest_one(path, display, indent):
+        """Ingest one file, and make a MID-FILE FAILURE ACCOUNT FOR WHAT IT ALREADY WROTE.
+
+        ⛔ THE DEFECT (city 8j1dj, 2026-09-04): `count` is a local inside the handler and is
+        incremented AFTER `collection.upsert`. On a mid-file 429 the handler unwinds, `count` is
+        never returned, and `total += count` never runs — so 40 chunks that ARE in the store are
+        reported as 0 added, 1 error. The ingest under-reports and `list` disagrees with it, which
+        is precisely how a seat concludes "nothing landed" about a file that is now HALF PRESENT.
+        """
+        nonlocal total, skipped, errors, processed
+        # `processed` is #7's counter and it is declared here because #9 REPLACED the inline
+        # try/except that used to increment it. Merging the two changes without this line
+        # would leave `processed` at 0 for every file, and #7's exit rule
+        # (`total == 0 and processed == 0 and paths_given` -> non-zero) would then call a
+        # correct no-op a FAILURE — the exact defect #7 exists to remove, reintroduced by the
+        # merge rather than by either change. Neither PR's own suite covers the other's counter.
+
+        # THE INDENT (guard wxr52 -> city z2nuj, 2026-09-04). Guard flagged that #7's parsers
+        # required LEADING WHITESPACE (/^\s+.../), so a call site passing "" would silently stop
+        # matching and #7 would lose per-file status while both suites stayed green.
+        # ⚠ CITY HAS SINCE WITHDRAWN THAT CONSTRAINT — re-verified 2026-09-04 at #7's ACTUAL head
+        # c3f5e6f (resolved from `gh pr view 7`, NOT from a handoff and NOT from the relay).
+        # ⛔ BUT THE WITHDRAWAL IS NARROWER THAN "all three patterns are now /^\s*/", which is what
+        # this comment used to say and which was FALSE IN TWO WAYS. #7 carries TEN line anchors, not
+        # three (src/bus/knowledge-base.ts:481,487,488,493,507,513,524 per-line; 533-535 summary),
+        # and THREE OF THEM DO NOT TOLERATE COLUMN 0:
+        #     :481 /^NOT FOUND:/            column 0 ONLY
+        #     :488 /^Ingesting directory:/  column 0 ONLY
+        #     :487 /^(?:Ingesting|\s+Processing):/  -> "Processing" REQUIRES \s+
+        # Checked by EXECUTION against the live pattern, not by reading it:
+        #     'Processing: a.md' -> False   ·   '  Processing: a.md' -> True
+        # This line is still NOT load-bearing, and the reason is narrower than the old sentence:
+        # ":487 is fed by the HARDCODED '  ' at the Processing print below, never by `indent`", so
+        # no call site can empty it. That narrow claim is true; the general one was not.
+        # ⇒ Kept for consistent indentation alone. THE ORIGINAL JUSTIFICATION IS GONE and is not
+        # left standing as if it still applied — and neither is the over-wide replacement.
+        indent = indent or "  "
+        try:
+            count = ingest_file(client, config, collection, path)
+        except Exception as e:
+            landed = _landed_since_baseline(path)
+            errors += 1
+            if landed is None:
+                print(f"{indent}ERROR: {e}")
+                print(f"{indent}  ⚠ partial count UNKNOWN — could not read the collection back")
+                outcomes.append((display, None, e))
+            else:
+                total += landed
+                # ⛔ THE "ERROR" PREFIX IS LOAD-BEARING; THE COLON IS NOT. Corrected 2026-09-04
+                # (guard 5vqrb) — this comment previously read "KEEP THE COLON AFTER IT" and cited
+                # "#7 at 202753a". BOTH WERE WRONG, and the sha is how the error survived:
+                # 202753a is an EARLIER COMMIT on #7's branch, not its head. #7's head is c3f5e6f
+                # (re-resolved from `gh pr view 7`), where :524 reads /^\s*ERROR\b/ — NO COLON.
+                # City widened it deliberately so "ERROR extracting {name}: {e}" (no colon after
+                # ERROR) also resolves a file. Verified by execution: /^\s*ERROR\b/ matches
+                # "ERROR after 3 chunk(s)" -> True.
+                # ⚠ THE HARM WAS DIRECTIONAL, NOT BEHAVIOURAL: "ERROR: {e}" matches either pattern,
+                # so nothing was broken — but a FALSE STANDING INSTRUCTION to future editors
+                # ("KEEP THE COLON") was carrying a "verified at head" label. That is this PR's own
+                # thesis — a stated cause that is wrong for the actual state — turned on its own
+                # comment. A SHA IN A COMMENT IS A CLAIM AND IT ROTS; re-resolve it from the PR.
+                # The "ERROR:" wording below is kept as a STYLE choice, not a parser requirement.
+                # I had written this as "ERROR after N chunk(s) landed: {e}", which does NOT match
+                # #7's /^\s+ERROR:/ — so THIS PR, whose entire purpose is to make partial failures
+                # visible, made them INVISIBLE to the parser that consumes them, and only on the
+                # partial path. main emits "ERROR: {e}"; that is the contract #7 was written against.
+                print(f"{indent}ERROR: {e} — after {landed} chunk(s) landed")
+                if landed:
+                    print(f"{indent}  ⚠ {display} is now PARTIAL in the store — queries will answer from it")
+                outcomes.append((display, landed, e))
+            return
+        total += count
+        # #7'''s counter, restored at the point its inline try/except incremented it: after
+        # ingest_file RETURNED, i.e. "handled and did not raise". Deliberately NOT on the
+        # except path above — a file that raised was not processed, and counting it would make
+        # #7'''s "nothing was handled" exit rule unable to fire on a run where everything failed.
+        processed += 1
+        if count > 0:
+            print(f"{indent}Added {count} chunk(s)")
+        else:
+            # ⛔ THIS LINE CLAIMS NOTHING, ON PURPOSE — AND IT USED TO CLAIM "Already present"
+            # (city 2y5dc, 2026-09-04, and city is right; I verified it against this file rather
+            # than accepting the relay).
+            #
+            # `ingest_file` returns a bare 0 for AT LEAST FOUR DIFFERENT REASONS:
+            #   · every chunk already indexed        (a correct no-op)
+            #   · unsupported format                 (prints its own SKIP line)
+            #   · empty document                     (prints its own SKIP line)
+            #   · a CAUGHT EXTRACTION ERROR          (mmrag.py:961 — `except: print("  ERROR
+            #     extracting …"); return 0`, verified, it does NOT re-raise)
+            #
+            # So "Already present" asserted ONE of four causes, and one of the four is a FAILURE.
+            # A failed PDF read printed "ERROR extracting …" and was then followed by this line
+            # announcing the file was already present — the benign cause stated for a broken one,
+            # which is this seat's entire thesis pointed at its own output.
+            #
+            # THE CALLER STRUCTURALLY CANNOT TELL: the return type is an int with no reason
+            # attached. So the honest line is the one that claims nothing and lets the SKIP/ERROR
+            # markers above it speak for themselves (#7 resolves per-file status on the FIRST
+            # marker). ⇒ FOLLOW-UP, not done here: give ingest_file a reason alongside the count,
+            # so the caller can distinguish rather than being careful about wording.
+            #
+            # #7 at c3f5e6f accepts BOTH wordings — /^\s*(?:0 new chunk\(s\)|Already present)/ —
+            # deliberately, for the mixed-version window while `dist` is rebuilt. So this was
+            # decided on CONTENT, not on compatibility.
+            print(f"{indent}0 new chunk(s)")
+            # SKIPPED IS COUNTED ON BOTH BRANCHES NOW. It used to be incremented only in the
+            # DIRECTORY branch, so re-ingesting a single already-present file gave
+            # total=0, skipped=0 — which any caller gating on "did it do anything" reads as
+            # failure, though the no-op is correct and expected.
+            skipped += 1
+        outcomes.append((display, count, None))
 
     try:
         for path_str in args.paths:
@@ -1151,28 +1313,17 @@ def cmd_ingest(args):
                 print(f"Ingesting directory: {p} ({len(files)} files)")
                 for f in files:
                     print(f"  Processing: {f.relative_to(p)}")
-                    try:
-                        count = ingest_file(client, config, collection, f)
-                        total += count
-                        if count > 0:
-                            print(f"    Added {count} chunk(s)")
-                        elif count == 0:
-                            skipped += 1
-                    except Exception as e:
-                        print(f"    ERROR: {e}")
-                        errors += 1
+                    _ingest_one(f, str(f.relative_to(p)), "    ")
             elif p.is_file():
                 print(f"Ingesting: {p.name}")
-                try:
-                    count = ingest_file(client, config, collection, p)
-                    total += count
-                    if count > 0:
-                        print(f"  Added {count} chunk(s)")
-                except Exception as e:
-                    print(f"  ERROR: {e}")
-                    errors += 1
+                # #9's _ingest_one SUBSUMES #7's inline try/except here: it carries #7's
+                # neutral "0 new chunk(s)" line verbatim, and adds the partial accounting.
+                # #7's `processed += 1` moved INTO _ingest_one (see its nonlocal above),
+                # so it still fires once per handled file and no counter was dropped.
+                _ingest_one(p, p.name, "  ")
             else:
                 print(f"NOT FOUND: {p}")
+                missing += 1
     finally:
         _tracker.persist()
 
@@ -1181,7 +1332,45 @@ def cmd_ingest(args):
         print(f"  Skipped: {skipped} (already existed or empty)")
     if errors:
         print(f"  Errors: {errors}")
+
+    # NAME THE PARTIALS. `Errors: 2` says how many files broke and never says which, nor whether
+    # any of them left half a document behind — and the half-written file is the one that needs a
+    # human decision, because a re-ingest is cheap and a silently partial document is not.
+    partials = [(d, n) for d, n, e in outcomes if e is not None and n]
+    unknowns = [d for d, n, e in outcomes if e is not None and n is None]
+    if partials:
+        print("  PARTIAL — these files failed mid-way AFTER writing chunks:")
+        for d, n in partials:
+            print(f"    {d}: {n} chunk(s) landed, then failed")
+    if unknowns:
+        print("  PARTIAL COUNT UNKNOWN (collection could not be read back):")
+        for d in unknowns:
+            print(f"    {d}")
+    if missing:
+        print(f"  Missing: {missing}")
     print(_tracker.summary_line())
+
+    # Exit non-zero when the run did not do what it was asked to do.
+    #
+    # Until 2026-09-04 this printed "Done!" and returned None on EVERY path, so
+    # a 429 RESOURCE_EXHAUSTED, a nonexistent source, and a fully successful
+    # ingest were indistinguishable to any caller: all three exited 0. Measured
+    # consequence on this fleet: a day of memories never reached the KB while
+    # every heartbeat reported success, and later queries answered confidently
+    # from stale August documents.
+    #
+    # "Ingested 0 while sources were given" counts as failure. A run that was
+    # asked to index something and indexed nothing has not succeeded, even when
+    # nothing raised.
+    if errors or missing:
+        return 1
+    # Fail only when NOTHING was handled. Deliberately keyed on `processed`, not on
+    # `skipped`: a re-ingest of an already-complete file legitimately adds 0 chunks, and
+    # calling that a failure would make a fleet-wide re-ingest report failure on every seat
+    # whose memory was already indexed — the exact opposite of the defect being fixed.
+    if total == 0 and processed == 0 and paths_given:
+        return 1
+    return 0
 
 
 def deduplicate_results(results, similarity_ratio=0.85):
@@ -1506,6 +1695,28 @@ def open_collection_or_exit(collection_name):
             print("  Check MMRAG_DIR / MMRAG_CHROMADB_DIR point at the intended store.", file=sys.stderr)
         sys.exit(2)
 
+def chunks_by_source(collection):
+    """Group every chunk in a collection by its `source` metadata.
+
+    THE ONE IMPLEMENTATION, ON PURPOSE (sentinel, 2026-09-04). `cmd_list` RENDERS this and the
+    partial-ingest accounting in `cmd_ingest` MEASURES against it. Because both go through this
+    function, "the count ingest reported" and "the delta `list` shows" are the same derivation
+    rather than two derivations that happen to agree — and a second, independently-written counter
+    would be free to disagree with the one operators actually read.
+
+    Returns (by_source, total_chunks). by_source maps the resolved source path to
+    {"type", "chunks", "filename"} — the shape cmd_list already printed.
+    """
+    by_source = {}
+    all_data = collection.get(include=["metadatas"])
+    for meta in (all_data["metadatas"] or []):
+        src = meta.get("source", "unknown")
+        if src not in by_source:
+            by_source[src] = {"type": meta.get("type", "unknown"), "chunks": 0,
+                              "filename": meta.get("filename", "")}
+        by_source[src]["chunks"] += 1
+    return by_source, len(all_data["ids"])
+
 
 def cmd_list(args):
     config = load_config()
@@ -1513,23 +1724,19 @@ def cmd_list(args):
 
     collection = open_collection_or_exit(collection_name)
 
-    all_data = collection.get(include=["metadatas"])
-    if not all_data["ids"]:
-        # Name the store in the EMPTY arm too. "Empty" is only meaningful next to which
-        # store was read, and this is the arm a reader is most likely to over-trust.
+    by_source, total_chunks = chunks_by_source(collection)
+    if not total_chunks:
+        # BOTH CHANGES KEPT. #9 supplies the read (`chunks_by_source` is the ONE
+        # implementation, so the count `ingest` reports and the delta `list` shows are the
+        # same derivation); #12 supplies the STORE NAME in the empty arm. Dropping either
+        # would silently undo the PR it came from: without the call, `by_source` below is
+        # undefined; without the path, "no documents" cannot be told apart from "read the
+        # wrong store", which is the exact ambiguity #12 exists to remove and the one a
+        # reader is most likely to over-trust.
         print(f"No documents in collection '{collection_name}' (store: {CHROMADB_DIR})")
         return
 
-    # Group by source
-    by_source = {}
-    for meta in all_data["metadatas"]:
-        src = meta.get("source", "unknown")
-        if src not in by_source:
-            by_source[src] = {"type": meta.get("type", "unknown"), "chunks": 0,
-                              "filename": meta.get("filename", "")}
-        by_source[src]["chunks"] += 1
-
-    print(f"Collection: {collection_name} ({len(by_source)} files, {len(all_data['ids'])} chunks)")
+    print(f"Collection: {collection_name} ({len(by_source)} files, {total_chunks} chunks)")
     print(f"{'Source':<60} {'Type':<15} {'Chunks':<8}")
     print("-" * 85)
     for src, info in sorted(by_source.items()):
@@ -1663,7 +1870,11 @@ def main():
         "usage": cmd_usage,
     }
 
-    commands[args.command](args)
+    # Propagate the command's exit code. This line used to discard the return
+    # value, so a command could report failure and the process would still exit
+    # 0 — which is exactly how `kb-ingest` came to print "Done!" on a quota
+    # error and be believed by every caller.
+    sys.exit(commands[args.command](args) or 0)
 
 
 if __name__ == "__main__":

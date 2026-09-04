@@ -21,7 +21,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -106,5 +106,91 @@ describe('mmrag: a store that does not exist is not an empty store', () => {
 
     expect(r.stderr).not.toMatch(/refusing to read a knowledge store/);
     expect(r.stderr).toMatch(/could not open the knowledge store|No module named 'chromadb'/);
+  });
+});
+
+/**
+ * THE MERGE OF PR #9 INTO PR #12 MUST NOT MAKE THE WRITE PATH FAIL CLOSED.
+ *
+ * #12 makes READ commands refuse a store that is not there. #9 introduces `chunks_by_source()`
+ * as the ONE implementation and calls it TWICE inside `cmd_ingest` — a baseline read before the
+ * work and a second read after it. Those two reads are the hazard the merge creates: `cmd_ingest`
+ * deliberately opens with `must_exist=False` because a FIRST-EVER ingest has to be able to create
+ * the store, and if either read re-opened the store on its own it would inherit `must_exist=True`
+ * and refuse the very case ingest exists to serve.
+ *
+ * The failure would be silent in the worst way: every ingest into an EXISTING collection keeps
+ * working, so the suite stays green and the bug only appears on a brand-new collection — the
+ * first run of a new agent, which is also the run nobody is watching.
+ *
+ * These run on plain `python3` and DISCRIMINATE BY WHERE EXECUTION STOPS, which is stronger here
+ * than an exit code: the read guard fires BEFORE `import chromadb`, so a command that reaches the
+ * import provably got past it. rc alone cannot tell "refused by the guard" from "failed later".
+ */
+describe('mmrag: merging #9 must not make a first-ever ingest fail closed', () => {
+  const GUARD = 'refusing to read a knowledge store';
+
+  it('ingest into a NEW collection gets PAST the store guard when the store does not exist', () => {
+    const missing = join(sandbox, 'nope', 'store');
+    const doc = join(sandbox, 'doc.txt');
+    writeFileSync(doc, 'hello world test content');
+
+    const r = runMmrag(['ingest', doc, '--collection', 'brandnew'], missing);
+    const err = r.stderr || '';
+
+    // THE LOAD-BEARING ASSERTION. Not "it succeeded" — it cannot succeed without chromadb — but
+    // "it was not REFUSED". If either chunks_by_source read re-opened the store, this is the
+    // arm that would carry the guard's message.
+    expect(err).not.toContain(GUARD);
+    expect(r.status).not.toBe(2);
+    // It got as far as the import, which sits AFTER the must_exist check in
+    // get_chroma_collection. That is positive evidence of passage, not merely absence of refusal.
+    expect(err).toContain('chromadb');
+    // And the store was still not created behind our back.
+    expect(existsSync(missing)).toBe(false);
+  });
+
+  it('POSITIVE CONTROL: the same ingest against an EXISTING store behaves the same way', () => {
+    // Without this, the arm above passes for an uninteresting reason — "ingest always dies at the
+    // import" — and would keep passing if the guard were moved in front of the write path.
+    const existing = join(sandbox, 'store');
+    mkdirSync(existing, { recursive: true });
+    const doc = join(sandbox, 'doc.txt');
+    writeFileSync(doc, 'hello world test content');
+
+    const r = runMmrag(['ingest', doc, '--collection', 'brandnew'], existing);
+    expect(r.stderr || '').not.toContain(GUARD);
+    expect(r.status).not.toBe(2);
+  });
+
+  it('NEGATIVE CONTROL: `list` against that same missing store STILL fails closed', () => {
+    // The arm that proves the fix is intact. If this ever goes green-by-passing-through, the
+    // merge has undone #12 and the two arms above would still pass.
+    const missing = join(sandbox, 'nope', 'store');
+    const r = runMmrag(['list', '--collection', 'brandnew'], missing);
+
+    expect(r.status).toBe(2);
+    expect(r.stderr || '').toContain(GUARD);
+    expect(r.stderr || '').toContain('This is NOT an empty collection');
+    expect(existsSync(missing)).toBe(false);
+  });
+
+  it('cmd_ingest opens the collection ONCE, exempt, and both reads take that object', () => {
+    // Structural, over the source, because the runtime arms above cannot see WHICH object the
+    // two reads use — only that nothing refused. This is the half that names the invariant.
+    const src = readFileSync(MMRAG, 'utf8');
+    const body = src.slice(src.indexOf('def cmd_ingest('), src.indexOf('def cmd_query('));
+
+    // Exactly one open, and it is the exempt one.
+    const opens = body.match(/get_chroma_collection\([^)]*\)/g) || [];
+    expect(opens).toHaveLength(1);
+    expect(opens[0]).toContain('must_exist=False');
+
+    // Both reads take the already-opened object. A read written as
+    // `chunks_by_source(get_chroma_collection(name))` would re-open with must_exist defaulting
+    // to True and reintroduce the defect while every runtime arm above stayed green.
+    const reads = body.match(/chunks_by_source\(([^)]*)\)/g) || [];
+    expect(reads).toHaveLength(2);
+    for (const call of reads) expect(call).toBe('chunks_by_source(collection)');
   });
 });
