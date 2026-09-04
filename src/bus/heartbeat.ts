@@ -67,12 +67,20 @@ export function updateHeartbeat(
   paths: BusPaths,
   agentName: string,
   status: string,
-  options?: { org?: string; timezone?: string; loopInterval?: string; currentTask?: string; displayName?: string },
+  options?: { org?: string; timezone?: string; dayModeStart?: string; dayModeEnd?: string; loopInterval?: string; currentTask?: string; displayName?: string },
 ): void {
   ensureDir(paths.stateDir);
 
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-  const mode = options?.timezone ? detectDayNightMode(options.timezone) : detectDayNightMode('UTC');
+  // The caller resolves timezone/window from config (see resolveModeSettings in cli/bus.ts) and
+  // passes them here. The 'UTC' below is now only reached when a caller supplies NOTHING at all —
+  // a programmatic caller, not the CLI — and it no longer silently overrides an org that has
+  // declared its timezone.
+  const mode = detectDayNightMode(
+    options?.timezone ?? 'UTC',
+    options?.dayModeStart,
+    options?.dayModeEnd,
+  );
 
   const heartbeat: Heartbeat = {
     agent: agentName,
@@ -99,21 +107,93 @@ export function updateHeartbeat(
   clearEndMarkers(paths.stateDir);
 }
 
+/** Declared default day window when config supplies none. Matches the shipped org template
+ *  and SYSTEM.md / USER.md ("Day Mode: 08:00 - 00:00"). NOT 8-22 — see detectDayNightMode. */
+export const DEFAULT_DAY_START = '08:00';
+export const DEFAULT_DAY_END = '00:00';
+
 /**
- * Detect day/night mode based on timezone.
- * Day: 8:00 - 22:00, Night: 22:00 - 8:00
+ * Minutes-since-midnight for an "HH:MM" string, or null if unparseable.
+ *
+ * Minute granularity rather than hours on purpose: `day_mode_start` is a free-form config string
+ * and "08:30" is a legal value. An hours-only parser would silently floor it and be wrong for
+ * thirty minutes a day — the kind of small, permanent, invisible error this function already had.
  */
-export function detectDayNightMode(timezone: string): 'day' | 'night' {
+function parseClock(hhmm: string | undefined): number | null {
+  if (!hhmm) return null;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
+  if (!m) return null;
+  const h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  if (!Number.isFinite(h) || !Number.isFinite(min) || h > 24 || min > 59) return null;
+  return h * 60 + min;
+}
+
+/**
+ * Detect day/night mode for a timezone and a configured day window.
+ *
+ * ⛔ THIS USED TO DEFAULT TO UTC AND HARDCODE 8-22, AND BOTH WERE WRONG INDEPENDENTLY
+ * (sentinel, 2026-09-04, proven by effect on the running binary before the source was read):
+ *
+ *   1. THE TIMEZONE. `updateHeartbeat` passed a timezone only when the caller supplied one and
+ *      otherwise passed the literal 'UTC'. HEARTBEAT.md tells every seat to run
+ *      `cortextos bus update-heartbeat "<status>"` with NO flag, so the whole fleet computed its
+ *      mode five hours off the org's declared America/Chicago — and the error ran toward DAY
+ *      DURING THE NIGHT. Measured at 05:48 Chicago: no flag -> "day"; --timezone America/Chicago
+ *      -> "night"; --timezone Asia/Tokyo -> "day" (the control proving the field moves).
+ *      ⭐ IT ALSO MADE MODE A PER-CALL ARGUMENT RATHER THAN A FLEET PROPERTY: chief passed the
+ *      flag and sentinel did not, so the two seats reported different halves of the day IN THE
+ *      SAME MINUTE ON THE SAME MACHINE.
+ *
+ *   2. THE WINDOW. `hour >= 8 && hour < 22` while SYSTEM.md and USER.md both declare
+ *      "Day Mode: 08:00 - 00:00" — so 22:00-00:00 read as night even with the timezone right.
+ *      ⚠ AND THE CONFIG ALREADY SAID SO. Both the agent's config.json and the org's context.json
+ *      carry `day_mode_start: "08:00"` and `day_mode_end: "00:00"`, and `types/index.ts` has
+ *      carried those fields all along. The data was never missing; this function never read it.
+ *
+ * Fixing only the timezone READS LIKE A FIX and leaves the window, which is why they are one change.
+ *
+ * The window WRAPS: when start > end the day span crosses midnight. That is what makes
+ * 08:00-00:00 work without a special case — end 00:00 parses to 0, 480 > 0, so the span is
+ * "at or after 08:00", i.e. 08:00 through 23:59. A 22:00-06:00 night-shift org works the same way.
+ */
+export function detectDayNightMode(
+  timezone: string,
+  dayStart?: string,
+  dayEnd?: string,
+): 'day' | 'night' {
+  const startMin = parseClock(dayStart) ?? parseClock(DEFAULT_DAY_START)!;
+  const endMin = parseClock(dayEnd) ?? parseClock(DEFAULT_DAY_END)!;
+
+  let nowMin: number;
   try {
-    const now = new Date();
-    const formatted = now.toLocaleString('en-US', { timeZone: timezone, hour12: false, hour: '2-digit' });
-    const hour = parseInt(formatted, 10);
-    return (hour >= 8 && hour < 22) ? 'day' : 'night';
+    const parts = new Date().toLocaleString('en-US', {
+      timeZone: timezone,
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    const m = /(\d{1,2}):(\d{2})/.exec(parts);
+    if (!m) throw new Error('unparseable locale time');
+    // 'en-US' with hour12:false renders midnight as 24:00 in some ICU versions; normalise it.
+    nowMin = (parseInt(m[1], 10) % 24) * 60 + parseInt(m[2], 10);
   } catch {
-    // Fallback to UTC
-    const hour = new Date().getUTCHours();
-    return (hour >= 8 && hour < 22) ? 'day' : 'night';
+    // An INVALID TIMEZONE falls back to UTC — but the window is still the configured one, so a
+    // bad tz string costs the offset and not the org's declared hours.
+    const now = new Date();
+    nowMin = now.getUTCHours() * 60 + now.getUTCMinutes();
   }
+
+  // Degenerate window (start === end) means "always day"; treat it as such rather than as a
+  // zero-length day, because a config that says 00:00-00:00 more plausibly means "no night mode"
+  // than "never day", and silently reporting permanent night would be the louder wrong answer.
+  if (startMin === endMin) return 'day';
+
+  const isDay = startMin < endMin
+    ? (nowMin >= startMin && nowMin < endMin)
+    : (nowMin >= startMin || nowMin < endMin); // wraps midnight
+
+  return isDay ? 'day' : 'night';
 }
 
 /**

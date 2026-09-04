@@ -44,7 +44,18 @@ describe('Sprint 7: Environment & Config Completeness', () => {
     });
   });
 
-  describe('Day/night mode detection', () => {
+  // ⚠ THESE TWO ASSERTIONS CANNOT FAIL, AND THAT IS RECORDED RATHER THAN QUIETLY DELETED.
+  // `expect(['day','night']).toContain(mode)` checks the function returned one of the only two
+  // values its type permits. Both passed every day while detectDayNightMode reported DAY at 05:48
+  // in the org's own timezone, because it defaulted to UTC and hardcoded an 8-22 window
+  // (fixed 2026-09-04). A suite that cannot tell the fixed code from the broken code is not
+  // coverage of it.
+  // They are kept because they DO still check the smoke-test property they were written for (the
+  // function returns and does not throw on a bad timezone), and a deleted row leaves a future
+  // reader unable to tell "no longer needed" from "nobody checked".
+  // REAL COVERAGE, with a controlled clock, lives in tests/unit/bus/heartbeat-mode.test.ts and
+  // heartbeat-mode-resolution.test.ts. Add cases THERE, not here.
+  describe('Day/night mode detection (smoke only — see heartbeat-mode.test.ts)', () => {
     it('returns day for daytime hours', () => {
       // We can't control the actual time, but we can test the function signature
       const mode = detectDayNightMode('UTC');
