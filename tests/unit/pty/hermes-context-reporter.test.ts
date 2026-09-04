@@ -24,6 +24,8 @@ let stateDir: string;
 const SESSION = '20260904_140622_a59949';
 const MODEL = 'google/gemini-3.8-flash';
 const BASE_URL = 'https://inference-api.nousresearch.com/v1';
+/** A prime nobody would hardcode. See the cache fixture below. */
+const FIXTURE_WINDOW = 777767;
 
 function sqlite(sql: string): void {
   execFileSync('sqlite3', [join(profileHome, 'state.db'), sql], { encoding: 'utf-8' });
@@ -77,7 +79,12 @@ beforeAll(() => {
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(
     join(profileHome, 'context_length_cache.yaml'),
-    `context_lengths:\n  deepseek/deepseek-v4-flash@${BASE_URL}: 1048576\n  ${MODEL}@${BASE_URL}: 1048576\n`,
+    // ⛔ DELIBERATELY NOT 1,048,576. The real window is 1,048,576, which is
+    // exactly what a hardcoded constant would return — so asserting the true
+    // value cannot tell "read the cache" from "typed the number". A mutant that
+    // hardcoded the real window passed this whole file until the fixture used a
+    // value no implementation would ever guess.
+    `context_lengths:\n  deepseek/deepseek-v4-flash@${BASE_URL}: 999983\n  ${MODEL}@${BASE_URL}: ${FIXTURE_WINDOW}\n`,
     'utf-8',
   );
 });
@@ -97,7 +104,9 @@ describe('HermesContextReporter', () => {
   it('takes the window from the hermes cache, never a constant', () => {
     seed();
     reporter().reportOnce();
-    expect(readStatus().context_window_size).toBe(1048576);
+    expect(readStatus().context_window_size).toBe(FIXTURE_WINDOW);
+    // And it must not be the real-world value, or the assertion proves nothing.
+    expect(readStatus().context_window_size).not.toBe(1048576);
     // And it must FAIL rather than invent one when the cache cannot answer.
     const orphan = new HermesContextReporter({ stateDir, profileHome: join(dir, 'no-such-profile') });
     expect(orphan.reportOnce()).toBe(false);
