@@ -21,7 +21,7 @@
  *   After fire_at + grace period passes without a fire, it becomes warning/never-fired.
  */
 
-import { parseDurationMs } from '../bus/cron-state.js';
+import { parseDurationMs, cronExpressionMaxGapMs } from '../bus/cron-state.js';
 import type { CronSummaryRow, CronExecutionLogEntry } from '../types/index.js';
 
 // ---------------------------------------------------------------------------
@@ -115,8 +115,21 @@ export function computeHealth(
   const gapMs: number | null = lastFireMs !== null ? nowMs - lastFireMs : null;
 
   // Expected interval: derive from schedule.
-  // parseDurationMs returns NaN for cron expressions — treat those as 0 (unknown).
-  const expectedIntervalMs = Math.max(0, parseDurationMs(cron.schedule) || 0);
+  //
+  // ⛔ THIS USED TO READ `parseDurationMs(cron.schedule) || 0` AND THAT EXEMPTED 66% OF THE FLEET.
+  // parseDurationMs only understands the interval shorthand (`4h`, `30m`) and returns NaN for a
+  // 5-field cron expression; `NaN || 0` gave 0, and the staleness branch below is gated on `> 0`.
+  // Measured 2026-09-04: 18 of 27 live crons could therefore never score `warning` — including
+  // every daily and weekly review, sweep and metrics cron. A daily cron dead for five days read
+  // `healthy`. The 9 that WERE checked were the hourly interval crons, i.e. exactly the ones whose
+  // silence a human would notice anyway. (task_1788511684383_66545168)
+  //
+  // For expressions we use the MAX GAP, never cronExpressionMinIntervalMs — that returns 24h for a
+  // weekly cron and would flag every healthy weekly cron stale after 48h, every week.
+  const intervalFromShorthand = parseDurationMs(cron.schedule);
+  const expectedIntervalMs = !isNaN(intervalFromShorthand) && intervalFromShorthand > 0
+    ? intervalFromShorthand
+    : cronExpressionMaxGapMs(cron.schedule);
 
   // ── 24h metrics ───────────────────────────────────────────────────────────
 
@@ -140,10 +153,42 @@ export function computeHealth(
     }
   }
 
-  // never-fired: no execution log entry at all
+  // never-fired — but SPLIT THREE WAYS, because "no fire" has three different causes and the
+  // previous single bucket rendered them identically. (task_1788511684383_66545168)
+  //
+  //   attempted PRESENT + fired ABSENT  -> the scheduler DISPATCHED and the run DIED.
+  //   both ABSENT, a fire time has passed -> the scheduler never reached it.
+  //   both ABSENT, nothing due yet      -> NOT YET DUE. No information. Not a fault.
+  //
+  // cron-scheduler.ts persists `last_fire_attempted_at` BEFORE awaiting the dispatch, expressly
+  // "to detect crash" — and nothing outside cron-scheduler ever read it. The discriminating field
+  // was already on disk, written deliberately, unused.
+  //
+  // The third branch is not politeness: without it every newly-created cron scores as a fault on
+  // the day it is added, and a checker that cries wolf on every new cron is switched off.
   if (lastFireMs === null) {
+    const attemptedMs = cron.last_fire_attempted_at
+      ? new Date(cron.last_fire_attempted_at).getTime()
+      : null;
+
+    if (attemptedMs !== null && !isNaN(attemptedMs)) {
+      return makeHealth(agent, org, cron.name, nextFire, 'failure',
+        `dispatched ${formatRelativeMs(nowMs - attemptedMs)} ago and never completed — the run died`,
+        lastFireMs, expectedIntervalMs, gapMs, successRate24h, firesLast24h);
+    }
+
+    const createdMs = cron.created_at ? new Date(cron.created_at).getTime() : null;
+    const dueYet = createdMs !== null && !isNaN(createdMs)
+      ? nowMs - createdMs > expectedIntervalMs
+      : true;
+    if (!dueYet) {
+      return makeHealth(agent, org, cron.name, nextFire, 'healthy',
+        'created recently and not due yet — no fire expected',
+        lastFireMs, expectedIntervalMs, gapMs, successRate24h, firesLast24h);
+    }
+
     return makeHealth(agent, org, cron.name, nextFire, 'never-fired',
-      'cron has never fired — no execution history',
+      'cron has never fired — no execution history and a fire time has passed',
       lastFireMs, expectedIntervalMs, gapMs, successRate24h, firesLast24h);
   }
 

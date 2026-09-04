@@ -38,6 +38,8 @@ function makeRow(
     lastStatus: 'fired' | 'retried' | 'failed' | null;
     fire_at: string;
     last_fired_at: string;
+    last_fire_attempted_at: string;
+    created_at: string;
     nextFire: string;
   }> = {},
 ): CronSummaryRow {
@@ -49,7 +51,8 @@ function makeRow(
       prompt: 'Do something.',
       schedule: overrides.schedule ?? '6h',
       enabled: true,
-      created_at: new Date(NOW_MS - 86_400_000).toISOString(),
+      created_at: overrides.created_at ?? new Date(NOW_MS - 86_400_000).toISOString(),
+      ...(overrides.last_fire_attempted_at ? { last_fire_attempted_at: overrides.last_fire_attempted_at } : {}),
       ...(overrides.fire_at ? { fire_at: overrides.fire_at } : {}),
       ...(overrides.last_fired_at ? { last_fired_at: overrides.last_fired_at } : {}),
     },
@@ -183,16 +186,17 @@ describe('computeHealth — warning', () => {
     expect(result.state).toBe('warning');
   });
 
-  it('no warning for cron expression schedules (interval unknown — expectedIntervalMs 0)', () => {
-    // Cron expression: parseDurationMs returns NaN -> expectedIntervalMs = 0
-    // When expectedIntervalMs === 0, the warning check is skipped
-    const lastFire = new Date(NOW_MS - 100 * 3_600_000).toISOString(); // 100h ago — huge gap
+  // ⛔ REWRITTEN 2026-09-04 (task_1788511684383_66545168). THIS TEST USED TO ENCODE THE DEFECT.
+  // It asserted `expect(['healthy','warning']).toContain(result.state)` on a DAILY cron 100 HOURS
+  // STALE — an assertion that CANNOT FAIL, because those are the only two states reachable there —
+  // and then pinned `expectedIntervalMs` to 0, which is the exemption itself. The bug was not an
+  // oversight that the suite missed; THE SUITE CERTIFIED IT.
+  it('daily cron 100h stale is a WARNING (was: exempted, with an assertion that could not fail)', () => {
+    const lastFire = new Date(NOW_MS - 100 * 3_600_000).toISOString();
     const row = makeRow({ lastFire, lastStatus: 'fired', schedule: '0 9 * * *' });
     const result = computeHealth(row, [], NOW_MS);
-    // Can't compute warning for cron expr — should be healthy (or warning if we add logic later)
-    expect(['healthy', 'warning']).toContain(result.state);
-    // But specifically: expectedIntervalMs must be 0
-    expect(result.expectedIntervalMs).toBe(0);
+    expect(result.state).toBe('warning');
+    expect(result.expectedIntervalMs).toBe(86_400_000); // max gap for a daily expression
   });
 
   it('30m schedule — warning after 1h 1ms', () => {
@@ -338,14 +342,15 @@ describe('computeHealth — successRate24h', () => {
 // ---------------------------------------------------------------------------
 
 describe('computeHealth — edge cases', () => {
-  it('handles daemon-was-down scenario: lastStatus fired but huge gap with cron expr', () => {
-    // Cron expression schedule, fired 3 days ago — expectedIntervalMs = 0, so no warning
+  // ⛔ REWRITTEN 2026-09-04 (task_1788511684383_66545168). THE DAEMON-WAS-DOWN SCENARIO — the exact
+  // thing this checker exists to catch — was asserted to return `healthy`. A daily cron silent for
+  // three days is the alarm, not the baseline.
+  it('daemon-was-down: daily cron silent 3 days is a WARNING (was: asserted healthy)', () => {
     const lastFire = new Date(NOW_MS - 3 * 86_400_000).toISOString();
     const row = makeRow({ lastFire, lastStatus: 'fired', schedule: '0 9 * * *' });
     const result = computeHealth(row, [], NOW_MS);
-    // expectedIntervalMs = 0, so warning threshold cannot be computed → healthy
-    expect(result.expectedIntervalMs).toBe(0);
-    expect(result.state).toBe('healthy');
+    expect(result.expectedIntervalMs).toBe(86_400_000);
+    expect(result.state).toBe('warning');
   });
 
   it('handles clock skew: lastFire in the future produces gapMs < 0 but state healthy', () => {
@@ -492,5 +497,151 @@ describe('aggregateFleetHealth', () => {
     expect(result.summary.warning).toBe(0);
     expect(result.summary.failure).toBe(0);
     expect(result.summary.neverFired).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// task_1788511684383_66545168 — expression-cron staleness, the three-way
+// never-fired split, and a COVERAGE assertion.
+//
+// WHY A COVERAGE ASSERTION EXISTS AT ALL (chief's addition, and it is the point):
+// the reason 66% of the live fleet went unchecked for weeks is that NOTHING EVER
+// ASSERTED THE CHECKER COVERS THE CRONS IT IS POINTED AT. Per-case tests all
+// passed; no test asked "is every schedule shape reachable by a verdict path".
+// ---------------------------------------------------------------------------
+
+const DAY_MS = 86_400_000;
+
+describe('computeHealth — expression crons are no longer exempt from staleness', () => {
+  // THE TWO ASSERTIONS CHIEF ASKED FOR, one each way. A single direction is not enough:
+  // "warns when stale" alone is satisfied by a checker that warns on everything.
+  it('WEEKLY cron idle 3 days is HEALTHY — the false-positive half', () => {
+    const row = makeRow({
+      schedule: '0 7 * * 1',
+      lastFire: new Date(NOW_MS - 3 * DAY_MS).toISOString(),
+      lastStatus: 'fired',
+    });
+    const result = computeHealth(row, [], NOW_MS);
+    expect(result.expectedIntervalMs).toBe(7 * DAY_MS);
+    expect(result.state).toBe('healthy');
+  });
+
+  it('WEEKLY cron idle 15 days is a WARNING — the false-negative half', () => {
+    const row = makeRow({
+      schedule: '0 7 * * 1',
+      lastFire: new Date(NOW_MS - 15 * DAY_MS).toISOString(),
+      lastStatus: 'fired',
+    });
+    const result = computeHealth(row, [], NOW_MS);
+    expect(result.state).toBe('warning');
+  });
+
+  it('a day-LIST takes the LARGEST gap in the cycle, not the average', () => {
+    // `0 6 * * 0,3` fires Sun and Wed: gaps of 3 and 4 days, so the max gap is 4 — not 7/2.
+    const row = makeRow({ schedule: '0 6 * * 0,3' });
+    const result = computeHealth(
+      { ...row, lastFire: new Date(NOW_MS - 5 * DAY_MS).toISOString(), lastStatus: 'fired' },
+      [], NOW_MS,
+    );
+    expect(result.expectedIntervalMs).toBe(4 * DAY_MS);
+    expect(result.state).toBe('healthy'); // 5 days < 2 x 4 days
+  });
+
+  it('interval-shorthand crons keep their original behaviour', () => {
+    const row = makeRow({
+      schedule: '4h',
+      lastFire: new Date(NOW_MS - 9 * 3_600_000).toISOString(),
+      lastStatus: 'fired',
+    });
+    const result = computeHealth(row, [], NOW_MS);
+    expect(result.expectedIntervalMs).toBe(4 * 3_600_000);
+    expect(result.state).toBe('warning');
+  });
+});
+
+describe('computeHealth — never-fired splits three ways', () => {
+  it('DISPATCHED AND DIED: last_fire_attempted_at set, never completed -> failure', () => {
+    // cron-scheduler persists this BEFORE awaiting dispatch, expressly "to detect crash".
+    // Nothing outside cron-scheduler had ever read it.
+    const row = makeRow({
+      schedule: '0 3 * * *',
+      lastFire: null,
+      last_fire_attempted_at: new Date(NOW_MS - 2 * 3_600_000).toISOString(),
+      created_at: new Date(NOW_MS - 10 * DAY_MS).toISOString(),
+    });
+    const result = computeHealth(row, [], NOW_MS);
+    expect(result.state).toBe('failure');
+    expect(result.reason).toMatch(/run died/);
+  });
+
+  it('NEVER REACHED: nothing attempted and a fire time has passed -> never-fired', () => {
+    const row = makeRow({
+      schedule: '0 3 * * *',
+      lastFire: null,
+      created_at: new Date(NOW_MS - 10 * DAY_MS).toISOString(),
+    });
+    const result = computeHealth(row, [], NOW_MS);
+    expect(result.state).toBe('never-fired');
+  });
+
+  it('NOT YET DUE: created minutes ago, weekly schedule -> healthy, NOT a fault', () => {
+    // Without this branch every newly-created cron scores as a fault on the day it is added,
+    // and a checker that cries wolf on every new cron is switched off. Both live never-fired
+    // crons in the fleet on 2026-09-04 were of exactly this kind.
+    const row = makeRow({
+      schedule: '0 9 * * 1',
+      lastFire: null,
+      created_at: new Date(NOW_MS - 10 * 60_000).toISOString(),
+    });
+    const result = computeHealth(row, [], NOW_MS);
+    expect(result.state).toBe('healthy');
+    expect(result.reason).toMatch(/not due yet/);
+  });
+
+  it('the three branches are genuinely distinct on otherwise-identical rows', () => {
+    // Same schedule, same created_at, same null lastFire. Only the discriminating field moves.
+    const base = { schedule: '0 3 * * *', lastFire: null as string | null,
+                   created_at: new Date(NOW_MS - 10 * DAY_MS).toISOString() };
+    const died = computeHealth(
+      makeRow({ ...base, last_fire_attempted_at: new Date(NOW_MS - 3_600_000).toISOString() }), [], NOW_MS);
+    const unreached = computeHealth(makeRow(base), [], NOW_MS);
+    const notDue = computeHealth(
+      makeRow({ ...base, created_at: new Date(NOW_MS - 60_000).toISOString() }), [], NOW_MS);
+    expect(new Set([died.state, unreached.state, notDue.state]).size).toBe(3);
+  });
+});
+
+describe('COVERAGE — every live fleet schedule shape reaches a staleness verdict', () => {
+  // The schedules below are the real distinct shapes in use across the six seats on
+  // 2026-09-04, plus the shorthand forms. THE ASSERTION IS THE DENOMINATOR: not "these
+  // cases pass" but "no shape is exempt".
+  const LIVE_SHAPES = [
+    '0 8 * * *', '0 18 * * *', '0 8 * * 0', '0 9 * * 1', '0 10 * * 1', '0 13 * * 1',
+    '0 6 * * 0,3', '0 14 * * 1', '0 */4 * * *', '0 4 * * 1', '0 4 * * 4', '0 3 * * *',
+    '0 7 * * 1', '0 2 * * *', '55 14 * * 0', '*/15 * * * *', '4h', '2h', '1h',
+  ];
+
+  it('no schedule shape is exempt: expectedIntervalMs > 0 for every one', () => {
+    const exempt = LIVE_SHAPES.filter(schedule => {
+      const row = makeRow({ schedule, lastFire: new Date(NOW_MS - 1000).toISOString(), lastStatus: 'fired' });
+      return computeHealth(row, [], NOW_MS).expectedIntervalMs <= 0;
+    });
+    // Naming the offenders rather than asserting a count: a failure prints WHICH shape.
+    expect(exempt).toEqual([]);
+  });
+
+  it('every shape can actually REACH a warning when stale enough', () => {
+    // expectedIntervalMs > 0 is necessary, not sufficient — this asserts the branch fires.
+    const cannotWarn = LIVE_SHAPES.filter(schedule => {
+      const probe = makeRow({ schedule, lastFire: new Date(NOW_MS - 1000).toISOString(), lastStatus: 'fired' });
+      const interval = computeHealth(probe, [], NOW_MS).expectedIntervalMs;
+      const stale = makeRow({
+        schedule,
+        lastFire: new Date(NOW_MS - (WARNING_MULTIPLIER * interval + 1)).toISOString(),
+        lastStatus: 'fired',
+      });
+      return computeHealth(stale, [], NOW_MS).state !== 'warning';
+    });
+    expect(cannotWarn).toEqual([]);
   });
 });

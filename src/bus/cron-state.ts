@@ -118,3 +118,56 @@ export function cronExpressionMinIntervalMs(expr: string): number {
 
   return FALLBACK_MS;
 }
+
+/**
+ * MAXIMUM legitimate gap between fires for a 5-field cron expression — i.e.
+ * "how long may this cron stay quiet before silence is a fault".
+ *
+ * ⛔ THIS IS NOT cronExpressionMinIntervalMs AND THE TWO ARE NOT INTERCHANGEABLE.
+ * That one answers "how often could this fire at most" and returns 24h for `0 7 * * 1`,
+ * because it only looks at the hour field. A weekly cron is silent for SEVEN days by
+ * design, so using the min-interval for a staleness threshold flags every healthy weekly
+ * cron as stale every single week — trading a permanent false negative for a recurring
+ * false positive, and a checker that cries wolf weekly is switched off by week three.
+ * Staleness needs the MAX gap. (sentinel, 2026-09-04, task_1788511684383_66545168.)
+ *
+ * Bias: when the expression is not understood, return a LARGE value. A false negative
+ * leaves the current behaviour; a false positive destroys the checker.
+ */
+export function cronExpressionMaxGapMs(expr: string): number {
+  const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000;
+  // Unrecognised shapes fall back long on purpose — see the bias note above.
+  const FALLBACK_MS = 31 * DAY;
+
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) return FALLBACK_MS;
+  const [minute, hour, dom, , dow] = parts;
+
+  const everyMin = /^\*\/(\d+)$/.exec(minute);
+  if (everyMin && hour === '*') return parseInt(everyMin[1], 10) * MIN;
+
+  const everyHour = /^\*\/(\d+)$/.exec(hour);
+  if (everyHour && dom === '*' && dow === '*') return parseInt(everyHour[1], 10) * HOUR;
+
+  // From here the time-of-day is fixed; the gap is decided by WHICH DAYS it runs.
+  if (!/^\d+$/.test(hour)) return FALLBACK_MS;
+
+  // Day-of-month restricted (e.g. `0 3 1 * *`): monthly-ish.
+  if (dom !== '*') return FALLBACK_MS;
+
+  // Every day.
+  if (dow === '*') return DAY;
+
+  // Day-of-week list, e.g. `0` (Sundays) or `0,3` (Sun+Wed). The answer is the LARGEST
+  // gap in the weekly cycle, which is NOT 7/n — `0,3` gives gaps of 3 and 4 days, not 3.5.
+  const days = dow.split(',').map(d => parseInt(d, 10)).filter(d => !isNaN(d) && d >= 0 && d <= 7);
+  if (days.length === 0) return FALLBACK_MS;
+  const norm = Array.from(new Set(days.map(d => d % 7))).sort((a, b) => a - b);
+  if (norm.length === 1) return 7 * DAY;
+  let maxGapDays = 0;
+  for (let i = 0; i < norm.length; i++) {
+    const next = i + 1 < norm.length ? norm[i + 1] : norm[0] + 7;
+    maxGapDays = Math.max(maxGapDays, next - norm[i]);
+  }
+  return maxGapDays * DAY;
+}
