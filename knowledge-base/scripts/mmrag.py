@@ -1139,11 +1139,22 @@ def cmd_ingest(args):
         # THE INDENT (guard wxr52 -> city z2nuj, 2026-09-04). Guard flagged that #7's parsers
         # required LEADING WHITESPACE (/^\s+.../), so a call site passing "" would silently stop
         # matching and #7 would lose per-file status while both suites stayed green.
-        # ⚠ CITY HAS SINCE WITHDRAWN THAT CONSTRAINT — verified at #7 head 202753a, not taken from
-        # the relay: all three patterns are now /^\s*.../ and tolerate any indent, including none.
-        # So this line is NO LONGER load-bearing for the parser. It is kept only because both call
-        # sites already pass whitespace and consistent indentation is worth having on its own; the
-        # ORIGINAL justification is gone and is not left standing as if it still applied.
+        # ⚠ CITY HAS SINCE WITHDRAWN THAT CONSTRAINT — re-verified 2026-09-04 at #7's ACTUAL head
+        # c3f5e6f (resolved from `gh pr view 7`, NOT from a handoff and NOT from the relay).
+        # ⛔ BUT THE WITHDRAWAL IS NARROWER THAN "all three patterns are now /^\s*/", which is what
+        # this comment used to say and which was FALSE IN TWO WAYS. #7 carries TEN line anchors, not
+        # three (src/bus/knowledge-base.ts:481,487,488,493,507,513,524 per-line; 533-535 summary),
+        # and THREE OF THEM DO NOT TOLERATE COLUMN 0:
+        #     :481 /^NOT FOUND:/            column 0 ONLY
+        #     :488 /^Ingesting directory:/  column 0 ONLY
+        #     :487 /^(?:Ingesting|\s+Processing):/  -> "Processing" REQUIRES \s+
+        # Checked by EXECUTION against the live pattern, not by reading it:
+        #     'Processing: a.md' -> False   ·   '  Processing: a.md' -> True
+        # This line is still NOT load-bearing, and the reason is narrower than the old sentence:
+        # ":487 is fed by the HARDCODED '  ' at the Processing print below, never by `indent`", so
+        # no call site can empty it. That narrow claim is true; the general one was not.
+        # ⇒ Kept for consistent indentation alone. THE ORIGINAL JUSTIFICATION IS GONE and is not
+        # left standing as if it still applied — and neither is the over-wide replacement.
         indent = indent or "  "
         try:
             count = ingest_file(client, config, collection, path)
@@ -1156,11 +1167,20 @@ def cmd_ingest(args):
                 outcomes.append((display, None, e))
             else:
                 total += landed
-                # ⛔ THE "ERROR:" PREFIX IS STILL LOAD-BEARING — KEEP THE COLON AFTER IT.
-                # City withdrew the INDENT constraint (^\s+ -> ^\s*) and NOT this one: #7 at
-                # 202753a still tests /^\s*ERROR:/. "Format the output as you like" covered the
-                # whitespace only. A PARTIAL WITHDRAWAL READ AS A FULL ONE would re-break the
-                # parser here, on the partial path, exactly as it was broken before.
+                # ⛔ THE "ERROR" PREFIX IS LOAD-BEARING; THE COLON IS NOT. Corrected 2026-09-04
+                # (guard 5vqrb) — this comment previously read "KEEP THE COLON AFTER IT" and cited
+                # "#7 at 202753a". BOTH WERE WRONG, and the sha is how the error survived:
+                # 202753a is an EARLIER COMMIT on #7's branch, not its head. #7's head is c3f5e6f
+                # (re-resolved from `gh pr view 7`), where :524 reads /^\s*ERROR\b/ — NO COLON.
+                # City widened it deliberately so "ERROR extracting {name}: {e}" (no colon after
+                # ERROR) also resolves a file. Verified by execution: /^\s*ERROR\b/ matches
+                # "ERROR after 3 chunk(s)" -> True.
+                # ⚠ THE HARM WAS DIRECTIONAL, NOT BEHAVIOURAL: "ERROR: {e}" matches either pattern,
+                # so nothing was broken — but a FALSE STANDING INSTRUCTION to future editors
+                # ("KEEP THE COLON") was carrying a "verified at head" label. That is this PR's own
+                # thesis — a stated cause that is wrong for the actual state — turned on its own
+                # comment. A SHA IN A COMMENT IS A CLAIM AND IT ROTS; re-resolve it from the PR.
+                # The "ERROR:" wording below is kept as a STYLE choice, not a parser requirement.
                 # I had written this as "ERROR after N chunk(s) landed: {e}", which does NOT match
                 # #7's /^\s+ERROR:/ — so THIS PR, whose entire purpose is to make partial failures
                 # visible, made them INVISIBLE to the parser that consumes them, and only on the

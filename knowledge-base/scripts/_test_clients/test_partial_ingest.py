@@ -291,6 +291,12 @@ def test_negative_delta_is_unknown_not_zero():
     # And the real function must agree with the mirror above — otherwise this tests a copy.
     src = "/tmp/mmrag-negative-delta-probe.md"
     _check("the SHIPPED function returns None on a negative delta",
+           # ⛔ THIS IS THE ONLY ASSERTION IN THIS TEST THAT CAN FAIL ON A CLAMP MUTANT (guard
+           # 5vqrb, MEASURED not inferred): the three checks above exercise the LOCAL `landed`
+           # copy defined in this test, and under the restore-the-clamp mutant ALL THREE PASSED.
+           # The kill signal for the clamp rests entirely on this line. Weakening or deleting it
+           # returns that mutant to fully green while the test still reads as 4 assertions.
+           # ⇒ Ratio here is 3 decorative to 1 load-bearing. Do not read the PASS count as power.
            _shipped_negative_delta_returns_none(m, src),
            detail="the test's arithmetic and the shipped code disagree")
 
@@ -383,7 +389,10 @@ def test_output_satisfies_pr7_parser_regexes():
            bool(PR7["Added"].match(line_added)), detail=repr(line_added))
     _check("an EMPTY indent still yields leading whitespace (neutral line)",
            bool(PR7["neutral"].match(line_present)), detail=repr(line_present))
-    # ⚠ THE INDENT CONSTRAINT WAS WITHDRAWN (city z2nuj; verified at #7 head 202753a: ^\s+ -> ^\s*),
+    # ⚠ THE INDENT CONSTRAINT WAS WITHDRAWN (city z2nuj; re-verified at #7's ACTUAL head c3f5e6f:
+    # ^\s+ -> ^\s*. This line used to say "head 202753a", which is an EARLIER COMMIT on #7's
+    # branch — the same stale-sha error corrected in mmrag.py, and it had survived HERE because
+    # the fix was applied to the sibling file only. A sha in a comment is a claim; grep BOTH files),
     # so a column-0 line is now ACCEPTED and the old "regexes reject column 0" control is obsolete.
     # Asserting it would pin a constraint the other side deliberately dropped.
     # THE PREFIX CONSTRAINT WAS NOT WITHDRAWN, and that is what the control now guards — because
@@ -402,6 +411,81 @@ def test_output_satisfies_pr7_parser_regexes():
            detail="if this passes, the Added assertion above proves nothing")
 
 
+
+def test_directory_branch_satisfies_pr7_line_487():
+    print("\n[test 7/7] the DIRECTORY branch — the untested half of the seam (guard 5vqrb)")
+    # ⛔ WHY THIS EXISTS. Every other cmd_ingest call in this file passes a single FILE
+    # (_Args([str(f)])), so the DIRECTORY branch of cmd_ingest was executed by NO test in this PR.
+    # That branch is where "Ingesting directory:" and "  Processing:" are printed and where
+    # _ingest_one is called with the "    " indent — i.e. ONE OF THE TWO CALL SITES of the very
+    # function this PR rewrites, and the one whose `indent` argument the `indent = indent or "  "`
+    # guard exists to defend, was never driven.
+    # ⛔ AND #7's LINE 487 IS THE ONE ANCHOR THAT DOES **NOT** TOLERATE COLUMN 0:
+    #     /^(?:Ingesting|\s+Processing):/   — the "Processing" alternative REQUIRES \s+.
+    # So the general claim "all three patterns are now ^\s*" was false, and it was false precisely
+    # about the branch nothing tested. This drives the REAL directory path rather than
+    # hand-building the string, which is what the older seam test did for the indent guard.
+    import re, io, contextlib
+    # Copied VERBATIM from #7 at head c3f5e6f (src/bus/knowledge-base.ts:487), re-resolved from
+    # `gh pr view 7` rather than taken from a handoff or a relay.
+    PR7_START = re.compile(r"^(?:Ingesting|\s+Processing):\s*(.+?)\s*$")
+
+    with tempfile.TemporaryDirectory() as d:
+        sub = os.path.join(d, "docs")
+        os.makedirs(sub)
+        _write_file(sub, "a.md", 2)
+        _write_file(sub, "b.md", 3)
+        col = FakeCollection()
+        monkey = []
+        try:
+            _install(monkey, col, fail_on_call=None)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                mmrag.cmd_ingest(_Args([sub]))
+            out = buf.getvalue()
+        finally:
+            _restore(monkey)
+
+    lines = out.splitlines()
+    proc = [l for l in lines if "Processing:" in l]
+    _check("the directory branch actually ran (2 Processing lines)",
+           len(proc) == 2, f"got {len(proc)}: {proc!r}")
+    # THE LOAD-BEARING ASSERTION: the real printed line must satisfy #7's line-487 anchor.
+    _check("every Processing line satisfies #7's /^(?:Ingesting|\\s+Processing):/",
+           all(PR7_START.match(l) for l in proc),
+           f"unmatched: {[l for l in proc if not PR7_START.match(l)]!r}")
+    # ⛔ MY FIRST VERSION OF THIS ASSERTION WAS WRONG AND THE TEST CAUGHT IT, WHICH IS THE POINT.
+    # I asserted the "Ingesting directory:" header SATISFIES :487. It does not, and it must not:
+    # :487 needs "Ingesting:" (colon straight after the word) while the header is "Ingesting
+    # directory:". #7 then EXCLUDES it a second time at :488 — `if (start && !/^Ingesting
+    # directory:/.test(raw))` — because a directory header is not a per-file start line; treating
+    # it as one would open a phantom "file" and mark the first real file failed.
+    # ⇒ The real contract is the OPPOSITE of what I wrote, so both halves are pinned here.
+    hdr = [l for l in lines if l.startswith("Ingesting directory:")]
+    _check("the 'Ingesting directory:' header is present",
+           len(hdr) == 1, f"got {hdr!r}")
+    _check("the header does NOT match :487 — it is not a per-file start line",
+           all(PR7_START.match(l) is None for l in hdr), f"hdr={hdr!r}")
+    _check("and #7's :488 exclusion catches it too (belt-and-braces if :487 ever widens)",
+           all(re.compile(r"^Ingesting directory:").match(l) for l in hdr), f"hdr={hdr!r}")
+    # CONTROL for the pair above: the SINGLE-FILE header must still MATCH :487, otherwise a
+    # pattern that matches nothing at all would satisfy both assertions above.
+    _check("CONTROL — the single-file 'Ingesting: <name>' header DOES match :487",
+           PR7_START.match("Ingesting: a.md") is not None,
+           ":487 no longer recognises the single-file header; this test's premise is stale")
+    # ⛔ THE CONTROL, because the assertion above passes trivially if the branch prints nothing:
+    # a column-0 "Processing:" MUST be rejected by the same compiled pattern. If this control
+    # stops failing, line 487 has been widened upstream and the assertion above proves nothing.
+    _check("CONTROL — a column-0 'Processing:' is REJECTED by that same pattern",
+           PR7_START.match("Processing: a.md") is None,
+           "line 487 now tolerates column 0; this test's premise is stale")
+    # The Added lines from inside the directory branch still parse (indent is "    " here, not "  ").
+    _check("Added lines printed at the directory indent still satisfy #7's Added anchor",
+           all(re.compile(r"^\s*Added\s+(\d+)\s+chunk").match(l)
+               for l in lines if "Added" in l and "chunk" in l),
+           f"lines={[l for l in lines if 'Added' in l]!r}")
+
+
 def main():
     test_partial_is_reported_and_matches_list()
     test_clean_run_still_agrees()
@@ -409,13 +493,14 @@ def main():
     test_skipped_counted_for_a_single_file()
     test_negative_delta_is_unknown_not_zero()
     test_output_satisfies_pr7_parser_regexes()
+    test_directory_branch_satisfies_pr7_line_487()
     print()
     if FAILURES:
         print(f"FAILED: {len(FAILURES)} assertion(s)")
         for f in FAILURES:
             print(f"  - {f}")
         return 1
-    print("ALL PASS (6 scenarios)")
+    print("ALL PASS (7 scenarios)")
     return 0
 
 
