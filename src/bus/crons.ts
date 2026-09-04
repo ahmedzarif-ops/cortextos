@@ -19,6 +19,7 @@ import { join, dirname } from 'path';
 import type { CronDefinition, CronExecutionLogEntry } from '../types/index.js';
 import { CRONS_DIRECTORY, CRONS_FILENAME, cronExecutionLogPathFor } from './crons-schema.js';
 import { atomicWriteSync } from '../utils/atomic.js';
+import { validateCronPrompt } from '../utils/validate.js';
 import { withFileLockSync } from '../utils/lock.js';
 
 // ---------------------------------------------------------------------------
@@ -228,6 +229,8 @@ export function writeCrons(agentName: string, crons: CronDefinition[]): void {
  * @throws {Error} if a cron with the same name already exists for the agent.
  */
 export function addCron(agentName: string, cron: CronDefinition): void {
+  // Same boundary as updateCron: refuse before the lock, so a rejected add writes nothing.
+  validateCronPrompt(cron.prompt);
   withFileLockSync(lockDirFor(agentName), () => {
     const existing = readCrons(agentName);
     const collision = existing.find(c => c.name === cron.name);
@@ -271,6 +274,11 @@ export function updateCron(
   name: string,
   patch: Partial<CronDefinition>
 ): boolean {
+  // BEFORE the lock and before any read, so a rejected patch cannot touch crons.json at all.
+  // Only when a prompt is SUPPLIED: a patch that omits `prompt` is a legitimate schedule-only or
+  // enabled-only update and must keep working. An absent field and an empty one are different
+  // requests, and only the second is an error.
+  if (patch.prompt !== undefined) validateCronPrompt(patch.prompt);
   return withFileLockSync(lockDirFor(agentName), () => {
     const existing = readCrons(agentName);
     const idx = existing.findIndex(c => c.name === name);

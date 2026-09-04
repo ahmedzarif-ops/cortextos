@@ -452,3 +452,72 @@ describe('getCronByName', () => {
     expect(getCronByName('boris', 'heartbeat')?.name).toBe('heartbeat');
   });
 });
+
+// ---------------------------------------------------------------------------
+// EMPTY CRON PROMPT — refuse BEFORE the write
+// ---------------------------------------------------------------------------
+
+describe('an empty cron prompt is refused before anything is written', () => {
+  // ⛔ THE INCIDENT (sentinel, 2026-09-04, task_1788527435071_76924227): I did this to my own seat.
+  // A heredoc did not inherit a shell variable, `cat` of the intended prompt file failed, and the
+  // shell passed an EMPTY STRING to `cortextos bus update-cron --prompt ""`. It was accepted,
+  // written, and reported `Updated cron 'unpushed-watch' for sentinel` at rc=0.
+  //
+  // ⭐ THE SUCCESS LINE IS THE DEFECT. rc=0 plus "Updated" is indistinguishable from a real update,
+  // so nothing downstream can notice: `list-crons` still shows the cron, `fire_count` still
+  // increments, and the next fire injects nothing. A scheduled job that runs on time and does
+  // nothing, with every liveness signal green — which is this seat's own thesis, turned on its
+  // own tooling. It was caught only because the write was verified BY EFFECT afterwards.
+
+  const cronsPathFor = (agent: string) =>
+    join(tmpRoot, '.cortextOS', 'state', 'agents', agent, 'crons.json');
+
+  it.each(['', '   ', '\n\t '])('updateCron REFUSES prompt %j and leaves the file BYTE-UNCHANGED', async (bad) => {
+    const { addCron, updateCron, readCrons } = await importCrons();
+    addCron('boris', makeHeartbeat());
+    const path = cronsPathFor('boris');
+    // ⛔ THE BYTES ARE THE ASSERTION, NOT THE RETURN CODE. A version that threw AFTER writing
+    // would pass an rc-only test and leave the damage on disk — which is exactly the shape of
+    // the original bug (it reported success over a destroyed prompt).
+    const before = readFileSync(path, 'utf-8');
+    expect(() => updateCron('boris', 'heartbeat', { prompt: bad })).toThrow(/empty/i);
+    expect(readFileSync(path, 'utf-8')).toBe(before);
+    // And the live value must still be the real one, not a survivor of a partial write.
+    expect(readCrons('boris')[0].prompt).toBe(makeHeartbeat().prompt);
+  });
+
+  it('addCron REFUSES an empty prompt and writes no file at all', async () => {
+    const { addCron, readCrons } = await importCrons();
+    const path = cronsPathFor('boris');
+    expect(existsSync(path)).toBe(false);
+    expect(() => addCron('boris', makeHeartbeat({ prompt: '   ' }))).toThrow(/empty/i);
+    // Stronger than byte-unchanged: there must be NOTHING, or a refused add has still created
+    // an agent's cron file as a side effect.
+    expect(existsSync(path)).toBe(false);
+    expect(readCrons('boris')).toEqual([]);
+  });
+
+  // ⚠ THE BOUNDARY, AND IT IS THE HALF THAT BREAKS THINGS IF I GET IT WRONG. An ABSENT prompt and
+  // an EMPTY one are different requests and only the second is an error. A guard that rejected
+  // both would break every schedule-only and enabled-only update in the fleet — a far bigger
+  // outage than the bug it fixes, and it would look like the fix working.
+  it('a patch with NO prompt still updates normally', async () => {
+    const { addCron, updateCron, readCrons } = await importCrons();
+    addCron('boris', makeHeartbeat());
+    expect(updateCron('boris', 'heartbeat', { schedule: '12h' })).toBe(true);
+    const [c] = readCrons('boris');
+    expect(c.schedule).toBe('12h');
+    expect(c.prompt).toBe(makeHeartbeat().prompt);
+    expect(updateCron('boris', 'heartbeat', { enabled: false })).toBe(true);
+    expect(readCrons('boris')[0].enabled).toBe(false);
+  });
+
+  it('a NON-empty prompt still updates — the guard can say yes', async () => {
+    // The positive control. Without it, a validator that rejected every prompt would satisfy
+    // every assertion above.
+    const { addCron, updateCron, readCrons } = await importCrons();
+    addCron('boris', makeHeartbeat());
+    expect(updateCron('boris', 'heartbeat', { prompt: 'a real prompt' })).toBe(true);
+    expect(readCrons('boris')[0].prompt).toBe('a real prompt');
+  });
+});
