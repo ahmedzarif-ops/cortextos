@@ -219,44 +219,94 @@ def get_genai_client(api_key):
     return genai.Client(api_key=api_key)
 
 
-def _retry_generate_content(client, *, model, contents, backoffs=(5, 15, 45)):
-    """Call client.models.generate_content with bounded retries on transient APIErrors.
+def _retry_transient(call, *, what, backoffs=(5, 15, 45)):
+    """Run `call()` with bounded retries on transient APIErrors.
 
     Retries on HTTP code in TRANSIENT_HTTP_CODES or status name in
     TRANSIENT_STATUS_NAMES; re-raises immediately on any other APIError (auth,
     malformed request, etc.); re-raises last_err after all attempts exhausted.
 
+    `what` is a short label used in the retry messages so a reader can tell WHICH
+    call is retrying — an embedding retry and a generation retry look identical
+    otherwise.
+
     backoffs is a tuple of sleep seconds between attempts. len(backoffs) is the
     attempt count. Tests pass (0, 0, 0) to skip sleeps.
+
+    ⛔ WHY THIS IS GENERIC AND NOT GENERATE-ONLY (sentinel, 2026-09-04,
+    task_1788512896309_59094644): this loop existed and was wired to exactly ONE
+    call site — ingest_pdf's generate_content. `embed_content` was raw. That is the
+    call every markdown/memory ingest travels (and every KB QUERY, via embed_query),
+    so a single transient 429 killed the ingest while the helper written to prevent
+    exactly that sat unused two hundred lines away. Observed 2026-09-04: one seat
+    429'd, retried BY HAND seconds later and succeeded with 78 chunks, while another
+    seat ingested cleanly in the same window — which reads as "intermittent quota"
+    and is really "a retryable error on a call that does not retry".
     """
     from google.genai import errors as _genai_errors
     last_err = None
     for attempt, backoff in enumerate(backoffs, start=1):
         try:
-            return client.models.generate_content(model=model, contents=contents)
+            return call()
         except _genai_errors.APIError as e:
             last_err = e
             is_transient = (e.code in TRANSIENT_HTTP_CODES) or (e.status in TRANSIENT_STATUS_NAMES)
             if not is_transient:
                 raise
             if attempt < len(backoffs):
-                print(f"    Transient error (HTTP {e.code} {e.status or ''}); retrying in {backoff}s (attempt {attempt}/{len(backoffs)})")
+                print(f"    Transient error on {what} (HTTP {e.code} {e.status or ''}); retrying in {backoff}s (attempt {attempt}/{len(backoffs)})")
                 time.sleep(backoff)
             else:
-                print(f"    Exhausted retries on transient error: HTTP {e.code} {e.status or ''}")
+                print(f"    Exhausted retries on {what}: HTTP {e.code} {e.status or ''}")
     raise last_err if last_err else RuntimeError("retry loop completed without response or error")
+
+
+def _retry_generate_content(client, *, model, contents, backoffs=(5, 15, 45)):
+    """Call client.models.generate_content with bounded retries on transient APIErrors.
+
+    Thin wrapper over _retry_transient, kept as its own name because tests and
+    call sites reference it.
+    """
+    return _retry_transient(
+        lambda: client.models.generate_content(model=model, contents=contents),
+        what="generate_content",
+        backoffs=backoffs,
+    )
+
+def _embed_backoffs():
+    """Backoffs for embedding retries. Env override exists so tests do not sleep 65s.
+
+    NOTE: the fix is NOT "retry more". These backoffs already total 65s; a longer
+    stall reads as a hang, which is a worse failure than a loud one. Bounded retry
+    plus a non-zero exit is the shape.
+    """
+    raw = os.environ.get("MMRAG_EMBED_BACKOFFS")
+    if not raw:
+        return (5, 15, 45)
+    try:
+        return tuple(float(x) for x in raw.split(",") if x.strip() != "")
+    except ValueError:
+        return (5, 15, 45)
 
 
 def embed_content(client, config, content, task_type="RETRIEVAL_DOCUMENT"):
     """Embed content using Gemini Embedding 2. Content can be text string or list of Parts."""
     from google.genai import types
-    result = client.models.embed_content(
-        model=config.get("embedding_model", "gemini-embedding-2-preview"),
-        contents=content,
-        config=types.EmbedContentConfig(
-            output_dimensionality=config.get("embedding_dimensions", DEFAULT_EMBEDDING_DIMENSIONS),
-            task_type=task_type,
+    # Retried for the same reason generate_content is: a transient 429/503 here used
+    # to kill the whole ingest. This is the single choke point for ALL embedding —
+    # every embed_content() caller and embed_query() reach the API through here — so
+    # the fix is one wrapper, not eleven call sites.
+    result = _retry_transient(
+        lambda: client.models.embed_content(
+            model=config.get("embedding_model", "gemini-embedding-2-preview"),
+            contents=content,
+            config=types.EmbedContentConfig(
+                output_dimensionality=config.get("embedding_dimensions", DEFAULT_EMBEDDING_DIMENSIONS),
+                task_type=task_type,
+            ),
         ),
+        what=f"embed_content ({task_type})",
+        backoffs=_embed_backoffs(),
     )
     if _tracker:
         _tracker.track_embedding(content)
