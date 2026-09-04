@@ -12,7 +12,7 @@ npm test
 
 ## Before Submitting Changes
 
-1. `npm run typecheck:all` — TypeScript must compile cleanly, **root and dashboard**
+1. `npm run typecheck:root-and-dashboard` — TypeScript must compile cleanly in **both** those trees
 2. `npm run build` — the CLI bundle must build
 3. `npm test` — all tests must pass
 4. Match existing patterns in `src/` for new features
@@ -23,6 +23,12 @@ compile cleanly" — which was true of `src/` and false of the repo. `build` is 
 bundler: it strips types rather than checking them, so it is green on code that does not
 typecheck. And `typecheck` alone is `tsc --noEmit` against the ROOT tsconfig, whose
 `include` is `src/**/*` — the dashboard is not in it.
+
+**And the name is `typecheck:root-and-dashboard`, not `typecheck:all`, because it is not
+all.** Both tsconfigs exclude `tests/`, so neither command sees a single test file. A parse
+error inside a test was measured exiting **0** under `npm run typecheck` while the file
+silently did not run. A script called `:all` invites exactly the reading that a green covers
+the repo. **Verify test changes by RUNNING them.**
 
 So the documented bar passed on a real type error for as long as the error lived in
 `dashboard/`. Measured at 9d4383f: `npm run build` exits 0 and `npm run typecheck` exits 0,
