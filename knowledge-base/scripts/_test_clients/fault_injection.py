@@ -57,9 +57,11 @@ class _StubResponse:
 
 
 class _StubModels:
-    def __init__(self, script):
+    def __init__(self, script, embed_script=None):
         self._script = list(script)
         self._index = 0
+        self._embed_script = list(embed_script) if embed_script is not None else None
+        self._embed_index = 0
 
     def generate_content(self, model=None, contents=None, **kwargs):
         if self._index >= len(self._script):
@@ -75,15 +77,51 @@ class _StubModels:
         raise _InjectedAPIError(code, status, message or f"injected {code} {status}")
 
     def embed_content(self, *a, **kw):
-        raise RuntimeError(
-            "fault_injection: embed_content is not scripted. Tests should target "
-            "_retry_generate_content directly, not the full ingest_pdf pipeline."
-        )
+        """Scripted embedding responses.
+
+        ⛔ THIS USED TO RAISE "embed_content is not scripted. Tests should target
+        _retry_generate_content directly." That refusal was reasonable when the only
+        retry loop was on generation — and it is also the reason the embedding path
+        went untested and unretried. The harness was scoped to the half that already
+        worked. (sentinel, 2026-09-04, task_1788512896309_59094644)
+
+        Driven by MMRAG_EMBED_FAULT_SCRIPT, same grammar as the generate script. If
+        that variable is unset the embed path always succeeds, so existing generate-
+        only tests are unaffected.
+        """
+        if self._embed_script is None:
+            return _StubEmbedResponse()
+        if self._embed_index >= len(self._embed_script):
+            raise RuntimeError(
+                f"fault_injection: embed script exhausted at attempt "
+                f"{self._embed_index + 1} (scripted {len(self._embed_script)} responses)"
+            )
+        code, message = self._embed_script[self._embed_index]
+        self._embed_index += 1
+        if code == 200:
+            return _StubEmbedResponse()
+        status = _STATUS_FOR_CODE.get(code, "UNKNOWN")
+        raise _InjectedAPIError(code, status, message or f"injected {code} {status}")
+
+    @property
+    def embed_calls(self):
+        """How many times the embed path was ENTERED — the count a retry test needs."""
+        return self._embed_index
+
+
+class _StubEmbedResponse:
+    """Minimal shape of an embed_content response: .embeddings[0].values."""
+    class _E:
+        def __init__(self, values):
+            self.values = values
+
+    def __init__(self, dims=8):
+        self.embeddings = [self._E([0.0] * dims)]
 
 
 class FaultInjectionClient:
-    def __init__(self, script):
-        self.models = _StubModels(script)
+    def __init__(self, script, embed_script=None):
+        self.models = _StubModels(script, embed_script)
 
 
 def _parse_script(spec):
@@ -106,4 +144,6 @@ def make_client(api_key=None):
     MMRAG_FAULT_INJECTION_SCRIPT.
     """
     spec = os.environ.get("MMRAG_FAULT_INJECTION_SCRIPT", "200")
-    return FaultInjectionClient(_parse_script(spec))
+    embed_spec = os.environ.get("MMRAG_EMBED_FAULT_SCRIPT")
+    embed_script = _parse_script(embed_spec) if embed_spec else None
+    return FaultInjectionClient(_parse_script(spec), embed_script)
