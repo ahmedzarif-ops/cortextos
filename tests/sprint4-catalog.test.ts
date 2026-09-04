@@ -3,6 +3,12 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
+  browseCatalog,
+  installCommunityItem,
+  prepareSubmission,
+  submitCommunityItem,
+} from '../src/bus/catalog.js';
+
 import { scrubLeakedGitEnv } from './helpers/git-env';
 
 // This file shells out to `git` with `cwd` set to a temp dir. GIT_DIR overrides that,
@@ -10,11 +16,6 @@ import { scrubLeakedGitEnv } from './helpers/git-env';
 // tests/helpers/git-env.ts.
 const restoreGitEnv = scrubLeakedGitEnv();
 afterAll(restoreGitEnv);
-  browseCatalog,
-  installCommunityItem,
-  prepareSubmission,
-  submitCommunityItem,
-} from '../src/bus/catalog.js';
 
 describe('Sprint 4: Community Catalog', () => {
   const testDir = join(tmpdir(), `cortextos-sprint4-${Date.now()}`);
