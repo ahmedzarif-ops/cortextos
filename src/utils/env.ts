@@ -38,6 +38,16 @@ export function resolveEnv(overrides?: Partial<CtxEnv>): CtxEnv {
     envFile.CTX_FRAMEWORK_ROOT ||
     '';
 
+  // THE cwd DEFAULT IS FOR PATHS AND READ-SCOPED QUERIES ONLY. It is retained here
+  // deliberately, and the reason is the asymmetry: a wrong PATH fails visibly — the
+  // directory is missing, the query returns nothing, someone notices in seconds — while a
+  // wrong IDENTITY has no failure mode that looks like a failure. A record signed with a
+  // directory name is indistinguishable from a correct one.
+  //
+  // Anything that WRITES, SIGNS, CLAIMS or LOGS AN ATTRIBUTED RECORD must use
+  // `requireAgentIdentity()` below instead, which returns nothing rather than guessing.
+  // Ruling: chief, 2026-09-04 (guard 4dhtn, city 4gue7/iw2wo) — identity never comes from
+  // the cwd on a write path.
   const agentName =
     overrides?.agentName ||
     process.env.CTX_AGENT_NAME ||
@@ -223,6 +233,30 @@ export function resolveAgentIdentity(override?: string): string | null {
   }
 
   return null;
+}
+
+/**
+ * `resolveAgentIdentity` with the refusal already written: prints one standard error and
+ * exits 1 when identity cannot be established.
+ *
+ * It exists so that closing this class does not depend on each future command REMEMBERING to
+ * check. Three commands reached the cwd fallback on a write path before anyone noticed
+ * (annotate-task, claim-task, kb-ingest); the per-command fixes were correct and would have
+ * had to be repeated for every command written after them. One line at a call site is cheap
+ * enough that the safe thing is also the easy thing.
+ *
+ * Callers that only need PATHS keep `resolveEnv().agentName` — see the note on that default.
+ */
+export function requireAgentIdentity(override?: string, command?: string): string {
+  const who = resolveAgentIdentity(override);
+  if (who) return who;
+
+  const label = command ? `${command}: ` : '';
+  console.error(
+    `ERROR: ${label}no agent identity. Pass --agent <name> or set CTX_AGENT_NAME. ` +
+      'The current directory name is deliberately NOT used to sign a record.',
+  );
+  process.exit(1);
 }
 
 /**
