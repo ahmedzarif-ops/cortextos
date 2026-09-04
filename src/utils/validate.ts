@@ -49,10 +49,16 @@ export function validateOrgName(org: string): void {
  * either end distinguished it from a genuine message. Verified live against sentinel itself:
  * `""` -> rc=0 + id, `"   "` -> rc=0 + id, both delivered and both signed.
  *
- * The check is on the TRIMMED body and it runs BEFORE the id is minted, so a rejected send leaves
- * NO id, NO signature and NO file. That ordering is the requirement, not an implementation detail:
- * a version that returned non-zero while still minting and signing would pass an rc-only test and
- * leave the artifact behind.
+ * The check is on the TRIMMED body, and it runs BEFORE THE SIGNATURE AND THE WRITE, so a rejected
+ * send leaves NO id, NO signature and NO file. THAT is the requirement, and it is not an
+ * implementation detail: a version that returned non-zero while still signing and writing would pass
+ * an rc-only test and leave the artifact behind.
+ *
+ * ⚠ Do not restate this as "before the id is minted" (my original wording; corrected by guard
+ * 2026-09-04). Minting the id is one step tighter than the real boundary — the id is a local until
+ * something signs or writes it — so a reader who takes the tighter phrasing as the contract will
+ * think the suite blesses a line it does not test. Measured: moving the call below the id mint
+ * keeps 15/15 green; moving it below the write fails 5.
  */
 export function validateMessageText(text: string): void {
   if (typeof text !== 'string' || text.trim() === '') {

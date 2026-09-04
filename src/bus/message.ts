@@ -59,7 +59,18 @@ export function sendMessage(
   validateAgentName(from);
   validateAgentName(to);
   validatePriority(priority);
-  // Must precede the id/signature below: a rejected send leaves no id, no sig, no file.
+  // THE BOUNDARY THE TESTS ACTUALLY HOLD IS "BEFORE THE SIGNATURE AND THE WRITE", NOT "BEFORE THE
+  // ID IS MINTED" (guard, 2026-09-04, and it is a correction to my own comment). Guard moved this
+  // call to sit just after `randomString(5)` and all 15 tests still passed — `rand` is a local with
+  // no observable effect, so that mutant is semantically equivalent. Moved below `atomicWriteSync`,
+  // 5 fail, every one named "throws, mints no id, writes no file". So the suite pins the real
+  // property and is not weaker than it looks.
+  //
+  // The call is placed here, one step tighter than required, on purpose — but do not read the
+  // position as the contract. If you are refactoring this function: moving the check anywhere above
+  // the sign-and-write is safe and the suite will tell you if you cross the line. The reason the
+  // ordering matters at all is that a version which threw while still signing and writing would
+  // pass an rc-only test and leave the artifact behind, which IS the bug.
   validateMessageText(text);
 
   const pnum = PRIORITY_MAP[priority];
