@@ -1223,6 +1223,15 @@ busCommand
   .option('--force', 'Re-ingest even if already indexed')
   .action((paths: string[], opts: { org?: string; agent?: string; scope?: string; force?: boolean }) => {
     const env = resolveEnv();
+
+    // An explicitly EMPTY --org must not silently fall back to CTX_ORG. That
+    // fallback made `--org ''` ingest into a different collection than the one
+    // the caller named, and report success doing it.
+    if (opts.org !== undefined && opts.org.trim() === '') {
+      console.error('ERROR: --org was given but empty. Pass a real org, or omit --org to use CTX_ORG.');
+      process.exit(1);
+    }
+
     const org = opts.org || env.org;
     if (!org) {
       console.error('ERROR: --org or CTX_ORG required');
@@ -1231,7 +1240,7 @@ busCommand
 
     ensureKBDirs(env.instanceId, env.frameworkRoot, org);
 
-    ingestKnowledgeBase(paths, {
+    const result = ingestKnowledgeBase(paths, {
       org,
       agent: opts.agent || env.agentName,
       scope: (opts.scope as 'shared' | 'private') || 'shared',
@@ -1239,6 +1248,14 @@ busCommand
       frameworkRoot: env.frameworkRoot || process.cwd(),
       instanceId: env.instanceId,
     });
+
+    // Fail closed. Every caller — heartbeats included — reads the exit code and
+    // nothing else, so a failed ingest that exits 0 is silently believed.
+    // 2 is reserved for "not configured", which is a setup state rather than a
+    // failed run, so an operator can tell them apart without reading the log.
+    if (!result.ok) {
+      process.exit(result.reason === 'not-configured' ? 2 : 1);
+    }
   });
 
 busCommand

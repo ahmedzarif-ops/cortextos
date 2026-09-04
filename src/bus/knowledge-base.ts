@@ -241,6 +241,48 @@ export function queryKnowledgeBase(
 /**
  * Ingest files into the knowledge base.
  */
+/**
+ * Outcome of an ingest. Returned rather than assumed.
+ *
+ * `ok:false` with `reason:'unverifiable'` is deliberately distinct from a known
+ * failure: if the summary line cannot be parsed we do not know what happened,
+ * and "we could not check" must never be reported as "it worked".
+ */
+export interface IngestResult {
+  ok: boolean;
+  ingested: number | null;
+  errors: number | null;
+  reason?: 'not-configured' | 'missing-path' | 'tool-failed' | 'ingested-nothing' | 'unverifiable';
+  detail?: string;
+  /**
+   * Per-source outcome: WHICH sources landed and which failed, by name.
+   *
+   * SCOPE, stated so this is not over-read. The per-file CHUNK COUNTS are not
+   * independent corroboration of the total — mmrag computes `count` once per
+   * file and does `total += count`, printing that same variable, so a per-file
+   * count is the total with more decimal places and inherits any error in it.
+   *
+   * What IS independent is the NAME and the STATUS: "MEMORY.md failed,
+   * 2026-09-04.md landed" is information the global count cannot express at
+   * all, and it is what lets a retry target the file that failed instead of
+   * redoing the whole run.
+   *
+   * KNOWN GAP this does NOT fix (mmrag-side, scoped separately): `count`
+   * increments immediately after `collection.upsert`, so it is genuinely on the
+   * write path — but when embedding raises mid-file the exception unwinds
+   * `ingest_text_file` and the partially-accumulated count is DISCARDED. Chunks
+   * already written are then reported as 0. So a `failed` status here can still
+   * mean "some chunks landed", and only retrieval can tell you which.
+   */
+  files?: IngestFileOutcome[];
+}
+
+export interface IngestFileOutcome {
+  name: string;
+  status: 'added' | 'already-present' | 'skipped' | 'failed' | 'missing';
+  chunks: number | null;
+}
+
 export function ingestKnowledgeBase(
   paths: string[],
   options: {
@@ -251,7 +293,7 @@ export function ingestKnowledgeBase(
     frameworkRoot: string;
     instanceId: string;
   },
-): void {
+): IngestResult {
   const { agent, scope = 'shared', force, frameworkRoot, instanceId } = options;
   // Normalize once (see queryKnowledgeBase for rationale).
   const org = normalizeOrgName(frameworkRoot, options.org);
@@ -260,7 +302,7 @@ export function ingestKnowledgeBase(
 
   // Correctness fix: if the KB is not configured for this org, the underlying
   // python MMRAG tool exits with "Config not found. Run setup first" and
-  // execFileSync (below, stdio: inherit) throws a non-zero-exit error. That
+  // execFileSync (below, stdio ['inherit','pipe','pipe']) throws a non-zero-exit error. That
   // throw used to bubble up through the CLI action handler as an unhandled
   // exception, dumping a full Node stack trace on top of the python error
   // message — ugly and alarming for operators who were just running ingest
@@ -271,7 +313,7 @@ export function ingestKnowledgeBase(
       `[kb] Knowledge base not configured for org ${org}. Skipping ingest — ` +
       `run setup to enable (see HEARTBEAT.md step 10 for the config path).`,
     );
-    return;
+    return { ok: false, ingested: null, errors: null, reason: 'not-configured' };
   }
 
   const pythonPath = getVenvPython(frameworkRoot);
@@ -279,6 +321,15 @@ export function ingestKnowledgeBase(
 
   // Determine collection name (same logic as kb-ingest.sh)
   let collection: string;
+  // A source that does not exist cannot be ingested, and the python tool prints
+  // "NOT FOUND" and carries on. Catch it here so the caller gets a reason rather
+  // than a successful-looking run over nothing.
+  const missing = paths.filter((p) => !existsSync(p));
+  if (missing.length > 0) {
+    console.error(`ERROR: source path(s) not found: ${missing.join(', ')}`);
+    return { ok: false, ingested: null, errors: null, reason: 'missing-path', detail: missing.join(', ') };
+  }
+
   if (scope === 'private') {
     if (!agent) throw new Error('--agent or CTX_AGENT_NAME required for --scope private');
     collection = `agent-${agent}`;
@@ -308,6 +359,10 @@ export function ingestKnowledgeBase(
   // than a single Gemini call needs.
   const KB_INGEST_TIMEOUT_FLOOR_MS = 60_000;
   const KB_INGEST_TIMEOUT_DEFAULT_MS = 600_000;
+  // Ceiling for the captured output. Deliberately generous: on overflow spawnSync
+  // KILLS the child, so an undersized buffer does not truncate a log — it aborts
+  // the work. 64MB is far beyond any real ingest transcript.
+  const KB_INGEST_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
   const requestedTimeout = Number(process.env.KB_INGEST_TIMEOUT_MS);
   const ingestTimeoutMs = Math.max(
     KB_INGEST_TIMEOUT_FLOOR_MS,
@@ -316,14 +371,178 @@ export function ingestKnowledgeBase(
       : KB_INGEST_TIMEOUT_DEFAULT_MS,
   );
 
-  execFileSync(pythonPath, args, {
-    encoding: 'utf-8',
-    timeout: ingestTimeoutMs,
-    env,
-    stdio: 'inherit',
-  });
+  // stdio was 'inherit', which meant the output went straight past this process
+  // and nothing here could tell a successful ingest from a quota error. The tool
+  // printed "Done!", this printed "Ingest complete", and both were unconditional.
+  // Captured and echoed instead: operators still see everything, and the result
+  // is now something we can actually check.
+  //
+  // TRADE-OFF, stated because it is a real loss: piping means the output arrives
+  // when the run ENDS, not as it goes. A long ingest now looks silent while it
+  // works. That is the price of being able to read the result at all.
+  //
+  // maxBuffer is NOT optional here. execFileSync defaults to 1MB, and on overflow
+  // spawnSync KILLS THE CHILD with ENOBUFS — so capturing the output in order to
+  // check it would, on a large ingest, turn a SUCCEEDING run into a KILLED,
+  // PARTIALLY-INDEXED one. Measured: 2MB of child output throws ENOBUFS with
+  // stdout truncated at 1114112 bytes; the same run returns cleanly at 64MB.
+  // Retry logging on this same stdout makes large outputs likelier, not rarer.
+  let output = '';
+  try {
+    output = execFileSync(pythonPath, args, {
+      encoding: 'utf-8',
+      timeout: ingestTimeoutMs,
+      env,
+      maxBuffer: KB_INGEST_MAX_BUFFER_BYTES,
+      stdio: ['inherit', 'pipe', 'pipe'],
+    }) as unknown as string;
+    if (output) process.stdout.write(output);
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string; message?: string };
+    const combined = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+    if (combined) process.stdout.write(combined);
+    console.error(`ERROR: ingest failed — ${e.message ?? 'unknown error'}`);
+    return { ok: false, ingested: null, errors: null, reason: 'tool-failed', detail: e.message };
+  }
 
-  console.log(`\nIngest complete → collection: ${collection}`);
+  const parsed = parseIngestSummary(output);
+
+  if (parsed.ingested === null) {
+    // The tool ran and exited 0, but said nothing we recognise. That is not
+    // success — it is an unread result, and the whole defect this replaces was
+    // an unread result being announced as success.
+    console.error(
+      'ERROR: could not verify the ingest — no "Done! Ingested N" line in the output. ' +
+      'Treating as FAILED rather than assuming it worked.',
+    );
+    return { ok: false, ingested: null, errors: null, reason: 'unverifiable' };
+  }
+
+  if (parsed.errors && parsed.errors > 0) {
+    console.error(`ERROR: ingest reported ${parsed.errors} error(s) — collection ${collection} may be incomplete.`);
+    return { ok: false, ingested: parsed.ingested, errors: parsed.errors, reason: 'tool-failed' };
+  }
+
+  // Fail only when NOTHING was handled.
+  //
+  // This deliberately does NOT key on `skipped`: mmrag increments that counter only in its
+  // directory branch, so a single already-present FILE leaves it at 0. Keyed on `skipped`,
+  // a re-ingest of already-complete memory reports FAILURE — which would have broken a
+  // fleet-wide re-ingest on every seat that was already up to date, the exact inverse of
+  // the defect this fixes. `handled` counts sources that reached a real outcome.
+  const handled = parsed.files.filter(
+    (f) => f.status === 'added' || f.status === 'already-present',
+  ).length;
+  if (parsed.ingested === 0 && parsed.skipped === 0 && handled === 0 && paths.length > 0) {
+    console.error(
+      `ERROR: ingest indexed 0 chunks from ${paths.length} source(s) and handled none. ` +
+      'A run asked to index something that indexed nothing has not succeeded.',
+    );
+    return { ok: false, ingested: 0, errors: parsed.errors, reason: 'ingested-nothing' };
+  }
+
+  console.log(`\nIngest complete → collection: ${collection} (${parsed.ingested} chunk(s))`);
+  return { ok: true, ingested: parsed.ingested, errors: parsed.errors ?? 0 };
+}
+
+/**
+ * Read the tool's own summary rather than trusting its exit code alone.
+ *
+ * Returns `ingested: null` when the summary line is absent — "could not parse"
+ * is a distinct answer from "parsed as zero", and collapsing the two is how an
+ * unverifiable run gets reported as a clean one.
+ */
+export function parseIngestSummary(output: string): {
+  ingested: number | null;
+  skipped: number;
+  errors: number | null;
+  files: IngestFileOutcome[];
+} {
+  // Per-source outcome, recovered from lines the tool already prints:
+  //   Ingesting: <name>      then  "  Added N chunk(s)"  or  "  ERROR: ..."
+  //   Ingesting directory: X then  "  Processing: <rel>" then indented Added/ERROR
+  //   NOT FOUND: <path>
+  // The information was always there; only the totals were being read.
+  // INDENT IS A SEAM, SO DO NOT DEPEND ON IT.
+  //
+  // These markers are printed by mmrag with a leading indent that is a formatting choice on
+  // the OTHER side of this boundary — and PR #9 turns it into an f-string variable
+  // (f"{indent}Already present ..."), so a call site passing '' would silently stop matching
+  // an `^\s+` anchor. Nothing would error: the line would simply not be recognised, and an
+  // already-present file would be misread as failed.
+  //
+  // `^\s*` accepts any indent INCLUDING none, so this parser cannot be broken by a
+  // formatting change it does not control. The `pending !== null` guard is what keeps a
+  // column-0 line (mmrag's own "ERROR: Config not found") from being attributed to a file:
+  // that error is printed before any "Ingesting:" line, so there is nothing pending.
+  const files: IngestFileOutcome[] = [];
+  let pending: string | null = null;
+  for (const raw of output.split('\n')) {
+    const notFound = raw.match(/^NOT FOUND:\s*(.+?)\s*$/);
+    if (notFound) {
+      files.push({ name: notFound[1], status: 'missing', chunks: null });
+      pending = null;
+      continue;
+    }
+    const start = raw.match(/^(?:Ingesting|\s+Processing):\s*(.+?)\s*$/);
+    if (start && !/^Ingesting directory:/.test(raw)) {
+      if (pending !== null) files.push({ name: pending, status: 'failed', chunks: null });
+      pending = start[1];
+      continue;
+    }
+    const added = raw.match(/^\s*Added\s+(\d+)\s+chunk/);
+    if (added && pending !== null) {
+      files.push({ name: pending, status: 'added', chunks: Number(added[1]) });
+      pending = null;
+      continue;
+    }
+    // A file already fully indexed adds nothing and that is a CORRECT outcome, not a
+    // failure. Without this it fell through to "announced but never resolved" below and
+    // was reported as failed — which would have called every already-complete source in
+    // a fleet re-ingest broken.
+    // "0 new chunk(s)" is the neutral line: no chunks added and no reason claimed. It is
+    // only reached when nothing above it claimed the file, because the ERROR and SKIP
+    // markers below/above resolve `pending` first — FIRST MARKER WINS. The older
+    // "Already present" wording is still accepted so a mixed-version binary parses.
+    if (/^\s*(?:0 new chunk\(s\)|Already present)/.test(raw) && pending !== null) {
+      files.push({ name: pending, status: 'already-present', chunks: 0 });
+      pending = null;
+      continue;
+    }
+    // SKIP is not an error and not an ingest: unsupported format, or an empty document.
+    if (/^\s*SKIP\b/.test(raw) && pending !== null) {
+      files.push({ name: pending, status: 'skipped', chunks: 0 });
+      pending = null;
+      continue;
+    }
+    // `ERROR\b`, NOT `ERROR:`. mmrag prints TWO shapes and only one has the colon:
+    //   "  ERROR: {e}"                      (the ingest loop, both branches)
+    //   "  ERROR extracting {name}: {e}"    (extraction, mmrag.py:960)
+    // The second was invisible to an `ERROR:` anchor, so a failed PDF extraction never
+    // resolved `pending` and fell through to the neutral line — reporting a FAILURE as a
+    // correct no-op. Anchoring on the word covers both and any future shape.
+    if (/^\s*ERROR\b/.test(raw) && pending !== null) {
+      files.push({ name: pending, status: 'failed', chunks: null });
+      pending = null;
+    }
+  }
+  // A source announced but never resolved is a failure, not a silent success.
+  if (pending !== null) files.push({ name: pending, status: 'failed', chunks: null });
+
+  const ingestedMatch = output.match(/Done!\s+Ingested\s+(\d+)\s+new chunk/);
+  const skippedMatch = output.match(/^\s*Skipped:\s*(\d+)/m);
+  const errorsMatch = output.match(/^\s*Errors:\s*(\d+)/m);
+  const missingMatch = output.match(/^\s*Missing:\s*(\d+)/m);
+
+  const errorsFromLines = (errorsMatch ? Number(errorsMatch[1]) : 0)
+    + (missingMatch ? Number(missingMatch[1]) : 0);
+
+  return {
+    ingested: ingestedMatch ? Number(ingestedMatch[1]) : null,
+    skipped: skippedMatch ? Number(skippedMatch[1]) : 0,
+    errors: ingestedMatch ? errorsFromLines : null,
+    files,
+  };
 }
 
 /**

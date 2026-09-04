@@ -1083,6 +1083,14 @@ def cmd_ingest(args):
     total = 0
     skipped = 0
     errors = 0
+    missing = 0
+    # Counted separately from `skipped` ON PURPOSE. `skipped` is incremented only in
+    # the directory branch, so a single already-present FILE leaves it at 0 — and an exit
+    # rule keyed on it calls a correct no-op a failure. `processed` means "this source was
+    # handled and did not raise", which is true whether it added chunks or had none to add.
+    processed = 0
+    paths_given = bool(args.paths)
+
     # Per-file outcomes: (display_name, landed, error_or_None). A run that half-worked has to be
     # able to SAY SO per file — an aggregate "Errors: 2" cannot tell you which file is now a
     # partial document in the store, and a partial document is worse than a missing one because
@@ -1134,7 +1142,13 @@ def cmd_ingest(args):
         reported as 0 added, 1 error. The ingest under-reports and `list` disagrees with it, which
         is precisely how a seat concludes "nothing landed" about a file that is now HALF PRESENT.
         """
-        nonlocal total, skipped, errors
+        nonlocal total, skipped, errors, processed
+        # `processed` is #7's counter and it is declared here because #9 REPLACED the inline
+        # try/except that used to increment it. Merging the two changes without this line
+        # would leave `processed` at 0 for every file, and #7's exit rule
+        # (`total == 0 and processed == 0 and paths_given` -> non-zero) would then call a
+        # correct no-op a FAILURE — the exact defect #7 exists to remove, reintroduced by the
+        # merge rather than by either change. Neither PR's own suite covers the other's counter.
 
         # THE INDENT (guard wxr52 -> city z2nuj, 2026-09-04). Guard flagged that #7's parsers
         # required LEADING WHITESPACE (/^\s+.../), so a call site passing "" would silently stop
@@ -1191,6 +1205,11 @@ def cmd_ingest(args):
                 outcomes.append((display, landed, e))
             return
         total += count
+        # #7'''s counter, restored at the point its inline try/except incremented it: after
+        # ingest_file RETURNED, i.e. "handled and did not raise". Deliberately NOT on the
+        # except path above — a file that raised was not processed, and counting it would make
+        # #7'''s "nothing was handled" exit rule unable to fire on a run where everything failed.
+        processed += 1
         if count > 0:
             print(f"{indent}Added {count} chunk(s)")
         else:
@@ -1238,9 +1257,14 @@ def cmd_ingest(args):
                     _ingest_one(f, str(f.relative_to(p)), "    ")
             elif p.is_file():
                 print(f"Ingesting: {p.name}")
+                # #9's _ingest_one SUBSUMES #7's inline try/except here: it carries #7's
+                # neutral "0 new chunk(s)" line verbatim, and adds the partial accounting.
+                # #7's `processed += 1` moved INTO _ingest_one (see its nonlocal above),
+                # so it still fires once per handled file and no counter was dropped.
                 _ingest_one(p, p.name, "  ")
             else:
                 print(f"NOT FOUND: {p}")
+                missing += 1
     finally:
         _tracker.persist()
 
@@ -1263,8 +1287,31 @@ def cmd_ingest(args):
         print("  PARTIAL COUNT UNKNOWN (collection could not be read back):")
         for d in unknowns:
             print(f"    {d}")
-
+    if missing:
+        print(f"  Missing: {missing}")
     print(_tracker.summary_line())
+
+    # Exit non-zero when the run did not do what it was asked to do.
+    #
+    # Until 2026-09-04 this printed "Done!" and returned None on EVERY path, so
+    # a 429 RESOURCE_EXHAUSTED, a nonexistent source, and a fully successful
+    # ingest were indistinguishable to any caller: all three exited 0. Measured
+    # consequence on this fleet: a day of memories never reached the KB while
+    # every heartbeat reported success, and later queries answered confidently
+    # from stale August documents.
+    #
+    # "Ingested 0 while sources were given" counts as failure. A run that was
+    # asked to index something and indexed nothing has not succeeded, even when
+    # nothing raised.
+    if errors or missing:
+        return 1
+    # Fail only when NOTHING was handled. Deliberately keyed on `processed`, not on
+    # `skipped`: a re-ingest of an already-complete file legitimately adds 0 chunks, and
+    # calling that a failure would make a fleet-wide re-ingest report failure on every seat
+    # whose memory was already indexed — the exact opposite of the defect being fixed.
+    if total == 0 and processed == 0 and paths_given:
+        return 1
+    return 0
 
 
 def deduplicate_results(results, similarity_ratio=0.85):
@@ -1729,7 +1776,11 @@ def main():
         "usage": cmd_usage,
     }
 
-    commands[args.command](args)
+    # Propagate the command's exit code. This line used to discard the return
+    # value, so a command could report failure and the process would still exit
+    # 0 — which is exactly how `kb-ingest` came to print "Done!" on a quota
+    # error and be believed by every caller.
+    sys.exit(commands[args.command](args) or 0)
 
 
 if __name__ == "__main__":

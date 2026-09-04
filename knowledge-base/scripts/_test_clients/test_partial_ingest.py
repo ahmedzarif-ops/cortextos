@@ -622,6 +622,46 @@ def test_no_fault_still_reports_a_number():
                detail=out[-400:])
 
 
+def test_pr7_processed_counter_survives_pr9_ingest_one():
+    print("\n[test 11/11] THE #7/#9 SEAM: a correct no-op must not exit non-zero")
+    # ⛔ THIS TEST EXISTS BECAUSE OF THE MERGE, NOT BECAUSE OF EITHER CHANGE.
+    # #7 added `processed` and keyed its exit rule on it:
+    #     total == 0 and processed == 0 and paths_given  ->  non-zero
+    # incrementing it inside an INLINE try/except in cmd_ingest. #9 REPLACED that inline
+    # block with _ingest_one(). Merging the two without moving the counter leaves
+    # `processed` at 0 for every file, and a correct no-op — re-ingesting a file that is
+    # already fully present — then exits NON-ZERO. That is precisely the defect #7 exists
+    # to remove, reintroduced by the MERGE rather than by either change.
+    #
+    # ⭐ AND NEITHER PR'S SUITE CAN SEE IT. Measured on the integrated tree: deleting
+    # `processed += 1` leaves THIS FILE'S other ten scenarios GREEN (rc=0) and #7's 22
+    # vitest tests GREEN, because each suite tests its own change against its own base.
+    # A conflict resolution is a THIRD change, and it is the one nothing was watching.
+    with tempfile.TemporaryDirectory() as d:
+        f = _write_file(d, "again.md", 4)
+        col = FakeCollection()
+        monkey = []
+        try:
+            _install(monkey, col, fail_on_call=None)
+            import io, contextlib
+            with contextlib.redirect_stdout(io.StringIO()):
+                mmrag.cmd_ingest(_Args([str(f)]))          # first run: writes 4
+                buf2 = io.StringIO()
+                with contextlib.redirect_stdout(buf2):
+                    rc2 = mmrag.cmd_ingest(_Args([str(f)]))  # second run: nothing new
+            out2 = buf2.getvalue()
+        finally:
+            _restore(monkey)
+
+        # PRECONDITION: the second run really is the no-op case, or the rc below proves nothing.
+        _check("PRECONDITION: the rerun added nothing", "Ingested 0 new chunk(s)" in out2,
+               detail=out2[-200:])
+        _check("PRECONDITION: and it was a SKIP, not an error", "Errors:" not in out2,
+               detail=out2[-200:])
+        _check("a correct no-op does NOT exit non-zero (#7's rule, #9's call path)",
+               rc2 in (0, None), detail=f"rc={rc2!r} — `processed` was not incremented")
+
+
 def main():
     test_partial_is_reported_and_matches_list()
     test_clean_run_still_agrees()
@@ -633,13 +673,14 @@ def main():
     test_unknown_arm_when_the_readback_fails()
     test_unknown_arm_when_the_baseline_was_never_taken()
     test_no_fault_still_reports_a_number()
+    test_pr7_processed_counter_survives_pr9_ingest_one()
     print()
     if FAILURES:
         print(f"FAILED: {len(FAILURES)} assertion(s)")
         for f in FAILURES:
             print(f"  - {f}")
         return 1
-    print("ALL PASS (10 scenarios)")
+    print("ALL PASS (11 scenarios)")
     return 0
 
 
