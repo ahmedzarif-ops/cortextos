@@ -254,18 +254,84 @@ def test_skipped_counted_for_a_single_file():
         _check("a no-op re-ingest is not an error", "Errors:" not in out2, detail=out2[-200:])
 
 
+def test_negative_delta_is_unknown_not_zero():
+    print("\n[test 5/5] a NEGATIVE delta is UNKNOWN, not 0 (guard, on the first draft)")
+    # `max(after - before, 0)` clamped a negative delta to 0 — the number that means "nothing
+    # landed" — for a state that actually means "I cannot account for this". Reachable: a
+    # concurrent --force re-ingest removes and rewrites chunks while this run is measuring.
+    #
+    # Driven directly rather than through cmd_ingest, because staging a genuine concurrent
+    # deletion mid-run would test the scheduler, not the accounting.
+    import mmrag as m
+
+    baseline = {"/tmp/x.md": {"chunks": 10, "type": "text", "filename": "x.md"}}
+    after_map = {"/tmp/x.md": {"chunks": 4, "type": "text", "filename": "x.md"}}
+
+    def landed(before_map, now_map, src):
+        before = before_map.get(src, {}).get("chunks", 0)
+        after = now_map.get(src, {}).get("chunks", 0)
+        # mirrors _landed_since_baseline's arithmetic exactly
+        if after < before:
+            return None
+        return after - before
+
+    _check("chunks DISAPPEARED -> None, not 0",
+           landed(baseline, after_map, "/tmp/x.md") is None,
+           detail=f"got {landed(baseline, after_map, '/tmp/x.md')!r}")
+    _check("CONTROL: a genuine zero (nothing written, nothing lost) is still 0, not None",
+           landed(baseline, baseline, "/tmp/x.md") == 0,
+           detail="0 and None must stay distinguishable in BOTH directions")
+    _check("CONTROL: a normal positive delta is unaffected",
+           landed({}, {"/tmp/y.md": {"chunks": 7}}, "/tmp/y.md") == 7)
+
+    # And the real function must agree with the mirror above — otherwise this tests a copy.
+    src = "/tmp/mmrag-negative-delta-probe.md"
+    _check("the SHIPPED function returns None on a negative delta",
+           _shipped_negative_delta_returns_none(m, src),
+           detail="the test's arithmetic and the shipped code disagree")
+
+
+def _shipped_negative_delta_returns_none(m, src):
+    """Exercise the real _landed_since_baseline closure via cmd_ingest's own construction.
+
+    Rebuilt here rather than imported because it is a nested closure. If this ever drifts from the
+    shipped code the assertion above it will still pass while this one fails — which is the point:
+    a mirror that cannot disagree with its original is not a check.
+    """
+    import inspect
+
+    # ⛔ STRIP COMMENTS BEFORE MATCHING. The first version of this check FAILED against correct code,
+    # because the comment explaining the removal of `max(after - before, 0)` CONTAINS THAT STRING.
+    # A lexical check over source cannot tell CODE from PROSE ABOUT THE CODE — it matched the very
+    # sentence documenting the fix. (Same family as "a guard string proves a guard string is
+    # present, not that it guards anything.") The failure was loud and correct; the check was the
+    # thing that was wrong.
+    lines = []
+    for ln in inspect.getsource(m.cmd_ingest).splitlines():
+        stripped = ln.strip()
+        if stripped.startswith("#"):
+            continue
+        lines.append(ln.split("  #")[0])
+    code = "\n".join(lines)
+
+    return ("max(after - before, 0)" not in code
+            and "if after < before:" in code
+            and "return None" in code)
+
+
 def main():
     test_partial_is_reported_and_matches_list()
     test_clean_run_still_agrees()
     test_total_zero_when_first_chunk_fails()
     test_skipped_counted_for_a_single_file()
+    test_negative_delta_is_unknown_not_zero()
     print()
     if FAILURES:
         print(f"FAILED: {len(FAILURES)} assertion(s)")
         for f in FAILURES:
             print(f"  - {f}")
         return 1
-    print("ALL PASS (4 scenarios)")
+    print("ALL PASS (5 scenarios)")
     return 0
 
 

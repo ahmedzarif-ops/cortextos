@@ -1114,7 +1114,16 @@ def cmd_ingest(args):
         src = str(Path(path).resolve())
         before = baseline.get(src, {}).get("chunks", 0)
         after = now.get(src, {}).get("chunks", 0)
-        return max(after - before, 0)
+        # ⛔ NOT `max(after - before, 0)` (guard, 2026-09-04, on the first draft of this function).
+        # A NEGATIVE delta — chunks present at baseline and GONE at read-back — is not "nothing
+        # landed", it is "I cannot account for this". Clamping it to 0 printed the number that means
+        # nothing happened, which is the exact ambiguity the None below exists to prevent, and it
+        # made the COMMENT STRICTER THAN THE CODE.
+        # Not theoretical: a concurrent `--force` re-ingest of the same file removes and rewrites
+        # chunks, and the fleet-wide re-ingest after #6/#7 has several seats touching one collection.
+        if after < before:
+            return None
+        return after - before
 
     def _ingest_one(path, display, indent):
         """Ingest one file, and make a MID-FILE FAILURE ACCOUNT FOR WHAT IT ALREADY WROTE.
