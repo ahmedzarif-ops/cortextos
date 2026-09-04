@@ -1381,11 +1381,12 @@ def cmd_status(args):
     config = load_config()
     collection_name = args.collection or config.get("default_collection", "default")
 
-    try:
-        collection = get_chroma_collection(collection_name)
-        count = collection.count()
-    except Exception:
-        count = 0
+    # Was: `except Exception: count = 0`, which reported an UNOPENABLE store as a chunk
+    # count of zero. That is worse than cmd_list's old behaviour: "No data found" at least
+    # reads as an absence, while "Total chunks: 0" reads as a MEASUREMENT, and a reader has
+    # no reason to doubt a number.
+    collection = open_collection_or_exit(collection_name)
+    count = collection.count()
 
     print(f"Collection: {collection_name}")
     print(f"Total chunks: {count}")
@@ -1415,19 +1416,49 @@ def cmd_status(args):
             print(f"  {t}: {c} chunks")
 
 
+def open_collection_or_exit(collection_name):
+    """Open a collection, or FAIL CLOSED naming the store that was consulted.
+
+    The defect this replaces: callers wrapped this in a bare `except` and turned an
+    UNOPENABLE store into "No data found." (cmd_list) or `count = 0` (cmd_status), both
+    at exit 0. An empty collection and a store that could not be opened at all then
+    produced the same answer — and sentinel read the WHOLE FLEET as empty across six runs
+    before anyone doubted the reader.
+
+    `~/.mmrag` is the default when MMRAG_DIR is unset, so a mis-set or unset environment
+    silently consults a store that has never existed rather than the one you meant. That is
+    why the resolved path is printed: "empty" is only meaningful next to WHICH store.
+    """
+    try:
+        return get_chroma_collection(collection_name)
+    except Exception as e:
+        print(f"ERROR: could not open the knowledge store at {CHROMADB_DIR}", file=sys.stderr)
+        print(f"  collection: {collection_name}", file=sys.stderr)
+        print(f"  cause: {type(e).__name__}: {e}", file=sys.stderr)
+        print("  This is NOT an empty collection - the store could not be read.", file=sys.stderr)
+        # Point at the RIGHT remedy. A missing dependency and a mis-set path are the two
+        # observed causes and they need opposite fixes; printing the path advice for an
+        # ImportError sends the reader to check an environment variable that is already
+        # correct. The observed fleet-wide case was the venv, not the path.
+        if isinstance(e, ImportError):
+            print("  CAUSE IS A MISSING DEPENDENCY, not the path: run this with the "
+                  "knowledge-base venv python (knowledge-base/venv/bin/python3).", file=sys.stderr)
+        else:
+            print("  Check MMRAG_DIR / MMRAG_CHROMADB_DIR point at the intended store.", file=sys.stderr)
+        sys.exit(2)
+
+
 def cmd_list(args):
     config = load_config()
     collection_name = args.collection or config.get("default_collection", "default")
 
-    try:
-        collection = get_chroma_collection(collection_name)
-    except Exception:
-        print("No data found.")
-        return
+    collection = open_collection_or_exit(collection_name)
 
     all_data = collection.get(include=["metadatas"])
     if not all_data["ids"]:
-        print("No documents in collection.")
+        # Name the store in the EMPTY arm too. "Empty" is only meaningful next to which
+        # store was read, and this is the arm a reader is most likely to over-trust.
+        print(f"No documents in collection '{collection_name}' (store: {CHROMADB_DIR})")
         return
 
     # Group by source
