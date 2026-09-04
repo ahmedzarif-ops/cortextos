@@ -1,12 +1,32 @@
 #!/usr/bin/env bash
-# setup-hooks.sh — Install cortextOS git hooks into the local repo
+# setup-hooks.sh — point this clone at the repo's tracked git hooks
 #
 # Run once after cloning:
 #   bash scripts/setup-hooks.sh
 #
-# Installs a pre-push hook that runs npm run build && npm test before
-# any push. If either fails, the push is aborted and you fix it locally
-# rather than failing on CI.
+# Installs a pre-push hook that runs npm run build && npm test before any push.
+# If either fails, the push is aborted and you fix it locally rather than on CI.
+#
+# WHY THIS SETS core.hooksPath INSTEAD OF COPYING (changed 2026-09-04, guard F1)
+#
+# It used to `cp scripts/hooks/pre-push .git/hooks/pre-push`, non-clobbering. Both halves of
+# that were wrong for the failure we actually had:
+#
+#   1. A COPY GOES STALE THE MOMENT THE SOURCE IS FIXED. The GIT_DIR-leak repair landed in
+#      scripts/hooks/pre-push. Every clone that had already run this script kept executing its
+#      Aug-19 copy, which has no `unset` lines at all. So MERGING THE FIX DISARMED NOTHING —
+#      the repaired hook sat in the tree while the leaking one kept running.
+#   2. NON-CLOBBERING MADE THAT PERMANENT. Seeing a hook already there, the script printed
+#      "Skipped ... (leaving your hook in place)" and exited 0. A reassuring success line over
+#      a clone that is still leaking.
+#
+# core.hooksPath makes the TRACKED directory the hooks that run. There is no second copy, so
+# there is nothing to fall behind: a fix to scripts/hooks/ is live on the next push, and
+# `git log` on that file is an honest history of what actually executes.
+#
+# Note that git ignores .git/hooks entirely once core.hooksPath is set, so any old copy there
+# becomes inert rather than conflicting. This script says so explicitly instead of leaving a
+# stale file to look active.
 
 set -euo pipefail
 
@@ -15,36 +35,43 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   exit 1
 }
 
-HOOKS_DIR="$REPO_ROOT/.git/hooks"
+cd "$REPO_ROOT"
 
-install_hook() {
-  local name="$1"
-  local src="$REPO_ROOT/scripts/hooks/$name"
-  local dest="$HOOKS_DIR/$name"
+HOOKS_SRC_REL="scripts/hooks"
 
-  if [[ ! -f "$src" ]]; then
-    echo "Warning: hook source not found: $src (skipping)" >&2
-    return
+if [[ ! -d "$REPO_ROOT/$HOOKS_SRC_REL" ]]; then
+  echo "Error: hook directory not found: $REPO_ROOT/$HOOKS_SRC_REL" >&2
+  exit 1
+fi
+
+if [[ ! -x "$REPO_ROOT/$HOOKS_SRC_REL/pre-push" ]]; then
+  echo "Warning: $HOOKS_SRC_REL/pre-push is not executable; fixing." >&2
+  chmod +x "$REPO_ROOT/$HOOKS_SRC_REL/pre-push"
+fi
+
+echo "Pointing this clone at the repo's tracked hooks..."
+git config core.hooksPath "$HOOKS_SRC_REL"
+
+# READ IT BACK. Setting a config value and reporting success without reading it is the same
+# shape as the copy that went stale: a claim about state rather than a look at it.
+CONFIGURED="$(git config --get core.hooksPath || true)"
+if [[ "$CONFIGURED" != "$HOOKS_SRC_REL" ]]; then
+  echo "Error: core.hooksPath did not take (got '${CONFIGURED:-<unset>}')." >&2
+  exit 1
+fi
+echo "  core.hooksPath = $CONFIGURED"
+
+# Name the now-inert copy rather than leaving it to look active.
+STALE="$REPO_ROOT/.git/hooks/pre-push"
+if [[ -e "$STALE" || -L "$STALE" ]]; then
+  if cmp -s "$REPO_ROOT/$HOOKS_SRC_REL/pre-push" "$STALE"; then
+    echo "  Note: .git/hooks/pre-push exists and matches the tracked hook. It is now unused"
+    echo "        (core.hooksPath takes precedence); safe to delete."
+  else
+    echo "  ⚠ .git/hooks/pre-push exists and DIFFERS from the tracked hook."
+    echo "    It is now INERT — core.hooksPath takes precedence — but if you installed it"
+    echo "    deliberately, move it into $HOOKS_SRC_REL/ or it will no longer run."
   fi
+fi
 
-  # Non-clobbering: never overwrite an existing hook the user/operator installed
-  # (e.g. a local leak-guard pre-push). Only install when there is no hook, or
-  # when the existing hook is byte-identical to ours (already installed). The
-  # -L catches a broken symlink too, which -e alone would miss (and then clobber).
-  if [[ -e "$dest" || -L "$dest" ]]; then
-    if cmp -s "$src" "$dest"; then
-      echo "  Already installed: .git/hooks/$name"
-    else
-      echo "  Skipped: .git/hooks/$name already exists (leaving your hook in place)"
-    fi
-    return
-  fi
-
-  cp "$src" "$dest"
-  chmod +x "$dest"
-  echo "  Installed: .git/hooks/$name"
-}
-
-echo "Installing cortextOS git hooks..."
-install_hook pre-push
-echo "Done. Hooks active for this repo clone."
+echo "Done. Hooks active for this clone, and they track the repo."

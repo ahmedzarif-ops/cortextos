@@ -12,48 +12,118 @@
 // The failures were caused by the leak too, so the hook manufactured the red it then refused
 // to push on.
 //
-// Two tests, because the defect has two halves and either alone leaves it live: the hook must
-// not leak, AND a test must not depend on its caller having been careful.
+// Guard's discriminator for the two shapes, both from one leak:
+//   GIT_DIR = a plain .git             -> identity poison + a tree-deleting commit; core.bare untouched
+//   GIT_DIR = .git/worktrees/<name>    -> a single `git init` writes core.bare=true into the
+//                                         SHARED config, because `bare` is a common-config key
+// Which is why the isolation unit for provoking this is a SEPARATE CLONE, never a worktree:
+// a linked worktree shares .git/config with the parent.
+//
+// Three tests, because the defect has three halves and any one alone leaves it live: the hook
+// SOURCE must not leak, the hook THAT ACTUALLY RUNS must not leak, and a test must not depend
+// on its caller having been careful.
 import { strict as assert } from 'node:assert';
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { LEAKED_GIT_ENV, scrubLeakedGitEnv } from '../../helpers/git-env';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
-const LEAKED = [
-  'GIT_DIR',
-  'GIT_WORK_TREE',
-  'GIT_INDEX_FILE',
-  'GIT_OBJECT_DIRECTORY',
-  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
-  'GIT_COMMON_DIR',
-  'GIT_PREFIX',
-  'GIT_QUARANTINE_PATH',
-];
+// F3 — THIS FILE MUST NOT REPRODUCE THE DEFECT IT DOCUMENTS.
+//
+// The init() helper below runs `git init`, `git config`, `git add` and `git commit` with a
+// `cwd` and NO env override. That is correct-looking and wrong for exactly the reason this
+// file exists: run under the pre-push hook, the ambient GIT_DIR wins and those calls land in
+// the repository being pushed. Guard reproduced both effects from this very helper — a
+// poisoned user.name/user.email and a commit that deleted the tree.
+//
+// Module scope, before any test runs a git command. The one call that DELIBERATELY sets
+// GIT_DIR (the negative control) passes it explicitly in `env`, so it is unaffected — and it
+// is now provably deliberate rather than possibly ambient, which is the point.
+scrubLeakedGitEnv();
+
+/**
+ * Resolve the hook git will ACTUALLY run, honouring core.hooksPath.
+ *
+ * Reading `scripts/hooks/pre-push` proves what is in the tree. It says nothing about what
+ * executes — which is the entire F1 finding: the repaired source sat in the tree while a
+ * stale copy in .git/hooks kept running, so merging the fix disarmed nothing.
+ */
+function resolveEffectiveHook(): { path: string; exists: boolean; hooksPath: string | null } {
+  let hooksPath: string | null = null;
+  try {
+    hooksPath =
+      execFileSync('git', ['config', '--get', 'core.hooksPath'], {
+        cwd: REPO,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim() || null;
+  } catch {
+    hooksPath = null; // unset: `git config --get` exits 1, which is not an error here
+  }
+
+  const path = hooksPath
+    ? join(isAbsolute(hooksPath) ? hooksPath : join(REPO, hooksPath), 'pre-push')
+    : execFileSync('git', ['rev-parse', '--git-path', 'hooks/pre-push'], {
+        cwd: REPO,
+        encoding: 'utf-8',
+      }).trim();
+
+  return { path, exists: existsSync(path), hooksPath };
+}
+
+function assertUnsetsEveryVariable(source: string, label: string): void {
+  // Slice at the line that RUNS the build, not at the first mention of it: the hook's own
+  // header comment says "Runs npm run build && npm test", so indexOf('npm run build') lands
+  // on line 4 and the window excludes the very unsets it is meant to inspect. This caught
+  // exactly that on its first run.
+  const runsBuild = source.indexOf('if ! npm run build');
+  expect(runsBuild, `${label}: no longer runs the build the way this test locates it`).toBeGreaterThan(0);
+  const unsetBeforeWork = source.slice(0, runsBuild);
+  for (const key of LEAKED_GIT_ENV) {
+    expect(
+      new RegExp(`unset(\\s+[A-Z_]+)*\\s+${key}\\b`).test(unsetBeforeWork),
+      `${label}: ${key} is not unset before the hook runs the build and the suite`,
+    ).toBe(true);
+  }
+}
 
 describe('git plumbing env must not leak from the pre-push hook into the test suite', () => {
-  it('the hook source unsets every variable git exports to it', () => {
-    const hook = readFileSync(join(REPO, 'scripts', 'hooks', 'pre-push'), 'utf-8');
-    // Slice at the line that RUNS the build, not at the first mention of it: the hook's own
-    // header comment says "Runs npm run build && npm test", so indexOf('npm run build') lands
-    // on line 4 and the window excludes the very unsets it is meant to inspect. This test
-    // caught exactly that on its first run.
-    const runsBuild = hook.indexOf('if ! npm run build');
-    expect(runsBuild, 'the hook no longer runs the build the way this test locates it').toBeGreaterThan(0);
-    const unsetBeforeWork = hook.slice(0, runsBuild);
-    for (const key of LEAKED) {
-      expect(
-        new RegExp(`unset(\\s+[A-Z_]+)*\\s+${key}\\b`).test(unsetBeforeWork),
-        `${key} is not unset before the hook runs the build and the suite`,
-      ).toBe(true);
-    }
+  it('the hook SOURCE unsets every variable git exports to it', () => {
+    assertUnsetsEveryVariable(readFileSync(join(REPO, 'scripts', 'hooks', 'pre-push'), 'utf-8'), 'hook source');
   });
 
-  // THE BEHAVIOURAL HALF. The assertion above reads a file and would keep passing if git
+  // F2 — THE HOOK THAT ACTUALLY RUNS, not the one in the tree.
+  //
+  // Absence must be LOUD. If this returned early on a missing hook it would report a green
+  // over a clone whose real state is unknown, which is the same lie as the stale copy: a
+  // reassuring result standing in for a fact nobody checked.
+  it('the EFFECTIVE hook unsets them too — a merge fixes the source, not the copy that runs', (ctx) => {
+    const hook = resolveEffectiveHook();
+
+    if (!hook.exists) {
+      ctx.skip(
+        `SKIPPED, NOT PASSED — no pre-push hook is installed for this clone. ` +
+          `Looked at: ${hook.path} (core.hooksPath=${hook.hooksPath ?? '<unset>'}). ` +
+          `Nothing is gating pushes here, so there is nothing to verify. ` +
+          `Run: bash scripts/setup-hooks.sh`,
+      );
+      return;
+    }
+
+    assertUnsetsEveryVariable(
+      readFileSync(hook.path, 'utf-8'),
+      `EFFECTIVE hook (${hook.path}, core.hooksPath=${hook.hooksPath ?? '<unset>'}) — ` +
+        `this is a COPY that has fallen behind scripts/hooks/pre-push; ` +
+        `run 'bash scripts/setup-hooks.sh' to point core.hooksPath at the tracked hooks`,
+    );
+  });
+
+  // THE BEHAVIOURAL HALF. The assertions above read files and would keep passing if git
   // changed what it exports; this one demonstrates the actual mechanism, so the reader can
   // see WHY the unset matters rather than taking the comment's word for it.
   it('GIT_DIR beats cwd, which is the whole defect — and clearing it restores cwd', () => {
@@ -89,7 +159,7 @@ describe('git plumbing env must not leak from the pre-push hook into the test su
       // THE FIX. Same call, same ambient GIT_DIR, scrubbed before spawning: cwd governs again.
       const decoyAfterLeak = headOf(decoy);
       const scrubbed = { ...process.env, GIT_DIR: join(decoy, '.git') };
-      for (const key of LEAKED) delete scrubbed[key];
+      for (const key of LEAKED_GIT_ENV) delete scrubbed[key];
       execFileSync('git', ['commit', '--allow-empty', '-m', 'scrubbed'], {
         cwd: target,
         stdio: 'ignore',
