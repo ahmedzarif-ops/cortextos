@@ -91,6 +91,15 @@ beforeEach(() => {
   messageHandler = null;
 });
 
+describe('CodexAppServerPTY daemon lifecycle provenance env', () => {
+  it('injects CTX_DAEMON_PID as the spawning daemon pid', () => {
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    const env = (pty as unknown as { buildEnv(): Record<string, string> }).buildEnv();
+    expect(env.CTX_DAEMON_PID).toBe(String(process.pid));
+    expect(env.CTX_AGENT_NAME).toBe(mockEnv.agentName);
+  });
+});
+
 describe('CodexAppServerPTY socket path policy', () => {
   it('uses codex.sock in the agent state dir by default', () => {
     const pty = new CodexAppServerPTY(mockEnv, {});
@@ -1431,7 +1440,38 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
     expect(typeof entry.timestamp).toBe('string');
   });
 
-  it('reports unknown rather than echoing config when app-server has not exposed the actual model', () => {
+  it('falls back to the CONFIGURED model when the app-server never reports one', () => {
+    // ⛔ THE LEDGER KNEW THE ANSWER AND WROTE 'unknown' BESIDE IT (guard a4dv8, 2026-09-04).
+    // `model` fed the dashboard's resolvePricingKey(), which matches on substrings
+    // (opus / haiku / codex / gpt-5) and DEFAULTS TO SONNET for anything else. So an
+    // app-server that never emitted a model had its Codex traffic priced at Anthropic
+    // rates — while `configured_model`, one line below in the same object, held the
+    // right value the whole time.
+    // Measured on this pricing table: input 1.25 -> 3.00 per M (+140%) and output
+    // 10 -> 15 (+50%) when 'unknown' resolves to sonnet.
+    // ⚠ AND A CORRECTION TO THE MAGNITUDE AS RELAYED: the cacheWrite lever (sonnet 3.75
+    // vs codex 0) CANNOT fire on this path — this entry hardcodes cache_write_tokens: 0.
+    // The overcharge is real; it is input/output/cacheRead, not cache writes.
+    const pty = new CodexAppServerPTY(mockEnv, { model: 'gpt-5-codex-preview' });
+    (pty as unknown as { _threadId: string })._threadId = 'thread-9';
+    feedTokenUsage(pty, {
+      last: { cachedInputTokens: 0, inputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
+      total: { cachedInputTokens: 0, inputTokens: 100, outputTokens: 50, reasoningOutputTokens: 0, totalTokens: 150 },
+      modelContextWindow: 200000,
+    });
+
+    const entry = lastAppendedEntry()!;
+    expect(entry.model).toBe('gpt-5-codex-preview');
+    // The configured value is still reported separately — the fallback must not
+    // collapse the two fields into one, or an OBSERVED model and an ASSUMED one
+    // become indistinguishable, which is the ambiguity this whole ledger exists to avoid.
+    expect(entry.configured_model).toBe('gpt-5-codex-preview');
+  });
+
+  it("reports 'unknown' only when there is NOTHING to fall back to", () => {
+    // The boundary of the fallback above, and the reason 'unknown' is kept at all:
+    // with no observed model AND no configured model, the honest answer is that we do
+    // not know. A fallback that always produced a string would price by guess.
     const pty = new CodexAppServerPTY(mockEnv, {});
     (pty as unknown as { _threadId: string })._threadId = 'thread-9';
     feedTokenUsage(pty, {

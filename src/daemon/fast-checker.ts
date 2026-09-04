@@ -8,6 +8,10 @@ import { checkInbox, ackInbox, sendMessage } from '../bus/message.js';
 import { updateApproval } from '../bus/approval.js';
 import { AgentProcess } from './agent-process.js';
 import type { TelegramAPI } from '../telegram/api.js';
+import {
+  resolveConfiguredOrchestrator,
+  sendLifecycleTelegramWithReceipt,
+} from '../telegram/lifecycle.js';
 import { KEYS } from '../pty/inject.js';
 import { stripControlChars, sanitizeForPtyInjection, wrapFenceSafe } from '../utils/validate.js';
 import { agentHoldsContextHandoffLease, releaseContextHandoffLease, requestContextHandoffLease } from './context-handoff-lease.js';
@@ -55,6 +59,10 @@ export class FastChecker {
   private frameworkRoot: string;
   private telegramApi?: TelegramAPI;
   private chatId?: string;
+  // Mirrors config.telegram_polling. False is the global direct-lifecycle
+  // opt-out: this checker then never contacts the owner directly, even when it
+  // is the configured orchestrator. Inbound reply flows are unaffected.
+  private telegramPollingEnabled?: boolean;
   private allowedUserId?: number;
 
   // External Telegram handler (set by daemon)
@@ -110,7 +118,14 @@ export class FastChecker {
     agent: AgentProcess,
     paths: BusPaths,
     frameworkRoot: string,
-    options: { pollInterval?: number; log?: LogFn; telegramApi?: TelegramAPI; chatId?: string; allowedUserId?: number } = {},
+    options: {
+      pollInterval?: number;
+      log?: LogFn;
+      telegramApi?: TelegramAPI;
+      chatId?: string;
+      allowedUserId?: number;
+      telegramPollingEnabled?: boolean;
+    } = {},
   ) {
     this.agent = agent;
     this.paths = paths;
@@ -119,6 +134,7 @@ export class FastChecker {
     this.log = options.log || ((msg) => console.log(`[fast-checker/${agent.name}] ${msg}`));
     this.telegramApi = options.telegramApi;
     this.chatId = options.chatId;
+    this.telegramPollingEnabled = options.telegramPollingEnabled;
     this.allowedUserId = options.allowedUserId;
 
     // Initialize persistent dedup
@@ -1074,12 +1090,47 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
   private resolveOrchestratorName(): string | null {
     try {
       const org = basename(dirname(dirname(this.agent.getAgentDir())));
-      const contextPath = join(this.frameworkRoot, 'orgs', org, 'context.json');
-      const orchestrator = JSON.parse(readFileSync(contextPath, 'utf-8')).orchestrator;
-      return typeof orchestrator === 'string' && orchestrator ? orchestrator : null;
+      return resolveConfiguredOrchestrator(this.frameworkRoot, org);
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Route an actionable context-lifecycle failure through ONE VOICE.
+   * Specialists escalate to the configured orchestrator over the internal bus;
+   * only the exact configured orchestrator may contact the owner. Missing or
+   * malformed authority fails closed to the durable local log written by the
+   * caller. These are real loop/circuit failures, so the routine-lifecycle
+   * preference does not suppress the orchestrator's alert.
+   */
+  private routeContextLifecycleFailure(text: string): void {
+    const orchestrator = this.resolveOrchestratorName();
+    if (!orchestrator) return;
+
+    if (orchestrator !== this.agent.name) {
+      try {
+        sendMessage(this.paths, this.agent.name, orchestrator, 'high', text);
+      } catch { /* durable caller log remains authoritative */ }
+      return;
+    }
+
+    // telegram_polling=false suppresses every direct lifecycle path, including
+    // the orchestrator's own. The specialist internal branch above still ran.
+    if (this.telegramPollingEnabled === false) return;
+    if (!this.telegramApi || !this.chatId) return;
+    try {
+      const org = basename(dirname(dirname(this.agent.getAgentDir())));
+      sendLifecycleTelegramWithReceipt({
+        api: this.telegramApi,
+        paths: this.paths,
+        ctxRoot: this.paths.ctxRoot,
+        agentName: this.agent.name,
+        org,
+        chatId: this.chatId,
+        text,
+      }).catch(() => { /* durable caller log remains authoritative */ });
+    } catch { /* malformed agent layout degrades to log-only */ }
   }
 
   /**
@@ -1320,9 +1371,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
         this.ctxHandoffFiredAt = 0;
         const msg = `Context handoff loop detected for ${this.agent.name}: ${this.ctxHandoffFires.length} handoffs in 15min — a runtime may not be resetting context on restart. Auto-handoff paused 30min. Check logs/${this.agent.name}/restarts.log.`;
         this.log(msg);
-        if (this.telegramApi && this.chatId) {
-          this.telegramApi.sendMessage(this.chatId, msg).catch(() => {});
-        }
+        this.routeContextLifecycleFailure(msg);
         return;
       }
 
@@ -1361,9 +1410,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       this.saveCtxCircuit();
       const msg = `Context circuit breaker TRIPPED for ${this.agent.name}: 3 restarts in 15min. Watchdog paused 30min. Check logs/${this.agent.name}/restarts.log for details.`;
       this.log(msg);
-      if (this.telegramApi && this.chatId) {
-        this.telegramApi.sendMessage(this.chatId, msg).catch(() => {});
-      }
+      this.routeContextLifecycleFailure(msg);
       return;
     }
     this.ctxCircuitRestarts.push(now);

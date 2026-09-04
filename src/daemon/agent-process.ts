@@ -12,6 +12,12 @@ import { ensureDir } from '../utils/atomic.js';
 import { writeCortextosEnv } from '../utils/env.js';
 import { getOverdueReminders } from '../bus/reminders.js';
 import { resolvePaths } from '../utils/paths.js';
+import {
+  clearDaemonLifecycleOwnerMarker,
+  isLifecycleTelegramAuthorized,
+  sendLifecycleTelegramWithReceipt,
+  writeDaemonLifecycleOwnerMarker,
+} from '../telegram/lifecycle.js';
 
 type LogFn = (msg: string) => void;
 
@@ -82,10 +88,18 @@ export class AgentProcess {
   // (each start() recreates the PTY, but the Telegram handle persists).
   private telegramApi: TelegramAPI | null = null;
   private telegramChatId: string | null = null;
+  // Frozen once at the beginning of each start() from the org context. Every
+  // prompt-owned and daemon-owned lifecycle send in that spawn uses the same
+  // authority decision, so a partial context read cannot split behavior.
+  private lifecycleTelegramAuthorized = false;
   // Issue #392: tracks whether the most recently built startup prompt consumed
   // a handoff doc marker. start() reads this after spawn to decide whether the
   // daemon should fire runtime-owned lifecycle Telegram directly.
   private lastSpawnWasHandoff = false;
+  // The manager owns crash recovery notifications. Codex/OpenCode daemon
+  // startup notices must therefore skip starts triggered by crash recovery,
+  // otherwise AgentProcess and AgentManager deterministically double-send.
+  private lastStartWasCrashRecovery = false;
   // opencode --continue wedge auto-recovery state (see the OPENCODE_CONTINUE_WEDGE_*
   // constants). lastSpawnMode/lastStartAtMs let handleExit tell an immediate
   // exit-0-on-continue (wedge) apart from a normal exit; the counter tracks the
@@ -118,6 +132,8 @@ export class AgentProcess {
       return;
     }
 
+    this.lastStartWasCrashRecovery = this.status === 'crashed';
+
     // Apply startup delay
     const delay = this.config.startup_delay || 0;
     if (delay > 0) {
@@ -129,6 +145,24 @@ export class AgentProcess {
     if (this.env.agentDir) {
       writeCortextosEnv(this.env.agentDir, this.env);
     }
+
+    // ONE VOICE: Telegram credentials prove connectivity, not authority. The
+    // org context is the sole authority source and any unreadable/malformed
+    // value fails closed for this entire spawn.
+    this.lifecycleTelegramAuthorized = this.config.telegram_polling !== false
+      && isLifecycleTelegramAuthorized({
+        agentName: this.name,
+        frameworkRoot: this.env.frameworkRoot,
+        org: this.env.org,
+        lifecycleNotificationsEnabled: this.config.telegram_lifecycle_notifications,
+      });
+
+    try {
+      writeDaemonLifecycleOwnerMarker(
+        join(this.env.ctxRoot, 'state', this.name),
+        this.name,
+      );
+    } catch { /* ownership marker is observability, never a startup blocker */ }
 
     // Determine start mode
     const mode = this.shouldContinue() ? 'continue' : 'fresh';
@@ -164,6 +198,9 @@ export class AgentProcess {
     const logPath = join(this.env.ctxRoot, 'logs', this.name, 'stdout.log');
     ensureDir(join(this.env.ctxRoot, 'logs', this.name));
     this.log(`Log path: ${logPath}`);
+    // A runtime change is only observable HERE, at the moment we pick the PTY.
+    this.supersedeStaleCodexThreadState();
+
     this.pty = this.config.runtime === 'hermes'
       ? new HermesPTY(this.env, this.config, logPath)
       : this.config.runtime === 'opencode'
@@ -373,6 +410,11 @@ export class AgentProcess {
     // when a new lifecycle begins). See BUG-040 fix in handleExit().
     this.status = 'stopped';
     this.notifyStatusChange();
+    // Teardown must never throw on observability cleanup (a bare env without
+    // ctxRoot, or an unwritable state dir, must not turn stop() into a crash).
+    try {
+      clearDaemonLifecycleOwnerMarker(join(this.env.ctxRoot, 'state', this.name));
+    } catch { /* marker cleanup is best-effort */ }
     this.log('Stopped');
   }
 
@@ -815,6 +857,82 @@ export class AgentProcess {
     }, backoff);
   }
 
+  /**
+   * Retire a codex-app-server thread file when this seat is no longer on codex.
+   *
+   * That file is written ONLY by a live codex session and cleared by nothing, so
+   * a seat that moves to another runtime freezes its last codex reading forever
+   * and every reader afterwards names a dead session as the live one. Measured
+   * 2026-09-03: all six fleet seats still reported actualModel gpt-5.6-sol while
+   * every one of them was running Claude.
+   *
+   * A reader cannot defend itself against this, which is why the fix belongs
+   * here. Staleness is invisible from the file alone: an IDLE codex seat and a
+   * DEPARTED codex seat produce byte-identical content, and the mtime of a file
+   * nobody writes says only that nobody wrote it. The runtime change is knowable
+   * at exactly one place — the cutover — so that is where it has to be recorded.
+   *
+   * This is the mirror of the stale-Claude-JSONL case handled in shouldContinue():
+   * same defect, opposite direction, and that one crashed agents rather than
+   * merely misreporting them.
+   *
+   * Renamed, not deleted: the file is real evidence of the prior tenure. Only its
+   * CURRENT-ness was ever false, so the honest repair is to mark it past, not to
+   * destroy it.
+   */
+  private supersedeStaleCodexThreadState(): void {
+    if (this.config.runtime === 'codex-app-server') return;
+
+    const threadStatePath = join(
+      this.env.ctxRoot,
+      'state',
+      this.name,
+      'codex-app-server-thread.json',
+    );
+    if (!existsSync(threadStatePath)) return;
+
+    const supersededPath = join(
+      this.env.ctxRoot,
+      'state',
+      this.name,
+      'codex-app-server-thread.superseded.json',
+    );
+
+    try {
+      // Carry the reason INTO the file. A rename alone tells a later reader that
+      // something happened but not what, and "superseded" with no runtime named
+      // is only a slightly better class of unknown.
+      let payload: string | null = null;
+      try {
+        const parsed = JSON.parse(readFileSync(threadStatePath, 'utf-8')) as Record<string, unknown>;
+        parsed['supersededAt'] = new Date().toISOString();
+        parsed['supersededByRuntime'] = this.config.runtime;
+        payload = `${JSON.stringify(parsed, null, 2)}\n`;
+      } catch {
+        // Unparseable content is still evidence; move it verbatim rather than
+        // dropping it for failing to be JSON.
+        payload = null;
+      }
+
+      if (payload === null) {
+        writeFileSync(supersededPath, readFileSync(threadStatePath, 'utf-8'), 'utf-8');
+      } else {
+        writeFileSync(supersededPath, payload, 'utf-8');
+      }
+      unlinkSync(threadStatePath);
+
+      this.log(
+        `Retired stale codex thread state: runtime is now ${this.config.runtime}, ` +
+        `moved to ${supersededPath}`,
+      );
+    } catch (err) {
+      // Never block a start over this. A seat that boots with a stale evidence
+      // file is worse than one that boots clean, but a seat that will not boot
+      // at all is worse than both.
+      this.log(`Could not retire stale codex thread state: ${err}`);
+    }
+  }
+
   private shouldContinue(): boolean {
     // Hermes: session continuity is determined by whether the SQLite DB exists.
     // HERMES_HOME env var overrides the default ~/.hermes path.
@@ -894,33 +1012,68 @@ export class AgentProcess {
     const handoffBlock = this.consumeHandoffBlock();
     const isHandoffRestart = handoffBlock.length > 0;
     this.lastSpawnWasHandoff = isHandoffRestart;
+    const lifecycleSilenceBlock = this.buildLifecycleSilenceBlock();
     // HANDOFF UX: the pickup message MUST be the first action after reading the handoff doc —
     // before cron restoration, before heartbeat, before anything else. Placing this instruction
     // immediately after the handoffBlock in the prompt ensures it is not buried.
     const shouldPromptTelegram = this.shouldPromptTelegramOnlineMessage();
-    const handoffUxOverride = isHandoffRestart && shouldPromptTelegram
-      ? ' HANDOFF UX: This is a context handoff restart — your memory is intact via the handoff doc. CRITICAL: After reading the handoff document, your VERY FIRST tool call MUST be a Bash call running: cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID \'back — [what you were just working on]\' — replace the brackets with one brief plain-English sentence about your current state. Do this BEFORE running heartbeat, BEFORE any other tool call. No cron IDs, no status report, no cold-boot phrasing. Do NOT send "Booting up... one moment" (skip AGENTS.md step 1 entirely).'
+    // Exactly one owner per handoff pickup notice:
+    //  - unauthorized seat: nothing here — the ONE VOICE gate block already
+    //    forbids any lifecycle send and the CONTEXT HANDOFF block says what to read;
+    //  - authorized seat on a daemon-owned runtime (codex/opencode): the daemon
+    //    sends msg1+msg2 itself, so the prompt must not add a third;
+    //  - authorized seat on a hook runtime (claude/hermes): prompt-owned "back —".
+    const handoffUxOverride = isHandoffRestart && this.lifecycleTelegramAuthorized
+      ? this.daemonOwnsStartupLifecycle()
+        ? ' HANDOFF UX: This is a context handoff restart — read the handoff document before heartbeat or other work, then resume naturally. The daemon owns the lifecycle notification for this restart; do not send a separate startup, handoff, or back-online Telegram message.'
+        : shouldPromptTelegram
+          ? ' HANDOFF UX: This is a context handoff restart — your memory is intact via the handoff doc. CRITICAL: After reading the handoff document, your VERY FIRST tool call MUST be a Bash call running: cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID \'back — [what you were just working on]\' — replace the brackets with one brief plain-English sentence about your current state. Do this BEFORE running heartbeat, BEFORE any other tool call. No cron IDs, no status report, no cold-boot phrasing. Do NOT send "Booting up... one moment" (skip AGENTS.md step 1 entirely).'
+          : ''
       : '';
     const onlineMessage = isHandoffRestart || !shouldPromptTelegram
       ? ''
       : ' Send a Telegram message to the user saying you are back online.';
-    return `You are starting a new session. Current UTC time: ${nowUtc}. Read AGENTS.md and all bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock}${handoffBlock}${handoffUxOverride}${onlineMessage}${onboardingAppend}`;
+    return `You are starting a new session. Current UTC time: ${nowUtc}.${lifecycleSilenceBlock} Read AGENTS.md and all bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock}${handoffBlock}${handoffUxOverride}${onlineMessage}${onboardingAppend}`;
   }
 
   private buildContinuePrompt(): string {
     const nowUtc = new Date().toISOString();
     const reminderBlock = this.buildReminderBlock();
     const deliverablesBlock = this.buildDeliverablesBlock();
+    const lifecycleSilenceBlock = this.buildLifecycleSilenceBlock();
     // Session refresh (--continue) is never a handoff restart.
     this.lastSpawnWasHandoff = false;
     const onlineMessage = this.shouldPromptTelegramOnlineMessage()
       ? ' After checking inbox, send a Telegram message to the user saying you are back online.'
       : '';
-    return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations.${onlineMessage}`;
+    return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}.${lifecycleSilenceBlock} Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations.${onlineMessage}`;
   }
 
   private shouldPromptTelegramOnlineMessage(): boolean {
-    return this.config.telegram_polling !== false && !!this.telegramApi && !!this.telegramChatId;
+    // AgentManager owns the "recovered and is back online" notice after a
+    // crash, so a crash-recovery spawn must not also be prompted to send one.
+    return !this.daemonOwnsStartupLifecycle()
+      && !this.lastStartWasCrashRecovery
+      && this.canSendLifecycleTelegram();
+  }
+
+  private canSendLifecycleTelegram(): boolean {
+    return this.lifecycleTelegramAuthorized
+      && !!this.telegramApi
+      && !!this.telegramChatId;
+  }
+
+  private daemonOwnsStartupLifecycle(): boolean {
+    return this.config.runtime === 'codex-app-server' || this.config.runtime === 'opencode';
+  }
+
+  private buildLifecycleSilenceBlock(): string {
+    if (this.lifecycleTelegramAuthorized
+      && (this.daemonOwnsStartupLifecycle() || this.lastStartWasCrashRecovery)) {
+      return ' DAEMON LIFECYCLE OWNER: Startup, context-handoff, crash-recovery, and back-online Telegram notifications are daemon-owned for this session. Do not send a separate lifecycle message. This does not block replies to inbound Telegram messages.';
+    }
+    if (this.lifecycleTelegramAuthorized) return '';
+    return ' ONE VOICE LIFECYCLE GATE: Do not initiate Telegram boot, restart, context-handoff, back-online, or other lifecycle status messages for this session. This overrides lifecycle-only send steps in AGENTS.md. It does not block replies to inbound Telegram messages: when the user contacts this agent directly, reply normally using the provided reply command. Route agent-initiated status and findings to the configured orchestrator over the internal bus.';
   }
 
   /**
@@ -997,15 +1150,15 @@ export class AgentProcess {
    * process/session markers but emitted no Telegram message, so lifecycle
    * visibility must be daemon-owned just like Codex.
    *
-   * Two distinct notifications, mirroring what a claude-code agent emits:
+   * Handoff restarts emit two distinct daemon-owned notifications, mirroring
+   * what a claude-code agent emits without relying on prompt compliance:
    *  - msg1 (planned-restart lifecycle, "🔄 <agent> restarted (planned): ..."):
    *    for claude this is sent by hook-crash-alert.ts on PTY exit. codex/opencode
    *    runtimes do NOT run Claude Code hooks, so on a handoff restart the daemon
    *    emits the same notification here for parity (James saw msg1 only for
    *    claude agents otherwise). Format mirrors hook-crash-alert.ts:394-397.
-   *  - msg2 (back-online / "back — ..." summary): codex reliably self-sends its
-   *    own contextual reply via the boot prompt; opencode (deepseek) does NOT, so
-   *    the daemon sends a handoff-flavored back-online ping for opencode only.
+   *  - msg2 (back-online): emitted here for both runtimes. Their prompts
+   *    explicitly forbid a second lifecycle send.
    *
    * Skipped when:
    *  - runtime is anything other than codex-app-server/opencode (claude-code
@@ -1014,30 +1167,32 @@ export class AgentProcess {
    */
   private maybeSendRuntimeLifecycleNotification(): void {
     if (this.config.runtime !== 'codex-app-server' && this.config.runtime !== 'opencode') return;
-    if (!this.shouldPromptTelegramOnlineMessage()) return;
+    if (!this.canSendLifecycleTelegram()) return;
     const telegramApi = this.telegramApi;
     const telegramChatId = this.telegramChatId;
     if (!telegramApi || !telegramChatId) return;
-    const send = (text: string) =>
-      telegramApi
-        .sendMessage(telegramChatId, text)
-        .catch(() => { /* non-fatal: notification is observability only */ });
+    const send = (text: string) => {
+      const paths = resolvePaths(this.name, this.env.instanceId, this.env.org);
+      sendLifecycleTelegramWithReceipt({
+        api: telegramApi,
+        paths,
+        ctxRoot: this.env.ctxRoot,
+        agentName: this.name,
+        org: this.env.org,
+        chatId: telegramChatId,
+        text,
+      }).catch(() => { /* non-fatal: notification is observability only */ });
+    };
 
     if (this.lastSpawnWasHandoff) {
-      // msg1: planned-restart lifecycle notif, hook parity for runtimes without
-      // Claude Code hooks. Both codex and opencode were missing this.
       send(this.buildPlannedRestartNotification());
-      // msg2 ("back — ...") is self-sent by the agent via the handoff boot prompt
-      // (agent-process.ts buildStartupPrompt handoffUxOverride) for BOTH codex and
-      // opencode — opencode now reliably honors it. The daemon used to send an
-      // "Agent X is back online (context handoff)" substitute for opencode, but
-      // that produced a redundant 3rd message on top of the self-sent "back —".
-      // Removed: msg1 (daemon) + msg2 (agent self-send) = clean 2-message pattern.
+      send(`Agent ${this.name} is back online (context handoff)`);
       return;
     }
 
-    // Non-handoff restart (crash recovery / config reload): both runtimes need
-    // the daemon-emitted back-online ping.
+    // AgentManager is the sole owner of crash recovery. Fresh and intentional
+    // continue starts remain AgentProcess-owned for runtimes without hooks.
+    if (this.lastStartWasCrashRecovery) return;
     send(`Agent ${this.name} is back online`);
   }
 

@@ -1041,6 +1041,172 @@ describe('FastChecker', () => {
     });
   });
 
+  describe('ONE VOICE context lifecycle failure routing', () => {
+    const ORG = 'testorg';
+
+    function makeContextAgent(
+      frameworkRoot: string,
+      name: string,
+      orchestrator?: unknown,
+    ) {
+      const agentDir = join(frameworkRoot, 'orgs', ORG, 'agents', name);
+      mkdirSync(agentDir, { recursive: true });
+      if (orchestrator !== undefined) {
+        writeFileSync(
+          join(frameworkRoot, 'orgs', ORG, 'context.json'),
+          JSON.stringify({ orchestrator }),
+          'utf-8',
+        );
+      }
+      const config: any = {};
+      return {
+        name,
+        isBootstrapped: vi.fn().mockReturnValue(true),
+        injectMessage: vi.fn().mockReturnValue(true),
+        write: vi.fn(),
+        getAgentDir: () => agentDir,
+        getConfig: () => config,
+        getOutputBuffer: () => ({ getRecent: () => '' }),
+        sessionRefresh: vi.fn().mockResolvedValue(undefined),
+      } as any;
+    }
+
+    function inboxMessages(target: string): any[] {
+      const dir = join(paths.ctxRoot, 'inbox', target);
+      if (!existsSync(dir)) return [];
+      return readdirSync(dir)
+        .filter(f => f.endsWith('.json'))
+        .map(f => JSON.parse(readFileSync(join(dir, f), 'utf-8')));
+    }
+
+    it('routes a specialist handoff-loop failure internally and never to Telegram', async () => {
+      const frameworkRoot = join(testDir, 'framework-specialist');
+      const agent = makeContextAgent(frameworkRoot, 'sentinel', 'chief');
+      const api = createMockTelegramApi();
+      const checker = new FastChecker(agent, paths, frameworkRoot, {
+        telegramApi: api,
+        chatId: '12345',
+      });
+      writeFileSync(join(agent.getAgentDir(), 'config.json'), '{}', 'utf-8');
+
+      for (let i = 0; i < 3; i++) {
+        writeFileSync(
+          join(paths.stateDir, 'context_status.json'),
+          JSON.stringify({ used_percentage: 70, written_at: new Date().toISOString() }),
+          'utf-8',
+        );
+        (checker as any).ctxHandoffFiredAt = 0;
+        await (checker as any).checkContextStatus();
+      }
+
+      const messages = inboxMessages('chief');
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ from: 'sentinel', to: 'chief', priority: 'high' });
+      expect(messages[0].text).toContain('Context handoff loop detected for sentinel');
+      expect(api.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('lets the configured orchestrator send a real circuit-breaker failure with receipts', async () => {
+      const frameworkRoot = join(testDir, 'framework-chief');
+      const agent = makeContextAgent(frameworkRoot, 'chief', 'chief');
+      const api = createMockTelegramApi();
+      const checker = new FastChecker(agent, paths, frameworkRoot, {
+        telegramApi: api,
+        chatId: '12345',
+      });
+      const now = Date.now();
+      (checker as any).ctxCircuitRestarts = [now - 3_000, now - 2_000, now - 1_000];
+
+      (checker as any).forceContextRestart('test threshold');
+
+      await vi.waitFor(() => {
+        expect(api.sendMessage).toHaveBeenCalledWith(
+          '12345',
+          expect.stringContaining('Context circuit breaker TRIPPED for chief'),
+        );
+      });
+      expect(inboxMessages('chief')).toHaveLength(0);
+      const outbound = join(paths.ctxRoot, 'logs', 'chief', 'outbound-messages.jsonl');
+      await vi.waitFor(() => expect(existsSync(outbound)).toBe(true));
+    });
+
+    it('suppresses the orchestrator direct send when telegram_polling is false', async () => {
+      const frameworkRoot = join(testDir, 'framework-chief-muted');
+      const agent = makeContextAgent(frameworkRoot, 'chief', 'chief');
+      const api = createMockTelegramApi();
+      const checker = new FastChecker(agent, paths, frameworkRoot, {
+        telegramApi: api,
+        chatId: '12345',
+        telegramPollingEnabled: false,
+      });
+
+      (checker as any).routeContextLifecycleFailure('Context circuit breaker TRIPPED for chief: muted');
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(api.sendMessage).not.toHaveBeenCalled();
+      expect(inboxMessages('chief')).toHaveLength(0);
+      expect(existsSync(join(paths.ctxRoot, 'logs', 'chief', 'outbound-messages.jsonl'))).toBe(false);
+    });
+
+    it('still routes a specialist failure internally when telegram_polling is false', async () => {
+      const frameworkRoot = join(testDir, 'framework-specialist-muted');
+      const agent = makeContextAgent(frameworkRoot, 'growth', 'chief');
+      const api = createMockTelegramApi();
+      const checker = new FastChecker(agent, paths, frameworkRoot, {
+        telegramApi: api,
+        chatId: '12345',
+        telegramPollingEnabled: false,
+      });
+
+      (checker as any).routeContextLifecycleFailure('Context handoff loop detected for growth');
+      await Promise.resolve();
+
+      expect(api.sendMessage).not.toHaveBeenCalled();
+      const messages = inboxMessages('chief');
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ from: 'growth', to: 'chief', priority: 'high' });
+    });
+
+    it('re-resolves authority at send time: removal between sends fails closed', async () => {
+      const frameworkRoot = join(testDir, 'framework-chief-removed');
+      const agent = makeContextAgent(frameworkRoot, 'chief', 'chief');
+      const api = createMockTelegramApi();
+      const checker = new FastChecker(agent, paths, frameworkRoot, {
+        telegramApi: api,
+        chatId: '12345',
+      });
+
+      (checker as any).routeContextLifecycleFailure('first: authority present');
+      await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
+
+      rmSync(join(frameworkRoot, 'orgs', ORG, 'context.json'));
+      (checker as any).routeContextLifecycleFailure('second: authority removed');
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(api.sendMessage).toHaveBeenCalledTimes(1);
+      expect(api.sendMessage).toHaveBeenCalledWith('12345', 'first: authority present');
+      expect(inboxMessages('chief')).toHaveLength(0);
+    });
+
+    it('fails closed when org authority is missing', async () => {
+      const frameworkRoot = join(testDir, 'framework-missing-authority');
+      const agent = makeContextAgent(frameworkRoot, 'sentinel');
+      const api = createMockTelegramApi();
+      const checker = new FastChecker(agent, paths, frameworkRoot, {
+        telegramApi: api,
+        chatId: '12345',
+      });
+
+      (checker as any).routeContextLifecycleFailure('must remain log-only');
+      await Promise.resolve();
+
+      expect(api.sendMessage).not.toHaveBeenCalled();
+      expect(readdirSync(paths.inbox)).toHaveLength(0);
+    });
+  });
+
   // Futile-baseline guard: a session BORN at/above the handoff threshold (heavy
   // resume baseline) cannot be helped by a handoff — the fresh session inherits the
   // same baseline and re-fires. The guard captures the first post-grace reading as

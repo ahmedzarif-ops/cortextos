@@ -242,6 +242,13 @@ export interface AgentConfig {
    * poller will be skipped regardless.
    */
   telegram_polling?: boolean;
+  /**
+   * Whether the configured org orchestrator emits routine boot, restart,
+   * handoff, recovery, and back-online Telegram. Defaults to enabled when
+   * absent, but never grants authority to a non-orchestrator. Set to false to
+   * keep routine churn silent while preserving real crash and halt alerts.
+   */
+  telegram_lifecycle_notifications?: boolean;
 }
 
 export interface CronEntry {

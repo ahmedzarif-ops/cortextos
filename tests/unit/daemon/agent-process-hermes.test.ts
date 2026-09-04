@@ -57,6 +57,7 @@ const fsMocks = {
   writeFileSync: vi.fn(),
   appendFileSync: vi.fn(),
   statSync: vi.fn(),
+  unlinkSync: vi.fn(),
 };
 
 vi.mock('fs', async () => {
@@ -69,6 +70,7 @@ vi.mock('fs', async () => {
     get writeFileSync() { return fsMocks.writeFileSync; },
     get appendFileSync() { return fsMocks.appendFileSync; },
     get statSync() { return fsMocks.statSync; },
+    get unlinkSync() { return fsMocks.unlinkSync; },
   };
 });
 
@@ -84,6 +86,22 @@ const mockEnv = {
   projectRoot: '/tmp/fw',
 };
 
+const contextPath = '/tmp/fw/orgs/acme/context.json';
+
+function envFor(name: string) {
+  return {
+    ...mockEnv,
+    agentName: name,
+    agentDir: `/tmp/fw/orgs/acme/agents/${name}`,
+  };
+}
+
+function readWithOrchestrator(orchestrator: unknown) {
+  fsMocks.readFileSync.mockImplementation((path: string) =>
+    path === contextPath ? JSON.stringify({ orchestrator }) : '',
+  );
+}
+
 beforeEach(() => {
   capturedOnExit = null;
   mockHermesDbExists.mockReset().mockReturnValue(false);
@@ -98,6 +116,7 @@ beforeEach(() => {
   fsMocks.writeFileSync.mockReset();
   fsMocks.appendFileSync.mockReset();
   fsMocks.statSync.mockReset();
+  fsMocks.unlinkSync.mockReset();
 });
 
 describe('AgentProcess - Hermes runtime: shouldContinue', () => {
@@ -125,6 +144,43 @@ describe('AgentProcess - Hermes runtime: shouldContinue', () => {
 
     expect(mockHermesDbExists).toHaveBeenCalledWith('/custom/hermes');
     process.env['HERMES_HOME'] = originalHermesHome;
+  });
+});
+
+describe('AgentProcess - Hermes runtime: ONE VOICE lifecycle prompts', () => {
+  it('lets configured Chief receive the fresh-start online prompt', async () => {
+    readWithOrchestrator('chief');
+    const ap = new AgentProcess('chief', envFor('chief'), { runtime: 'hermes' });
+    ap.setTelegramHandle({ sendChatAction: vi.fn() } as any, '12345');
+    await ap.start();
+
+    const prompt = mockPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).toContain('Send a Telegram message to the user saying you are back online.');
+    expect(prompt).not.toContain('ONE VOICE LIFECYCLE GATE');
+  });
+
+  it('keeps a specialist continue lifecycle prompt internal', async () => {
+    readWithOrchestrator('chief');
+    mockHermesDbExists.mockReturnValue(true);
+    const ap = new AgentProcess('hermes-worker', envFor('hermes-worker'), { runtime: 'hermes' });
+    ap.setTelegramHandle({ sendChatAction: vi.fn() } as any, '12345');
+    await ap.start();
+
+    const prompt = mockPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(mockPty.spawn).toHaveBeenCalledWith('continue', expect.any(String));
+    expect(prompt).toContain('ONE VOICE LIFECYCLE GATE');
+    expect(prompt).not.toContain('send a Telegram message to the user saying you are back online.');
+    expect(prompt).not.toContain('Send a Telegram message to the user saying you are back online.');
+  });
+
+  it('fails closed without org authority', async () => {
+    const ap = new AgentProcess('chief', envFor('chief'), { runtime: 'hermes' });
+    ap.setTelegramHandle({ sendChatAction: vi.fn() } as any, '12345');
+    await ap.start();
+
+    const prompt = mockPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).toContain('ONE VOICE LIFECYCLE GATE');
+    expect(prompt).not.toContain('Send a Telegram message to the user saying you are back online.');
   });
 });
 

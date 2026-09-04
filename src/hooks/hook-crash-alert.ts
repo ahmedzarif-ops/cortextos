@@ -18,6 +18,17 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync, unlinkSync, mk
 import { join } from 'path';
 import { homedir } from 'os';
 import { execFile } from 'child_process';
+import { TelegramAPI } from '../telegram/api.js';
+import {
+  DAEMON_PID_ENV,
+  hasLiveDaemonLifecycleOwner,
+  parseDaemonPid,
+  readLifecycleNotificationsPreference,
+  readTelegramPollingPreference,
+  resolveConfiguredOrchestrator,
+  sendLifecycleTelegramWithReceipt,
+} from '../telegram/lifecycle.js';
+import { resolvePaths } from '../utils/paths.js';
 
 const DEDUP_WINDOW_MS = 10 * 60 * 1000;         // 10 minutes
 const QUIET_HOUR_START_LA = 22;                 // 22:00 America/Los_Angeles
@@ -35,6 +46,54 @@ const QUIET_SUPPRESSED_TYPES = new Set([
   'user-stop',
   'rate-limited',
 ]);
+
+const ACTIONABLE_CRASH_TYPES = new Set(['crash', 'daemon-crashed']);
+
+/**
+ * Only the exact configured orchestrator may send hook lifecycle alerts to
+ * Telegram. The per-agent preference suppresses routine churn, never real
+ * crash/daemon-crash alerts, and is not a source of authority.
+ */
+export function shouldSendTelegramForEndType(
+  endType: string,
+  agentName: string,
+  orchestratorName: string | null,
+  lifecycleNotificationsEnabled: boolean | undefined,
+  telegramPollingEnabled: boolean | undefined,
+): boolean {
+  return telegramPollingEnabled !== false
+    && orchestratorName !== null
+    && agentName === orchestratorName
+    && (ACTIONABLE_CRASH_TYPES.has(endType) || lifecycleNotificationsEnabled !== false);
+}
+
+/**
+ * AgentManager owns runtime crash/recovery delivery while its daemon process
+ * is alive AND this hook provably runs inside a PTY that daemon spawned (the
+ * injected CTX_DAEMON_PID must match the marker). A standalone hook, a hook
+ * whose environment carries no daemon PID, or a hook left behind by a dead
+ * daemon retains the existing crash-alert path.
+ */
+export function shouldDeferRuntimeEndToDaemonManager(
+  endType: string,
+  stateDir: string,
+  agentName: string,
+  daemonPidEnv: string | undefined,
+): boolean {
+  return (endType === 'crash' || endType === 'rate-limited')
+    && hasLiveDaemonLifecycleOwner(stateDir, agentName, parseDaemonPid(daemonPidEnv));
+}
+
+/** Real specialist faults stay visible by routing to the orchestrator inbox. */
+export function shouldRouteCrashToOrchestrator(
+  endType: string,
+  agentName: string,
+  orchestratorName: string | null,
+): boolean {
+  return ACTIONABLE_CRASH_TYPES.has(endType)
+    && orchestratorName !== null
+    && agentName !== orchestratorName;
+}
 
 function isQuietHoursLA(now: Date): boolean {
   const laString = now.toLocaleString('en-US', {
@@ -354,7 +413,42 @@ async function main(): Promise<void> {
     appendFileSync(join(logDir, 'crashes.log'), logLine);
   } catch { /* ignore */ }
 
-  // Decide whether to actually send to Telegram.
+  // The live daemon's AgentManager is the single owner of runtime
+  // crash/halt/recovery notifications. Keep the hook as the fallback when the
+  // marker is absent, malformed, belongs to another agent, does not match the
+  // daemon PID injected into this PTY's environment, or its daemon PID is dead.
+  if (shouldDeferRuntimeEndToDaemonManager(
+    endType,
+    stateDir,
+    agentName,
+    process.env[DAEMON_PID_ENV],
+  )) return;
+
+  const agentDir = process.env.CTX_AGENT_DIR || process.cwd();
+  const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT;
+  const org = process.env.CTX_ORG;
+  const orchestratorName = resolveConfiguredOrchestrator(frameworkRoot, org);
+  const lifecycleNotificationsEnabled = readLifecycleNotificationsPreference(agentDir);
+  const telegramPollingEnabled = readTelegramPollingPreference(agentDir);
+  const routeCrashInternally = shouldRouteCrashToOrchestrator(
+    endType,
+    agentName,
+    orchestratorName,
+  );
+  const sendDirectTelegram = shouldSendTelegramForEndType(
+    endType,
+    agentName,
+    orchestratorName,
+    lifecycleNotificationsEnabled,
+    telegramPollingEnabled,
+  );
+
+  // Do not consume the dedup window when authority is absent or the only
+  // eligible route was explicitly muted. A later repaired context should be
+  // able to deliver immediately.
+  if (!routeCrashInternally && !sendDirectTelegram) return;
+
+  // Decide whether to actually send or route the alert.
   const now = new Date();
   const quiet = isQuietHoursLA(now);
   if (quiet && QUIET_SUPPRESSED_TYPES.has(endType)) {
@@ -364,14 +458,10 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Real-crash agent alerts: notify chief + analyst on crash and daemon-crashed
-  // so silent failures get visibility on the bus, not just on Telegram. Gated
-  // by the same dedup window as the Telegram send (handled above), and skipped
-  // for clean exits / planned restarts / rate-limit pauses. Hoisted above the
-  // Telegram-credential gate so agents without BOT_TOKEN/CHAT_ID still reach
-  // the bus (issue #317).
-  if (endType === 'crash' || endType === 'daemon-crashed') {
-    const agentDir = process.env.CTX_AGENT_DIR || process.cwd();
+  // ONE VOICE: real faults from a specialist route to the configured
+  // orchestrator over the internal bus, even when the specialist has no
+  // Telegram credentials or has opted out of owner-facing lifecycle notices.
+  if (routeCrashInternally) {
     const maxCrashes = readMaxCrashesPerDay(agentDir);
     const restartAttempted = maxCrashes === null || crashCount < maxCrashes;
     notifyAgents({
@@ -381,9 +471,11 @@ async function main(): Promise<void> {
       lastTask,
       crashCount,
       restartAttempted,
-      recipients: ['chief', 'analyst'],
+      recipients: [orchestratorName!],
     });
   }
+
+  if (!sendDirectTelegram) return;
 
   const botToken = process.env.BOT_TOKEN;
   const chatId = process.env.CHAT_ID;
@@ -436,11 +528,15 @@ async function main(): Promise<void> {
 
   if (message) {
     try {
-      const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-      await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: message }),
+      const api = new TelegramAPI(botToken);
+      await sendLifecycleTelegramWithReceipt({
+        api,
+        paths: resolvePaths(agentName, instanceId, org),
+        ctxRoot,
+        agentName,
+        org: org!,
+        chatId,
+        text: message,
       });
     } catch { /* ignore send failures */ }
   }

@@ -92,6 +92,25 @@ const mockEnv = {
   projectRoot: '/tmp/fw',
 };
 
+const contextPath = '/tmp/fw/orgs/acme/context.json';
+
+function envFor(name: string) {
+  return {
+    ...mockEnv,
+    agentName: name,
+    agentDir: `/tmp/fw/orgs/acme/agents/${name}`,
+  };
+}
+
+function readWithOrchestrator(
+  orchestrator: unknown,
+  fallback: (path: string) => string = () => '',
+) {
+  fsMocks.readFileSync.mockImplementation((path: string) =>
+    path === contextPath ? JSON.stringify({ orchestrator }) : fallback(path),
+  );
+}
+
 beforeEach(() => {
   capturedOnExit = null;
   for (const pty of [mockCodexAppServerPty, mockAgentPty]) {
@@ -161,18 +180,86 @@ describe('AgentProcess codex-app-server runtime', () => {
     expect(mockCodexAppServerPty.setTelegramHandle).toHaveBeenCalledWith(api, '12345');
   });
 
-  it('sends back-online Telegram directly from daemon on fresh start (issue #392)', async () => {
-    const ap = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
+  it('lets the daemon alone send configured Chief back-online output on fresh start', async () => {
+    readWithOrchestrator('chief');
+    const ap = new AgentProcess('chief', envFor('chief'), { runtime: 'codex-app-server' });
+    const sendMessage = vi.fn().mockResolvedValue({ result: { message_id: 41 } });
+    const api = { sendChatAction: vi.fn().mockResolvedValue(undefined), sendMessage };
+
+    ap.setTelegramHandle(api as any, '12345');
+    await ap.start();
+
+    const prompt = mockCodexAppServerPty.spawn.mock.calls[0]?.[1] ?? '';
+    // Single owner: the daemon sends, so the prompt must not also ask for it.
+    expect(prompt).toContain('DAEMON LIFECYCLE OWNER');
+    expect(prompt).not.toContain('Send a Telegram message to the user saying you are back online.');
+    expect(prompt).not.toContain('ONE VOICE LIFECYCLE GATE');
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith('12345', 'Agent chief is back online');
+  });
+
+  it('leaves crash-recovery back-online to AgentManager (no AgentProcess duplicate)', async () => {
+    readWithOrchestrator('chief');
+    const ap = new AgentProcess('chief', envFor('chief'), { runtime: 'codex-app-server' });
+    const sendMessage = vi.fn().mockResolvedValue({ result: { message_id: 42 } });
+    ap.setTelegramHandle({ sendChatAction: vi.fn().mockResolvedValue(undefined), sendMessage } as any, '12345');
+    // handleExit sets 'crashed' before scheduling the recovery start().
+    (ap as any).status = 'crashed';
+    await ap.start();
+
+    const prompt = mockCodexAppServerPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).toContain('DAEMON LIFECYCLE OWNER');
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('silences the Claude crash-recovery prompt send that AgentManager already owns', async () => {
+    readWithOrchestrator('chief');
+    const ap = new AgentProcess('chief', envFor('chief'), { runtime: 'claude-code' });
+    ap.setTelegramHandle({ sendChatAction: vi.fn() } as any, '12345');
+    (ap as any).status = 'crashed';
+    await ap.start();
+
+    const prompt = mockAgentPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).toContain('DAEMON LIFECYCLE OWNER');
+    expect(prompt).not.toContain('Send a Telegram message to the user saying you are back online.');
+    expect(prompt).not.toContain('ONE VOICE LIFECYCLE GATE');
+  });
+
+  it('lets the configured Chief opt out of routine lifecycle output', async () => {
+    readWithOrchestrator('chief');
+    const ap = new AgentProcess('chief', envFor('chief'), {
+      runtime: 'codex-app-server',
+      telegram_lifecycle_notifications: false,
+    });
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     const api = { sendChatAction: vi.fn().mockResolvedValue(undefined), sendMessage };
 
     ap.setTelegramHandle(api as any, '12345');
     await ap.start();
 
-    expect(sendMessage).toHaveBeenCalledWith('12345', 'Agent codex-app-agent is back online');
+    const prompt = mockCodexAppServerPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).toContain('ONE VOICE LIFECYCLE GATE');
+    expect(prompt).not.toContain('Send a Telegram message to the user saying you are back online.');
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it('sends planned-restart msg1 but skips generic back-online Telegram on handoff restart', async () => {
+  it('preserves telegram_polling false as a prompt and runtime lifecycle opt-out', async () => {
+    readWithOrchestrator('chief');
+    const ap = new AgentProcess('chief', envFor('chief'), {
+      runtime: 'codex-app-server',
+      telegram_polling: false,
+    });
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    ap.setTelegramHandle({ sendChatAction: vi.fn(), sendMessage } as any, '12345');
+    await ap.start();
+
+    const prompt = mockCodexAppServerPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).toContain('ONE VOICE LIFECYCLE GATE');
+    expect(prompt).not.toContain('Send a Telegram message to the user saying you are back online.');
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('lets the daemon send both handoff notices for configured Chief and keeps the prompt send-free', async () => {
     // Simulate handoff doc marker present at .handoff-doc-path so
     // consumeHandoffBlock() returns a non-empty fragment, marking the spawn
     // as a handoff restart that should suppress the daemon-direct ping.
@@ -183,9 +270,11 @@ describe('AgentProcess codex-app-server runtime', () => {
       typeof path === 'string'
       && (path.endsWith('.handoff-doc-path') || path === handoffDocPath),
     );
-    fsMocks.readFileSync.mockReturnValue(handoffDocPath);
+    readWithOrchestrator('chief', (path) =>
+      path.endsWith('.handoff-doc-path') ? handoffDocPath : '',
+    );
 
-    const ap = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
+    const ap = new AgentProcess('chief', envFor('chief'), { runtime: 'codex-app-server' });
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     const api = { sendChatAction: vi.fn().mockResolvedValue(undefined), sendMessage };
 
@@ -194,10 +283,89 @@ describe('AgentProcess codex-app-server runtime', () => {
 
     const prompt = mockCodexAppServerPty.spawn.mock.calls[0]?.[1] ?? '';
     expect(prompt).toContain('CONTEXT HANDOFF');
-    expect(sendMessage).toHaveBeenCalledWith('12345', '🔄 codex-app-agent restarted (planned): no reason given');
-    expect(sendMessage).not.toHaveBeenCalledWith('12345', 'Agent codex-app-agent is back online');
-    expect(sendMessage).not.toHaveBeenCalledWith('12345', 'Agent codex-app-agent is back online (context handoff)');
-    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(prompt).toContain('HANDOFF UX');
+    expect(prompt).toContain('The daemon owns the lifecycle notification for this restart');
+    expect(prompt).not.toContain('cortextos bus send-telegram');
+    expect(prompt).not.toContain('VERY FIRST tool call');
+    // Exactly two daemon-owned notices, no prompt-owned third.
+    expect(sendMessage).toHaveBeenNthCalledWith(1, '12345', '🔄 chief restarted (planned): no reason given');
+    expect(sendMessage).toHaveBeenNthCalledWith(2, '12345', 'Agent chief is back online (context handoff)');
+    expect(sendMessage).not.toHaveBeenCalledWith('12345', 'Agent chief is back online');
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps handoff context but emits no restart or back-online Telegram when lifecycle output is disabled', async () => {
+    const handoffDocPath = '/tmp/handoff-doc.md';
+    fsMocks.existsSync.mockImplementation((path: string) =>
+      typeof path === 'string'
+      && (path.endsWith('.handoff-doc-path') || path === handoffDocPath),
+    );
+    readWithOrchestrator('chief', (path) =>
+      path.endsWith('.handoff-doc-path') ? handoffDocPath : '',
+    );
+
+    const ap = new AgentProcess('chief', envFor('chief'), {
+      runtime: 'codex-app-server',
+      telegram_lifecycle_notifications: false,
+    });
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const api = { sendChatAction: vi.fn().mockResolvedValue(undefined), sendMessage };
+
+    ap.setTelegramHandle(api as any, '12345');
+    await ap.start();
+
+    const prompt = mockCodexAppServerPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).toContain('CONTEXT HANDOFF');
+    expect(prompt).toContain('ONE VOICE LIFECYCLE GATE');
+    expect(prompt).not.toContain('HANDOFF UX');
+    expect(prompt).not.toContain('cortextos bus send-telegram');
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps a specialist handoff internal even with Telegram credentials and lifecycle enabled', async () => {
+    const handoffDocPath = '/tmp/specialist-handoff.md';
+    fsMocks.existsSync.mockImplementation((path: string) =>
+      typeof path === 'string'
+      && (path.endsWith('.handoff-doc-path') || path === handoffDocPath),
+    );
+    readWithOrchestrator('chief', (path) =>
+      path.endsWith('.handoff-doc-path') ? handoffDocPath : '',
+    );
+
+    const ap = new AgentProcess('sentinel', envFor('sentinel'), {
+      runtime: 'codex-app-server',
+    });
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    ap.setTelegramHandle({ sendChatAction: vi.fn(), sendMessage } as any, '12345');
+    await ap.start();
+
+    const prompt = mockCodexAppServerPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).toContain('CONTEXT HANDOFF');
+    expect(prompt).toContain('ONE VOICE LIFECYCLE GATE');
+    expect(prompt).not.toContain('HANDOFF UX');
+    expect(prompt).not.toContain('cortextos bus send-telegram');
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['malformed JSON', '{not-json'],
+    ['empty', JSON.stringify({ orchestrator: '' })],
+    ['non-string', JSON.stringify({ orchestrator: 7 })],
+  ])('fails closed for %s org authority', async (_label, context: string | undefined) => {
+    fsMocks.readFileSync.mockImplementation((path: string) => {
+      if (path !== contextPath || context === undefined) throw new Error('missing');
+      return context;
+    });
+    const ap = new AgentProcess('chief', envFor('chief'), { runtime: 'codex-app-server' });
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    ap.setTelegramHandle({ sendChatAction: vi.fn(), sendMessage } as any, '12345');
+    await ap.start();
+
+    const prompt = mockCodexAppServerPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).toContain('ONE VOICE LIFECYCLE GATE');
+    expect(prompt).not.toContain('Send a Telegram message to the user saying you are back online.');
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it('does not send daemon-direct back-online Telegram for claude-code runtime (issue #392)', async () => {
@@ -211,6 +379,38 @@ describe('AgentProcess codex-app-server runtime', () => {
     await ap.start();
 
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('lets configured Chief receive the Claude fresh-start online prompt', async () => {
+    readWithOrchestrator('chief');
+    const ap = new AgentProcess('chief', envFor('chief'), { runtime: 'claude-code' });
+    ap.setTelegramHandle({ sendChatAction: vi.fn() } as any, '12345');
+    await ap.start();
+
+    const prompt = mockAgentPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).toContain('Send a Telegram message to the user saying you are back online.');
+    expect(prompt).not.toContain('ONE VOICE LIFECYCLE GATE');
+  });
+
+  it('removes every Claude handoff lifecycle send instruction for a specialist', async () => {
+    const handoffDocPath = '/tmp/claude-specialist-handoff.md';
+    fsMocks.existsSync.mockImplementation((path: string) =>
+      typeof path === 'string'
+      && (path.endsWith('.handoff-doc-path') || path === handoffDocPath),
+    );
+    readWithOrchestrator('chief', (path) =>
+      path.endsWith('.handoff-doc-path') ? handoffDocPath : '',
+    );
+    const ap = new AgentProcess('growth', envFor('growth'), { runtime: 'claude-code' });
+    ap.setTelegramHandle({ sendChatAction: vi.fn() } as any, '12345');
+    await ap.start();
+
+    const prompt = mockAgentPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).toContain('CONTEXT HANDOFF');
+    expect(prompt).toContain('ONE VOICE LIFECYCLE GATE');
+    expect(prompt).not.toContain('HANDOFF UX');
+    expect(prompt).not.toContain('cortextos bus send-telegram');
+    expect(prompt).not.toContain('Send a Telegram message to the user saying you are back online.');
   });
 
   it('uses direct kill path on stop, not Claude /exit choreography', async () => {
