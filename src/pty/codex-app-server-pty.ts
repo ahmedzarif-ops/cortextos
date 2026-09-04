@@ -89,8 +89,15 @@ const BOOTSTRAP_PATTERN = '[codex-app-server] ready';
 
 /**
  * Boot-turn cap for local/ overrides. The Codex boot protocol refuses a single
- * injected blob over 1 MiB of characters; this sits an order of magnitude below
- * that so the overrides can never be the thing that trips it. Exceeding it drops
+ * injected blob over 1,048,576 CHARACTERS; 128 KiB leaves 8x headroom, so the
+ * overrides can never be the thing that trips it.
+ * The cap is measured in BYTES against a CHARACTER limit. For UTF-8 bytes >=
+ * characters, so this errs in the SAFE direction — and it never converts to
+ * tokens. A limit that converts acquires a second way to be wrong that a limit
+ * in native units does not have (growth, after withdrawing its own token
+ * estimate: COUNT BYTES, NEVER ESTIMATE TOKENS).
+ * SCOPE: the cap covers the overrides only, not the block wrapper or the boot
+ * prompt. That is the stated goal, not an oversight. Exceeding it drops
  * the overrides LOUDLY (see composeBootPrompt) — it never truncates them.
  */
 const MAX_LOCAL_OVERRIDE_BYTES = 128 * 1024;
@@ -167,7 +174,7 @@ export class CodexAppServerPTY {
       await this.initializeRpc();
       await this.startOrResumeThread(mode);
       this._outputBuffer.push(`${BOOTSTRAP_PATTERN} thread=${this._threadId}\n`);
-      const bootPrompt = this.composeBootPrompt(prompt);
+      const bootPrompt = this.composeBootPrompt(prompt, mode);
       if (bootPrompt.trim()) {
         this.queueTurn([{ type: 'text', text: bootPrompt, text_elements: [] }]);
       }
@@ -202,7 +209,25 @@ export class CodexAppServerPTY {
    * failure this whole change exists to remove, and half a rulebook is worse than
    * none because it still reads like a rulebook.
    */
-  private composeBootPrompt(prompt: string): string {
+  private composeBootPrompt(prompt: string, mode: 'fresh' | 'continue'): string {
+    // `mode` IS DELIBERATELY NOT A CONDITION, AND IT IS IN THE SIGNATURE SO THAT
+    // FACT IS READABLE. guard's finding on e4195c6: on mode=continue the thread
+    // is RESUMED, so this block is appended to a thread that already contains a
+    // copy — unlike --append-system-prompt, which REPLACES the system prompt and
+    // therefore holds exactly one copy across any number of restarts. A turn
+    // accumulates; a system prompt does not.
+    //
+    // KEPT ON PURPOSE. Re-injection is the interim's ONLY mechanism for restoring
+    // overrides after a compaction has eaten them, which is this design's central
+    // weakness. Suppressing it on continue would make a restarted seat strictly
+    // worse off than a fresh one, and the restart is exactly when a seat is most
+    // likely to have lost them.
+    // ACCEPTED COST: duplicate copies in the thread. Bounded per turn (the block
+    // is one turn and one turn is capped), unbounded across restarts. If a seat
+    // is ever measured hitting the thread ceiling from this, the answer is the
+    // durable design (07263733), not a condition here.
+    void mode;
+
     const overrides = readLocalOverrides(this._env.agentDir);
 
     if (overrides.skipped.length > 0) {

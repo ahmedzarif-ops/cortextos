@@ -57,9 +57,10 @@ function agentPtyArgs(agentDir: string): string[] {
     .buildClaudeArgs('fresh', 'BOOT_PROMPT');
 }
 
-function codexBootPrompt(agentDir: string): string {
+function codexBootPrompt(agentDir: string, mode: 'fresh' | 'continue' = 'fresh'): string {
   const pty = new CodexAppServerPTY(mockEnv(agentDir), {} as any, join(ROOT, 'codex.log'));
-  return (pty as unknown as { composeBootPrompt(p: string): string }).composeBootPrompt('BOOT_PROMPT');
+  return (pty as unknown as { composeBootPrompt(p: string, m: 'fresh' | 'continue'): string })
+    .composeBootPrompt('BOOT_PROMPT', mode);
 }
 
 describe('readLocalOverrides: the file-set rule', () => {
@@ -147,6 +148,54 @@ describe('adapter parity: both runtimes deliver the SAME bytes', () => {
 
   it('no local/ at all: codex boot prompt is the prompt, unchanged', () => {
     expect(codexBootPrompt(join(ROOT, 'no-such-agent'))).toBe('BOOT_PROMPT');
+  });
+});
+
+describe("guard's finding: re-injection on continue is a DECISION, and the test is where it is pinned", () => {
+  /**
+   * On mode=continue the codex thread is RESUMED, so this block is appended to a
+   * thread that already contains a copy — unlike --append-system-prompt, which
+   * REPLACES the system prompt and holds exactly one copy across any number of
+   * restarts. A turn accumulates; a system prompt does not.
+   *
+   * KEPT ON PURPOSE: re-injection is the interim's only mechanism for restoring
+   * overrides after a compaction ate them, and a restart is exactly when a seat
+   * is most likely to have lost them. This test exists so the choice cannot be
+   * mistaken for an oversight, and so a later "fix" that suppresses it fails
+   * loudly instead of silently removing the mitigation.
+   */
+  it('injects on continue as well as fresh — deliberate, not accidental', () => {
+    const fresh = codexBootPrompt(AGENT_DIR, 'fresh');
+    const cont = codexBootPrompt(AGENT_DIR, 'continue');
+    expect(cont).toContain('<local-overrides');
+    expect(cont).toContain(readLocalOverrides(AGENT_DIR).content);
+    // Identical output: mode must not change WHAT is delivered.
+    expect(cont).toBe(fresh);
+  });
+});
+
+describe("guard's finding: a skipped override is loud on the claude path too", () => {
+  it('warns when an override is skipped, instead of silently losing one', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      agentPtyArgs(AGENT_DIR);
+      const said = warn.mock.calls.map(c => String(c[0])).join('\n');
+      expect(said).toContain('local/ overrides SKIPPED');
+      expect(said).toContain('dir.md');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does NOT warn when nothing was skipped (no false alarm)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      agentPtyArgs(join(ROOT, 'no-such-agent'));
+      const said = warn.mock.calls.map(c => String(c[0])).join('\n');
+      expect(said).not.toContain('local/ overrides SKIPPED');
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

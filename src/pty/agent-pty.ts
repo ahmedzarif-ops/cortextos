@@ -1,5 +1,5 @@
 import { join } from 'path';
-import { existsSync, readFileSync, readdirSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { platform } from 'os';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { readLocalOverrides } from '../utils/local-overrides.js';
@@ -330,6 +330,17 @@ export class AgentPTY {
     // can be measured against it. It was inline here, which is exactly why a Codex
     // seat received none of it: there was nothing to compare against.
     const localOverrides = readLocalOverrides(this.env.agentDir);
+    // guard's finding on e4195c6: without this the claude path goes from
+    // "silently loses everything" to "silently loses one", which is better and
+    // still SILENT — and silent partial loss of an instruction set is the exact
+    // class this change exists to remove. A skipped override must be as loud
+    // here as it is on the codex path.
+    if (localOverrides.skipped.length > 0) {
+      console.warn(
+        `[agent-pty] ${this.env.agentName}: local/ overrides SKIPPED ` +
+          `(unreadable or not a file): ${localOverrides.skipped.join(', ')}`,
+      );
+    }
     if (localOverrides.content) {
       args.push('--append-system-prompt', localOverrides.content);
     }
