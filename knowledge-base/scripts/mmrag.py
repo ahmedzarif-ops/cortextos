@@ -280,13 +280,31 @@ def _embed_backoffs():
     stall reads as a hang, which is a worse failure than a loud one. Bounded retry
     plus a non-zero exit is the shape.
     """
+    DEFAULT = (5, 15, 45)
+    MAX_ATTEMPTS = 6          # ceiling: the knob must not become "retry more"
+    MAX_BACKOFF_S = 120.0     # a single sleep longer than this reads as a hang
+
     raw = os.environ.get("MMRAG_EMBED_BACKOFFS")
     if not raw:
-        return (5, 15, 45)
+        return DEFAULT
     try:
-        return tuple(float(x) for x in raw.split(",") if x.strip() != "")
+        vals = [float(x) for x in raw.split(",") if x.strip() != ""]
     except ValueError:
-        return (5, 15, 45)
+        return DEFAULT
+
+    # ⛔ AN EMPTY PARSE MEANS ZERO ATTEMPTS, WHICH MEANS ZERO API CALLS (guard's review of PR #6).
+    # MMRAG_EMBED_BACKOFFS="," parses to (), the retry loop body never executes, and the function
+    # falls straight to `raise ... RuntimeError("retry loop completed without response or error")`
+    # WITHOUT EVER CALLING THE API. A misconfigured env var would have looked like a total embedding
+    # outage, and the traceback names the retry loop rather than the config. Fall back instead.
+    if not vals:
+        return DEFAULT
+
+    # Clamp both dimensions. The fix for the 429s was NEVER "retry more": these backoffs already
+    # total 65s, and a longer stall reads as a hang, which is a worse failure than a loud one.
+    # This knob exists so TESTS need not sleep 65s — not to raise the production ceiling.
+    vals = [min(max(v, 0.0), MAX_BACKOFF_S) for v in vals[:MAX_ATTEMPTS]]
+    return tuple(vals)
 
 
 def embed_content(client, config, content, task_type="RETRIEVAL_DOCUMENT"):

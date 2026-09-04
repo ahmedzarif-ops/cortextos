@@ -50,7 +50,7 @@ def _client(embed_script):
 
 
 def test_embed_transient_then_success():
-    print("\n[test 1/5] embed: 429 -> 429 -> 200 completes")
+    print("\n[test 1/6] embed: 429 -> 429 -> 200 completes")
     os.environ["MMRAG_EMBED_BACKOFFS"] = "0,0,0"
     client = _client("429,429,200")
     vec = mmrag.embed_content(client, CONFIG, "some memory text")
@@ -61,7 +61,7 @@ def test_embed_transient_then_success():
 
 
 def test_embed_all_exhausted_raises():
-    print("\n[test 2/5] embed: 429 x3 raises — LOUD, not a silent zero")
+    print("\n[test 2/6] embed: 429 x3 raises — LOUD, not a silent zero")
     os.environ["MMRAG_EMBED_BACKOFFS"] = "0,0,0"
     client = _client("429,429,429")
     raised = None
@@ -77,7 +77,7 @@ def test_embed_all_exhausted_raises():
 
 
 def test_embed_fail_fast_nontransient():
-    print("\n[test 3/5] embed: 403 fails fast — predicate is structural, not textual")
+    print("\n[test 3/6] embed: 403 fails fast — predicate is structural, not textual")
     os.environ["MMRAG_EMBED_BACKOFFS"] = "0,0,0"
     # Body mentions 429 on purpose: a textual predicate would retry this.
     client = _client("403:quota-ish wording mentioning 429,200")
@@ -94,7 +94,7 @@ def test_embed_fail_fast_nontransient():
 
 
 def test_embed_query_is_covered_too():
-    print("\n[test 4/5] embed_query retries as well — a blip must not block READING memory")
+    print("\n[test 4/6] embed_query retries as well — a blip must not block READING memory")
     os.environ["MMRAG_EMBED_BACKOFFS"] = "0,0,0"
     client = _client("429,200")
     vec = mmrag.embed_query(client, CONFIG, "what did the fleet learn")
@@ -104,7 +104,7 @@ def test_embed_query_is_covered_too():
 
 
 def test_chunk_count_not_rc():
-    print("\n[test 5/5] CHUNK COUNT: every chunk lands even when each one 429s once first")
+    print("\n[test 5/6] CHUNK COUNT: every chunk lands even when each one 429s once first")
     # THE ASSERTION CHIEF ASKED FOR. A version that retries the FIRST chunk and
     # gives up on the rest would still exit 0; only the count catches it.
     os.environ["MMRAG_EMBED_BACKOFFS"] = "0,0,0"
@@ -130,17 +130,67 @@ def test_chunk_count_not_rc():
            detail=f"got {client.models.embed_calls}, expected {2 * len(chunks)}")
 
 
+def test_backoffs_knob_is_clamped():
+    print("\n[test 6/6] MMRAG_EMBED_BACKOFFS is clamped and cannot disable the retry")
+    # guard's review of PR #6. The knob exists so tests do not sleep 65s. It must not become
+    # a way to raise the production ceiling, and a malformed value must not silently mean
+    # ZERO ATTEMPTS -- "," parsed to (), the loop body never ran, and the function raised
+    # RuntimeError WITHOUT EVER CALLING THE API. That looks like a total embedding outage
+    # and the traceback names the retry loop rather than the config.
+    saved = os.environ.get("MMRAG_EMBED_BACKOFFS")
+    try:
+        cases = [
+            (",", (5, 15, 45), "empty parse falls back, never zero attempts"),
+            ("", (5, 15, 45), "unset falls back"),
+            ("junk", (5, 15, 45), "unparseable falls back"),
+            ("0,0,0", (0.0, 0.0, 0.0), "tests can still skip sleeps"),
+        ]
+        for raw, want, why in cases:
+            os.environ["MMRAG_EMBED_BACKOFFS"] = raw
+            got = mmrag._embed_backoffs()
+            _check("%r -> %s (%s)" % (raw, want, why), got == want, "got %r" % (got,))
+
+        os.environ["MMRAG_EMBED_BACKOFFS"] = "1,2,3,4,5,6,7,8,9"
+        got = mmrag._embed_backoffs()
+        _check("attempt count is capped (no 'retry more' via env)", len(got) <= 6, "got %d" % len(got))
+
+        os.environ["MMRAG_EMBED_BACKOFFS"] = "9999"
+        got = mmrag._embed_backoffs()
+        _check("a single backoff is capped so a stall cannot read as a hang",
+               got and max(got) <= 120.0, "got %r" % (got,))
+
+        os.environ["MMRAG_EMBED_BACKOFFS"] = "-5,3"
+        got = mmrag._embed_backoffs()
+        _check("negatives clamp to 0 rather than reaching time.sleep",
+               all(v >= 0 for v in got), "got %r" % (got,))
+
+        # THE ASSERTION THAT MATTERS: no env value can produce zero attempts.
+        worst = []
+        for raw in [",", ",,,", " , , ", "", "junk", "-1", "0"]:
+            os.environ["MMRAG_EMBED_BACKOFFS"] = raw
+            if len(mmrag._embed_backoffs()) == 0:
+                worst.append(raw)
+        _check("NO env value yields zero attempts (zero attempts = zero API calls)",
+               worst == [], "these gave 0 attempts: %r" % worst)
+    finally:
+        if saved is None:
+            os.environ.pop("MMRAG_EMBED_BACKOFFS", None)
+        else:
+            os.environ["MMRAG_EMBED_BACKOFFS"] = saved
+
+
 if __name__ == "__main__":
     test_embed_transient_then_success()
     test_embed_all_exhausted_raises()
     test_embed_fail_fast_nontransient()
     test_embed_query_is_covered_too()
     test_chunk_count_not_rc()
+    test_backoffs_knob_is_clamped()
     print()
     if FAILURES:
         print(f"FAILED: {len(FAILURES)} assertion(s)")
         for f in FAILURES:
             print(f"  - {f}")
         sys.exit(1)
-    print("ALL PASS (5 scenarios)")
+    print("ALL PASS (6 scenarios)")
     sys.exit(0)
