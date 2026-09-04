@@ -6,7 +6,7 @@
   "max_session_seconds": 255600,
   "max_crashes_per_day": 10,
   "working_directory": "",
-  "timezone": "{{timezone}}",
+  "timezone": "",
   "crons": [
     {
       "name": "heartbeat",
@@ -62,9 +62,9 @@
       "enabled": true
     }
   },
-  "day_mode_start": "{{day_mode_start}}",
-  "day_mode_end": "{{day_mode_end}}",
-  "communication_style": "{{communication_style}}",
+  "day_mode_start": "",
+  "day_mode_end": "",
+  "communication_style": "",
   "approval_rules": {
     "always_ask": [
       "external-comms",
