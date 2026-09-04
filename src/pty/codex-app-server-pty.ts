@@ -974,7 +974,14 @@ export class CodexAppServerPTY {
 
     const entry = {
       timestamp: new Date().toISOString(),
-      model: this._actualModel || 'unknown',
+      // ⛔ FALL BACK TO THE CONFIGURED MODEL BEFORE 'unknown' (guard a4dv8, 2026-09-04).
+      // 'unknown' is not inert: the dashboard's resolvePricingKey() matches on substrings
+      // (opus / haiku / codex / gpt-5) and DEFAULTS TO SONNET for everything else, so an
+      // app-server that never reports its model got Codex traffic priced at Anthropic rates.
+      // configured_model below already carries this value — the ledger knew the answer and
+      // wrote 'unknown' beside it. Keep 'unknown' as the last resort: it must still be
+      // possible to say we do not know, rather than to guess.
+      model: this._actualModel || this._config.model || 'unknown',
       configured_model: this._config.model || null,
       model_provider: this._modelProvider,
       input_tokens: typeof total.inputTokens === 'number' ? total.inputTokens : 0,
