@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync, unlinkSync, appendFileSync } from 'fs';
 import { join } from 'path';
-import type { Task, Priority, TaskStatus, BusPaths, StaleTaskReport, ArchiveReport } from '../types/index.js';
+import type { Task, TaskAnnotation, Priority, TaskStatus, BusPaths, StaleTaskReport, ArchiveReport } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { randomDigits } from '../utils/random.js';
 import { validatePriority, validateTaskId } from '../utils/validate.js';
@@ -292,6 +292,91 @@ export function updateTask(
  * status transition, claim, and completion emits one of these so the
  * full lifecycle can be replayed from disk.
  */
+/**
+ * Append a dated, attributed note to a task WITHOUT touching its description.
+ *
+ * The gap this fills: no bus route could correct a task after creation, so
+ * corrections lived in chat prose and were lost to anyone reading the task later.
+ *
+ * WHY THIS IS NOT `appendTaskAudit`. That log is documented as best-effort and
+ * swallows its own write failures — correct for observability, wrong for a
+ * correction. An annotation that silently vanishes is worse than no annotation:
+ * the reader sees a task with no note and concludes there was nothing to say.
+ * So this writes into the task record itself and THROWS on failure.
+ *
+ * `description` is never modified. A correction is a new fact about the task, not
+ * a replacement for what was originally asked; keeping both is what lets a reader
+ * see that the ask changed, and when, and who changed it.
+ */
+export function annotateTask(
+  paths: BusPaths,
+  taskId: string,
+  text: string,
+  agent: string,
+): TaskAnnotation {
+  validateTaskId(taskId);
+
+  // Reject an empty note loudly rather than recording a blank one. A blank
+  // annotation is indistinguishable from "someone looked and had nothing to add",
+  // which is a claim this command has no business making on the writer's behalf.
+  const body = (text ?? '').trim();
+  if (!body) {
+    throw new Error('annotate-task: note text is empty. Pass the note, or do not annotate.');
+  }
+  const who = (agent ?? '').trim();
+  if (!who) {
+    throw new Error('annotate-task: no agent identity. Set CTX_AGENT_NAME or pass --agent.');
+  }
+
+  // A missing task directory IS "not found" — it must not surface as a path-type error
+  // from deeper in the stack. The caller asked whether this task exists; answer that
+  // question, in the caller's vocabulary.
+  let filePath: string | null = null;
+  try {
+    filePath = findTaskFile(paths, taskId);
+  } catch {
+    filePath = null;
+  }
+  if (!filePath) {
+    throw new Error(`Task ${taskId} not found`);
+  }
+
+  const before = readFileSync(filePath, 'utf-8');
+  const task: Task = JSON.parse(before);
+  const descriptionBefore = task.description;
+
+  const entry: TaskAnnotation = {
+    ts: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    agent: who,
+    text: body,
+  };
+  task.annotations = [...(task.annotations ?? []), entry];
+  task.updated_at = entry.ts;
+
+  // FUTURE-EDIT TRIPWIRE, not a runtime check — and the distinction is the point.
+  //
+  // As this function stands today the comparison CANNOT FAIL: nothing between the read above
+  // and this line assigns `task.description`, so it compares a value with itself. Read as a
+  // runtime guarantee it is decoration, and a check that cannot fail is not a check.
+  //
+  // It is kept, and kept deliberately, for the edit that has not happened yet: `description`
+  // is a string, so `descriptionBefore` holds a COPY of the value, and any future line that
+  // reassigns `task.description` between the read and the write fails loudly HERE rather than
+  // silently overwriting what was originally asked. That is the invariant this command exists
+  // to protect — a correction is a new fact about the task, never a replacement for the ask.
+  //
+  // Its limit, stated so nobody reads more into it: it catches REASSIGNMENT of the field. It
+  // would not catch mutation of a nested object, and `description` is not one today. If that
+  // ever changes, this line stops covering what its comment claims.
+  if (task.description !== descriptionBefore) {
+    throw new Error(`annotate-task: refusing to write — description changed for ${taskId}`);
+  }
+
+  atomicWriteSync(filePath, JSON.stringify(task));
+  appendTaskAudit(paths, taskId, { event: 'update', agent: who, note: `annotated: ${body}` });
+  return entry;
+}
+
 export interface TaskAuditEntry {
   ts: string; // ISO 8601
   event: 'create' | 'claim' | 'update' | 'complete';

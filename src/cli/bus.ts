@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
 import { validateAgentName, validateTaskId } from '../utils/validate.js';
-import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
+import { annotateTask, createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
@@ -20,7 +20,7 @@ import { nextFireFromCron } from '../daemon/cron-scheduler.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
 import { resolvePaths } from '../utils/paths.js';
-import { resolveEnv, resolveTargetAgentDir } from '../utils/env.js';
+import { resolveEnv, resolveAgentIdentity, resolveTargetAgentDir } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
@@ -266,6 +266,42 @@ busCommand
       const desc = opts.desc ? ` — ${opts.desc.slice(0, 120)}` : '';
       sendMessage(assigneePaths, env.agentName, opts.assignee, 'normal',
         `Task assigned: [${opts.priority}] ${title}${desc} (id: ${taskId})`);
+    }
+  });
+
+busCommand
+  .command('annotate-task')
+  .argument('<id>', 'Task ID')
+  .argument('<text>', 'Note to append (dated and attributed; the description is not touched)')
+  .option('--agent <name>', 'Who is writing the note (defaults to CTX_AGENT_NAME; NOT the cwd)')
+  .description("Append a dated, attributed note to a task without rewriting its description")
+  .action((id: string, text: string, opts: { agent?: string }) => {
+    const env = resolveEnv();
+    // Identity comes from resolveAgentIdentity, NOT from env.agentName, and the difference is
+    // the whole point: env.agentName falls back to basename(cwd), so it is never empty and the
+    // "no agent identity" refusal inside annotateTask cannot be reached from this command.
+    // Run from ~/Desktop with CTX_AGENT_NAME unset and the note is signed `Desktop` — a wrong
+    // attribution that reads exactly like a right one. Refuse instead of guessing.
+    const who = resolveAgentIdentity(opts.agent);
+    if (!who) {
+      console.error(
+        'ERROR: annotate-task: no agent identity. Pass --agent <name> or set CTX_AGENT_NAME. ' +
+          'The current directory name is deliberately NOT used to sign a note.',
+      );
+      process.exit(1);
+    }
+    // Paths are org-scoped for tasks, so `who` and env.agentName would resolve the same task
+    // file either way; passing `who` keeps one identity in play for the whole command.
+    const paths = resolvePaths(who, env.instanceId, env.org);
+    try {
+      const entry = annotateTask(paths, id, text, who);
+      console.log(`Annotated ${id} at ${entry.ts} by ${entry.agent}`);
+    } catch (err) {
+      // Fail loudly and non-zero. A correction that reports success without
+      // being written is worse than no correction: the next reader sees a task
+      // with no note and concludes there was nothing to add.
+      console.error(`ERROR: ${(err as Error).message}`);
+      process.exit(1);
     }
   });
 

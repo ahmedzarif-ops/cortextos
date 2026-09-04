@@ -192,6 +192,40 @@ export function writeCortextosEnv(agentDir: string, env: CtxEnv): void {
 }
 
 /**
+ * Resolve WHO IS ACTING, with NO cwd fallback — deliberately unlike `resolveEnv`.
+ *
+ * `resolveEnv().agentName` ends in `basename(process.cwd())` when nothing else supplies a
+ * name. That default is right for path resolution (a wrong guess yields a wrong directory,
+ * which fails visibly) and WRONG for identity: it never returns empty, so a caller's
+ * "no identity" guard is unreachable, and the acting agent is silently recorded as whatever
+ * directory the process happened to start in. Attribution has no failure mode that looks
+ * like a failure — a note signed `Desktop` reads exactly like a note signed `city`.
+ *
+ * Returns `null` when identity cannot be established, so the caller can refuse. Callers that
+ * WRITE ATTRIBUTED RECORDS should use this; callers that only need paths should keep
+ * `resolveEnv`.
+ *
+ * Precedence: explicit override (a `--agent` flag) > `CTX_AGENT_NAME` > `.cortextos-env` in
+ * the cwd. The env-file step is why a test must run from a CLEAN cwd: inside any agent
+ * directory `.cortextos-env` supplies an identity and the refusal path never executes.
+ */
+export function resolveAgentIdentity(override?: string): string | null {
+  const explicit = (override ?? '').trim();
+  if (explicit) return explicit;
+
+  const fromEnv = (process.env.CTX_AGENT_NAME ?? '').trim();
+  if (fromEnv) return fromEnv;
+
+  const cortextosEnvPath = join(process.cwd(), '.cortextos-env');
+  if (existsSync(cortextosEnvPath)) {
+    const fromFile = (parseEnvFile(cortextosEnvPath).CTX_AGENT_NAME ?? '').trim();
+    if (fromFile) return fromFile;
+  }
+
+  return null;
+}
+
+/**
  * Parse a KEY=VALUE env file. Supports:
  *   - `#` comments at start of line
  *   - Surrounding single or double quotes on the value (stripped)
