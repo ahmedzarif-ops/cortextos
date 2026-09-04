@@ -75,7 +75,11 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-describe('update-heartbeat CALL SITE (src/cli/bus.ts:582)', () => {
+// ⛔ THE CALL SITE IS CITED BY SYMBOL, NOT BY LINE (chief's ruling, 2026-09-04, after two seats
+// hit a wrong line number in one relay): the site is the `timezone: opts.timezone` argument in
+// `src/cli/bus.ts` — 582 on this tree, 492 on `main`. A bare line number is a claim about a tree
+// the sentence never names, and it drifts on every edit above it.
+describe('update-heartbeat CALL SITE (the buildHeartbeatOptions argument in src/cli/bus.ts)', () => {
   it('the commander action actually calls updateHeartbeat', async () => {
     const { busCommand } = await import('../../../src/cli/bus.js');
     await busCommand.parseAsync(['update-heartbeat', 'working'], { from: 'user' });
@@ -98,6 +102,18 @@ describe('update-heartbeat CALL SITE (src/cli/bus.ts:582)', () => {
     // property the three builder tests cannot have.
     expect(options?.timezone, 'the call site passed the raw flag, not a resolved timezone')
       .toBe('America/Chicago');
+
+    // ⛔ THE WINDOW CROSSES THE SEAM TOO, AND ASSERTING ONLY THE TIMEZONE MISSED IT
+    // (growth ivrvp, 2026-09-04, reading this file at b11d4e0). The defect this PR closes had TWO
+    // independent halves — a UTC timezone AND a hardcoded 8-22 window — and this test asserted
+    // one of them. A builder that resolves the zone correctly and DROPS dayModeStart/dayModeEnd
+    // passes the seam test and fails only the builder suite, which is the same both-ends-tested
+    // shape the seam test exists to eliminate: the second half of the original bug (22:00-00:00
+    // reading night) would come back through a seam this file had declared covered.
+    expect(options?.dayModeStart, 'the call site did not pass the resolved day-window START')
+      .toBe('08:00');
+    expect(options?.dayModeEnd, 'the call site did not pass the resolved day-window END')
+      .toBe('00:00');
   });
 
   it('an explicit --timezone still wins over the org default', async () => {

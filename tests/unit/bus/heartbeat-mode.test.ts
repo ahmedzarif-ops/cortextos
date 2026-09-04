@@ -101,6 +101,28 @@ describe('detectDayNightMode', () => {
     expect(detectDayNightMode(CHI, '00:00', '00:00')).toBe('day');
   });
 
+  it('an UNSUBSTITUTED TEMPLATE PLACEHOLDER falls back like an empty value — and that is a coincidence', () => {
+    // A real value found in the tree, and a bucket both prior counts of `day_mode_end` missed:
+    // community/agents/agentic-crm-assistant ships `"day_mode_end": "{{day_mode_end}}"`.
+    // It passes resolveModeSettings' `str()` (it is non-empty) and is rejected HERE by parseClock.
+    vi.setSystemTime(new Date('2026-09-04T17:00:00Z'));   // Chicago 12:00
+    // start === DEFAULT_DAY_END makes the fallback OBSERVABLE: the degenerate-window branch
+    // returns 'day', while any real end time at this hour would not.
+    for (const junk of ['{{day_mode_end}}', '', 'garbage', undefined]) {
+      expect(detectDayNightMode(CHI, '00:00', junk), `unparseable end ${JSON.stringify(junk)}`)
+        .toBe('day');
+    }
+    // ⭐ THE CONTROL, AND IT IS THE POINT OF THE TEST: a REAL end time at the same instant gives
+    // the other answer. Without it these four assertions are equally satisfied by a function that
+    // ignores `dayEnd` altogether.
+    expect(detectDayNightMode(CHI, '00:00', '06:00')).toBe('night');
+    // ⚠ SO THE PLACEHOLDER IS HARMLESS ON THIS FLEET ONLY BECAUSE DEFAULT_DAY_END ("00:00") EQUALS
+    // WHAT THIS ORG CONFIGURES. An org declaring any other closing hour would have the placeholder
+    // silently install 00:00, with nothing to report it. This test is the record of that, so the
+    // claim lives somewhere that fails when it stops being true.
+    expect(DEFAULT_DAY_END).toBe('00:00');
+  });
+
   it('the function can return BOTH values for one timezone — the old suite never proved this', () => {
     // The negative control the previous test was missing entirely. Without it, every assertion
     // above is satisfiable by a function that returns a constant.

@@ -168,12 +168,43 @@ export function detectDayNightMode(
   // `nowMin >= 1440 || nowMin < endMin` — PERMANENT NIGHT, the exact louder-wrong-answer this
   // function's degenerate-window comment reasons against, reached by a different door.
   // ⚠ THE OBVIOUS FIX (tighten parseClock to h > 23) IS STILL WRONG, BUT NOT FOR THE REASON I FIRST
-  // WROTE HERE. ⛔ CORRECTED 2026-09-04 (guard yvng0, measured exhaustively; re-verified here):
-  // I claimed day_mode_end: "24:00" was "a LIVE config shape" for this org. IT IS NOT. All 17
-  // day_mode_end values in the fleet are "00:00"; there are ZERO "24:00" values in any config.
-  // I had inferred it from the org declaring an 08:00-00:00 window and never measured it — a
-  // CORRECT CHANGE SHIPPED WITH A FALSE JUSTIFICATION, which is the harder half to catch because
-  // the code is right and only the sentence beside it is wrong.
+  // WROTE HERE. ⛔ CORRECTED 2026-09-04 (guard yvng0): I claimed day_mode_end: "24:00" was "a LIVE
+  // config shape" for this org. IT IS NOT — ZERO "24:00" values exist in any config, and that part
+  // has held under every measurement. I had inferred it from the org declaring an 08:00-00:00
+  // window and never measured it — a CORRECT CHANGE SHIPPED WITH A FALSE JUSTIFICATION, the harder
+  // half to catch because the code is right and only the sentence beside it is wrong.
+  //
+  // ⛔ AND THEN THE CORRECTION ITSELF CARRIED A BARE COUNT, WHICH WENT THE SAME WAY. This comment
+  // said "all 17 day_mode_end values in the fleet"; guard (vzvlf) then measured 21 as "nineteen
+  // 00:00 and two empty strings". RE-DERIVED HERE 2026-09-04 AND **NEITHER NUMBER REPRODUCES**,
+  // because NEITHER SENTENCE NAMED ITS FILE SET. Every one of these is a true count of a different
+  // set, taken the same minute:
+  //     live ygs-cortex-fleet seat configs .......  6, all "00:00"
+  //     + the org context.json ...................  7, all "00:00"
+  //     shipped templates/ .......................  4  = 2x"00:00", 2x""
+  //     shipped community/agents/ ................  3  = 2x"", 1x"{{day_mode_end}}"
+  //     everything, minus worktree copies ........ 14  = 9x"00:00", 4x"", 1 placeholder
+  //     everything, no exclusions ................ 22  = 12x"00:00", 8x"", 2 placeholders
+  // ⇒ A BARE COUNT IS NOT A MEASUREMENT — it is a measurement with its scope deleted, and two
+  // honest people measuring the same tree will disagree without either being wrong. State the set
+  // or state no number. Derivation, so the next reader checks the SEARCH and not the CONCLUSION:
+  //     find ~/cortextos -name '*.json' -not -path '*/node_modules/*' -not -path '*/.git/*' \
+  //       | xargs grep -h '"day_mode_end"' | sort | uniq -c
+  //
+  // ⚠ AND A THIRD VALUE EXISTS THAT NEITHER REPORT MENTIONED: "{{day_mode_end}}", an unsubstituted
+  // template placeholder in community/agents/agentic-crm-assistant. Both prior counts had
+  // partitioned the values into two buckets, so neither could have named it.
+  // ⛔ THE TWO NON-CLOCK VALUES ARE REJECTED AT DIFFERENT LAYERS, and my first draft of this
+  // paragraph got that wrong in the same breath as correcting a wrong count. Measured, not read:
+  //     ""                 -> rejected by `str()` in resolveModeSettings (empty after trim)
+  //     "{{day_mode_end}}" -> PASSES `str()` unchanged; rejected here by parseClock's ^\d{1,2}:\d{2}$
+  // ⭐ AND THE CONSEQUENCE IS HARMLESS ONLY BY COINCIDENCE. Both land on `?? DEFAULT_DAY_END`, and
+  // DEFAULT_DAY_END is "00:00" — the same value this org configures. Verified by execution at
+  // start "00:00": "{{day_mode_end}}", "", "garbage" and undefined ALL return 'day', while a real
+  // "06:00" returns 'night'. So on THIS fleet the fallback is indistinguishable from the
+  // configured value; on an org that declared anything else, an unsubstituted placeholder would
+  // silently install 00:00 and nothing would report it. Covered by a test in
+  // tests/unit/bus/heartbeat-mode.test.ts, not by this sentence.
   // THE ACTUAL REASON, which is weaker and sufficient: "24:00" is a plausible HAND-WRITTEN
   // midnight-as-closing value, and h > 23 would send it through the `?? DEFAULT_DAY_END` fallback
   // and SILENTLY SHORTEN the configured day rather than reject it loudly. A parser that turns a
