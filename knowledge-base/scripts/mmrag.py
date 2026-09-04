@@ -1136,20 +1136,14 @@ def cmd_ingest(args):
         """
         nonlocal total, skipped, errors
 
-        # ⛔ THE INDENT IS PART OF A CROSS-PR CONTRACT, NOT COSMETIC (guard wxr52, 2026-09-04).
-        # cortextos #7 derives per-file status by matching THREE regexes against this function's
-        # output, and every one of them REQUIRES LEADING WHITESPACE:
-        #     /^\s+Added\s+(\d+)\s+chunk/   /^\s+Already present/   /^\s+ERROR:/
-        # Both call sites below pass a non-empty indent today, so the seam is correct as shipped —
-        # guard checked that rather than assuming it. What is undefended is the COUPLING: a third
-        # call site passing "" (the obvious choice for a top-level file) puts these lines at column
-        # 0, all three regexes stop matching, and #7 SILENTLY LOSES PER-FILE STATUS while both
-        # suites stay green — because each PR's tests only ever exercise its own end.
-        # Guard found one of the three lines; the class is all three, because they share this indent.
-        #
-        # Normalised HERE, once, at the single point they have in common. Today's bytes are
-        # unchanged (both callers already pass whitespace); a future empty indent can no longer
-        # break a parser in another repository's PR.
+        # THE INDENT (guard wxr52 -> city z2nuj, 2026-09-04). Guard flagged that #7's parsers
+        # required LEADING WHITESPACE (/^\s+.../), so a call site passing "" would silently stop
+        # matching and #7 would lose per-file status while both suites stayed green.
+        # ⚠ CITY HAS SINCE WITHDRAWN THAT CONSTRAINT — verified at #7 head 202753a, not taken from
+        # the relay: all three patterns are now /^\s*.../ and tolerate any indent, including none.
+        # So this line is NO LONGER load-bearing for the parser. It is kept only because both call
+        # sites already pass whitespace and consistent indentation is worth having on its own; the
+        # ORIGINAL justification is gone and is not left standing as if it still applied.
         indent = indent or "  "
         try:
             count = ingest_file(client, config, collection, path)
@@ -1162,7 +1156,11 @@ def cmd_ingest(args):
                 outcomes.append((display, None, e))
             else:
                 total += landed
-                # ⛔ THE "ERROR:" PREFIX IS LOAD-BEARING — KEEP THE COLON IMMEDIATELY AFTER IT.
+                # ⛔ THE "ERROR:" PREFIX IS STILL LOAD-BEARING — KEEP THE COLON AFTER IT.
+                # City withdrew the INDENT constraint (^\s+ -> ^\s*) and NOT this one: #7 at
+                # 202753a still tests /^\s*ERROR:/. "Format the output as you like" covered the
+                # whitespace only. A PARTIAL WITHDRAWAL READ AS A FULL ONE would re-break the
+                # parser here, on the partial path, exactly as it was broken before.
                 # I had written this as "ERROR after N chunk(s) landed: {e}", which does NOT match
                 # #7's /^\s+ERROR:/ — so THIS PR, whose entire purpose is to make partial failures
                 # visible, made them INVISIBLE to the parser that consumes them, and only on the

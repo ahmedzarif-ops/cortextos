@@ -378,12 +378,18 @@ def test_output_satisfies_pr7_parser_regexes():
            bool(PR7["Added"].match(line_added)), detail=repr(line_added))
     _check("an EMPTY indent still yields leading whitespace (Already present)",
            bool(PR7["Already present"].match(line_present)), detail=repr(line_present))
-    # CONTROL: prove the regexes actually REJECT a column-0 line, or the four checks above are
-    # satisfied by patterns that match anything.
-    _check("CONTROL: the regexes DO reject a column-0 line",
-           not PR7["Added"].match("Added 3 chunk(s)")
-           and not PR7["Already present"].match("Already present (0 new chunk(s))"),
-           detail="if this fails, the assertions above prove nothing")
+    # ⚠ THE INDENT CONSTRAINT WAS WITHDRAWN (city z2nuj; verified at #7 head 202753a: ^\s+ -> ^\s*),
+    # so a column-0 line is now ACCEPTED and the old "regexes reject column 0" control is obsolete.
+    # Asserting it would pin a constraint the other side deliberately dropped.
+    # THE PREFIX CONSTRAINT WAS NOT WITHDRAWN, and that is what the control now guards — because
+    # "format the output as you like" covered the whitespace ONLY, and reading a partial withdrawal
+    # as a full one would re-break the parser on the partial path.
+    _check("CONTROL: the ERROR pattern still REJECTS a line without the colon",
+           not PR7["ERROR"].match("  ERROR after 3 chunk(s) landed: boom"),
+           detail="if this passes, the ERROR assertion above proves nothing")
+    _check("CONTROL: the Added pattern still REJECTS a non-numeric count",
+           not PR7["Added"].match("  Added some chunk(s)"),
+           detail="if this passes, the Added assertion above proves nothing")
 
 
 def main():
