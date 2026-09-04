@@ -9,6 +9,7 @@ import { ensureDir, atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
 import { logEvent } from '../bus/event.js';
 import { WsUnixJsonRpcClient, type JsonRpcResponse } from '../utils/ws-unix-client.js';
+import { resolveOrchestratorAgent } from '../utils/orchestrator-env.js';
 
 interface IPty {
   pid: number;
@@ -1098,6 +1099,15 @@ export class CodexAppServerPTY {
     if (this._config.timezone) {
       env['CTX_TIMEZONE'] = this._config.timezone;
       env['TZ'] = this._config.timezone;
+    }
+    // CTX_ORCHESTRATOR_AGENT: same variable AgentPTY injects. This adapter is
+    // the only one that builds its env from scratch, which is exactly how the
+    // variable came to exist on one side and not the other — a Codex seat had
+    // no orchestrator to route to. Resolution is shared (utils/orchestrator-env.ts);
+    // the assignment stays here so the CTX_ parity test can see both sides.
+    const orchestratorAgent = resolveOrchestratorAgent(this._env.projectRoot, this._env.org);
+    if (orchestratorAgent) {
+      env['CTX_ORCHESTRATOR_AGENT'] = orchestratorAgent;
     }
 
     return env;
