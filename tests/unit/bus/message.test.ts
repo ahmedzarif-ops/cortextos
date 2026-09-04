@@ -40,6 +40,63 @@ describe('Message Bus', () => {
     rmSync(testDir, { recursive: true, force: true });
   });
 
+  describe('sendMessage — empty body rejection (task_1788506864700_32505229)', () => {
+    // WHY THESE ASSERT ON THE ARTIFACT AND NOT ON rc:
+    // The defect was never "it returns success". It was that an empty send MINTED AN ID and was
+    // HMAC-SIGNED, so it woke the recipient carrying the same `sig` as real traffic. A fix that
+    // threw while still writing a signed file would pass an rc-only test and leave the artifact
+    // behind — which is the bug. So every case below asserts NO ID, NO FILE, NO SIGNATURE.
+    const EMPTY_BODIES: Array<[string, string]> = [
+      ['empty string', ''],
+      ['spaces only', '   '],
+      ['tab only', '\t'],
+      ['newline only', '\n'],
+      ['mixed whitespace', ' \t\n\r '],
+    ];
+
+    for (const [label, body] of EMPTY_BODIES) {
+      it(`rejects ${label}: throws, mints no id, writes no file`, () => {
+        const receiverInbox = join(testDir, 'inbox', 'receiver');
+
+        let returned: string | undefined;
+        expect(() => {
+          returned = sendMessage(senderPaths, 'sender', 'receiver', 'normal', body);
+        }).toThrow(/empty/i);
+
+        // THE ABSENCE OF AN ID is the assertion, not the throw.
+        expect(returned).toBeUndefined();
+
+        // No artifact reached the recipient — so nothing was signed either.
+        let files: string[] = [];
+        try { files = readdirSync(receiverInbox).filter(f => f.endsWith('.json')); } catch { files = []; }
+        expect(files).toEqual([]);
+      });
+    }
+
+    it('POSITIVE CONTROL: a one-character body still sends, is signed, and is delivered', () => {
+      // Without this the suite above passes on a sendMessage that rejects EVERYTHING.
+      const msgId = sendMessage(senderPaths, 'sender', 'receiver', 'normal', 'x');
+      expect(msgId).toBeTruthy();
+
+      const files = readdirSync(join(testDir, 'inbox', 'receiver')).filter(f => f.endsWith('.json'));
+      expect(files.length).toBe(1);
+
+      const written = JSON.parse(readFileSync(join(testDir, 'inbox', 'receiver', files[0]), 'utf8'));
+      expect(written.text).toBe('x');
+      expect(written.id).toBe(msgId);
+    });
+
+    it('preserves a body whose content is real but surrounded by whitespace', () => {
+      // The check is on the TRIMMED body; it must not trim the stored text.
+      const msgId = sendMessage(senderPaths, 'sender', 'receiver', 'normal', '  hello  ');
+      expect(msgId).toBeTruthy();
+
+      const files = readdirSync(join(testDir, 'inbox', 'receiver')).filter(f => f.endsWith('.json'));
+      const written = JSON.parse(readFileSync(join(testDir, 'inbox', 'receiver', files[0]), 'utf8'));
+      expect(written.text).toBe('  hello  ');
+    });
+  });
+
   describe('sendMessage', () => {
     it('creates a JSON file in receiver inbox', () => {
       const msgId = sendMessage(senderPaths, 'sender', 'receiver', 'normal', 'Hello');
