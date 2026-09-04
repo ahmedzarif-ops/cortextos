@@ -19,7 +19,7 @@ import { describe, expect, it } from 'vitest';
  * orgs/<org>/context.json, and a deployment with no such file is unaffected.
  */
 
-const TEMPLATES = resolve(__dirname, '../../templates');
+const TEMPLATES = resolve(__dirname, '../templates');
 
 function templateDirs(): string[] {
   return readdirSync(TEMPLATES, { withFileTypes: true })

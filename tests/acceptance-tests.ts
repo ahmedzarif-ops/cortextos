@@ -21,6 +21,19 @@
  * asks (the base arm is the positive control and the flip is the evidence);
  * committing that base arm under the default glob is what makes it everyone's
  * failing suite. The instrument is correct; its LOCATION was the defect.
+ *
+ * ⛔ MEMBERSHIP IS A LOCATION, NOT A LIST — SO PUTTING A TEST IN THIS DIRECTORY
+ * GATES IT, AND THAT GATE IS NOT FREE.
+ * `templates-one-voice-guard.test.ts` lived here and needed NOTHING from outside
+ * this repo: it reads `templates/` in-tree and imports only node builtins. But
+ * `require-env.ts` is a `globalSetup` — it runs ONCE FOR THE WHOLE LANE, BEFORE
+ * COLLECTION, and throws if either CAPACITY_* var is unset. So the one test whose
+ * subject is the ONE VOICE countermand ran for one person on one machine and for
+ * nobody in CI, while every signal stayed green. It now lives in `tests/` and is
+ * back in `npm test`.
+ * ⇒ BEFORE ADDING A FILE HERE, ASK WHAT IT READS. If the answer is "only this
+ * repo", it belongs in the fast lane; the directory is the opt-in, and a test
+ * placed here inherits a requirement it may not have.
  */
 export const ACCEPTANCE_TESTS = ['tests/acceptance/**/*.test.ts'];
 
