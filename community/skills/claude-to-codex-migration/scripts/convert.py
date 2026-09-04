@@ -341,7 +341,7 @@ def transform_config(src_dir, target_dir, target_agent, manifest, apply, actions
     # codex-mandatory edits
     tgt_cfg["agent_name"] = target_agent
     tgt_cfg["runtime"] = "codex-app-server"
-    tgt_cfg["model"] = tgt_cfg.get("model") or "gpt-5-codex"
+    tgt_cfg["model"] = tgt_cfg.get("model") or "gpt-5.6-sol"
     tgt_cfg.pop("dangerously_skip_permissions", None)
     tgt_cfg.pop("ecosystem", None)
     tgt_cfg.setdefault("codex_context_cap", 256000)
