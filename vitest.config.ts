@@ -1,4 +1,5 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
+import { SLOW_TESTS } from './tests/slow-tests.js';
 import path from 'path';
 
 export default defineConfig({
@@ -20,5 +21,10 @@ export default defineConfig({
       'tests/**/*.test.ts',
       'dashboard/src/**/__tests__/**/*.test.ts',
     ],
+    // The slow lane runs the SAME tests under `npm run test:slow`. Nothing is
+    // deleted and no assertion is weakened — they are excluded HERE only, and
+    // the single source of truth for membership is tests/slow-tests.ts so the
+    // two lanes cannot drift into a file belonging to neither.
+    exclude: [...configDefaults.exclude, ...SLOW_TESTS],
   },
 });

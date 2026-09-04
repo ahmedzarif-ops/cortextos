@@ -4,8 +4,12 @@
 # Run once after cloning:
 #   bash scripts/setup-hooks.sh
 #
-# Installs a pre-push hook that runs npm run build && npm test before any push.
-# If either fails, the push is aborted and you fix it locally rather than on CI.
+# Installs a pre-push hook that runs npm run build && npm test — the FAST lane — before any
+# push. If either fails, the push is aborted and you fix it locally rather than on CI.
+# (The "FAST lane" wording comes from PR #3, which moved the timing simulations to a slow lane;
+# the rest of this header comes from PR #2. Merged by hand 2026-09-04: the ONLY conflict between
+# them was this comment block — zero non-comment lines — and both statements are true, so the
+# substantive core.hooksPath explanation is kept whole and #3's qualifier folded into line 1.)
 #
 # WHY THIS SETS core.hooksPath INSTEAD OF COPYING (changed 2026-09-04, guard F1)
 #
