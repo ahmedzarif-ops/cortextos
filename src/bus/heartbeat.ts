@@ -167,11 +167,17 @@ export function detectDayNightMode(
   // day_mode_start: "24:00" produced startMin = 1440 and the wrap branch
   // `nowMin >= 1440 || nowMin < endMin` — PERMANENT NIGHT, the exact louder-wrong-answer this
   // function's degenerate-window comment reasons against, reached by a different door.
-  // ⚠ THE OBVIOUS FIX (tighten parseClock to h > 23) IS WRONG FOR THIS REPO AND I CHECKED BEFORE
-  // APPLYING IT: this org declares its day window as 08:00-00:00, so day_mode_end: "24:00" is a
-  // LIVE config shape. Rejecting it would send endMin through the `?? DEFAULT_DAY_END` fallback and
-  // silently shorten the configured day — breaking the very case this PR exists to fix, while every
-  // test stayed green.
+  // ⚠ THE OBVIOUS FIX (tighten parseClock to h > 23) IS STILL WRONG, BUT NOT FOR THE REASON I FIRST
+  // WROTE HERE. ⛔ CORRECTED 2026-09-04 (guard yvng0, measured exhaustively; re-verified here):
+  // I claimed day_mode_end: "24:00" was "a LIVE config shape" for this org. IT IS NOT. All 17
+  // day_mode_end values in the fleet are "00:00"; there are ZERO "24:00" values in any config.
+  // I had inferred it from the org declaring an 08:00-00:00 window and never measured it — a
+  // CORRECT CHANGE SHIPPED WITH A FALSE JUSTIFICATION, which is the harder half to catch because
+  // the code is right and only the sentence beside it is wrong.
+  // THE ACTUAL REASON, which is weaker and sufficient: "24:00" is a plausible HAND-WRITTEN
+  // midnight-as-closing value, and h > 23 would send it through the `?? DEFAULT_DAY_END` fallback
+  // and SILENTLY SHORTEN the configured day rather than reject it loudly. A parser that turns a
+  // legible intent into a quieter wrong answer is worse than one that refuses it.
   // ⇒ NORMALISE PER ROLE INSTEAD, which is what the two values actually mean:
   //     START 24:00 -> 0     midnight as the OPENING of a day
   //     END   24:00 -> 1440  midnight as the CLOSING of a day (kept; already correct)
