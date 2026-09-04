@@ -254,6 +254,33 @@ export interface IngestResult {
   errors: number | null;
   reason?: 'not-configured' | 'missing-path' | 'tool-failed' | 'ingested-nothing' | 'unverifiable';
   detail?: string;
+  /**
+   * Per-source outcome: WHICH sources landed and which failed, by name.
+   *
+   * SCOPE, stated so this is not over-read. The per-file CHUNK COUNTS are not
+   * independent corroboration of the total — mmrag computes `count` once per
+   * file and does `total += count`, printing that same variable, so a per-file
+   * count is the total with more decimal places and inherits any error in it.
+   *
+   * What IS independent is the NAME and the STATUS: "MEMORY.md failed,
+   * 2026-09-04.md landed" is information the global count cannot express at
+   * all, and it is what lets a retry target the file that failed instead of
+   * redoing the whole run.
+   *
+   * KNOWN GAP this does NOT fix (mmrag-side, scoped separately): `count`
+   * increments immediately after `collection.upsert`, so it is genuinely on the
+   * write path — but when embedding raises mid-file the exception unwinds
+   * `ingest_text_file` and the partially-accumulated count is DISCARDED. Chunks
+   * already written are then reported as 0. So a `failed` status here can still
+   * mean "some chunks landed", and only retrieval can tell you which.
+   */
+  files?: IngestFileOutcome[];
+}
+
+export interface IngestFileOutcome {
+  name: string;
+  status: 'added' | 'failed' | 'missing';
+  chunks: number | null;
 }
 
 export function ingestKnowledgeBase(
@@ -419,7 +446,42 @@ export function parseIngestSummary(output: string): {
   ingested: number | null;
   skipped: number;
   errors: number | null;
+  files: IngestFileOutcome[];
 } {
+  // Per-source outcome, recovered from lines the tool already prints:
+  //   Ingesting: <name>      then  "  Added N chunk(s)"  or  "  ERROR: ..."
+  //   Ingesting directory: X then  "  Processing: <rel>" then indented Added/ERROR
+  //   NOT FOUND: <path>
+  // The information was always there; only the totals were being read.
+  const files: IngestFileOutcome[] = [];
+  let pending: string | null = null;
+  for (const raw of output.split('\n')) {
+    const notFound = raw.match(/^NOT FOUND:\s*(.+?)\s*$/);
+    if (notFound) {
+      files.push({ name: notFound[1], status: 'missing', chunks: null });
+      pending = null;
+      continue;
+    }
+    const start = raw.match(/^(?:Ingesting|\s+Processing):\s*(.+?)\s*$/);
+    if (start && !/^Ingesting directory:/.test(raw)) {
+      if (pending !== null) files.push({ name: pending, status: 'failed', chunks: null });
+      pending = start[1];
+      continue;
+    }
+    const added = raw.match(/^\s+Added\s+(\d+)\s+chunk/);
+    if (added && pending !== null) {
+      files.push({ name: pending, status: 'added', chunks: Number(added[1]) });
+      pending = null;
+      continue;
+    }
+    if (/^\s+ERROR:/.test(raw) && pending !== null) {
+      files.push({ name: pending, status: 'failed', chunks: null });
+      pending = null;
+    }
+  }
+  // A source announced but never resolved is a failure, not a silent success.
+  if (pending !== null) files.push({ name: pending, status: 'failed', chunks: null });
+
   const ingestedMatch = output.match(/Done!\s+Ingested\s+(\d+)\s+new chunk/);
   const skippedMatch = output.match(/^\s*Skipped:\s*(\d+)/m);
   const errorsMatch = output.match(/^\s*Errors:\s*(\d+)/m);
@@ -432,6 +494,7 @@ export function parseIngestSummary(output: string): {
     ingested: ingestedMatch ? Number(ingestedMatch[1]) : null,
     skipped: skippedMatch ? Number(skippedMatch[1]) : 0,
     errors: ingestedMatch ? errorsFromLines : null,
+    files,
   };
 }
 
