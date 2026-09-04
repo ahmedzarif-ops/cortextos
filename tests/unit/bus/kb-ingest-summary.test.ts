@@ -136,4 +136,68 @@ describe('parseIngestSummary reads the tool instead of trusting it', () => {
     const parsed = parseIngestSummary('ERROR: Config not found. Run setup first:');
     expect(parsed.files).toEqual([]);
   });
+
+  // EVERY ERROR SHAPE mmrag ACTUALLY PRINTS. Enumerated from the source, not assumed:
+  //   "  ERROR: {e}"                     ingest loop, file branch      (mmrag.py:1123)
+  //   "    ERROR: {e}"                   ingest loop, directory branch (mmrag.py:1110)
+  //   "  ERROR extracting {name}: {e}"   extraction                    (mmrag.py:960)
+  // The third has NO colon after ERROR, so an `ERROR:` anchor never matched it and a failed
+  // PDF extraction lost its per-file attribution entirely.
+  for (const [label, line] of [
+    ['file branch', '  ERROR: 429 RESOURCE_EXHAUSTED'],
+    ['directory branch', '    ERROR: boom'],
+    ['extraction (no colon after ERROR)', '  ERROR extracting report.pdf: bad xref'],
+  ] as const) {
+    it(`attributes an ERROR to its file — ${label}`, () => {
+      // The trailing "0 new chunk(s)" is REQUIRED for this assertion to discriminate, and
+      // leaving it out was a real mistake caught by the mutant run. Without it, an ERROR
+      // line the regex FAILS to match falls through to "announced but never resolved",
+      // which also yields status 'failed' — so the test passed under a broken regex, for
+      // the wrong reason. With the neutral line present, a missed ERROR is claimed as
+      // 'already-present' instead, and the mutant can actually be detected.
+      const parsed = parseIngestSummary(
+        ['Ingesting: report.pdf', line, '  0 new chunk(s)', "Done! Ingested 0 new chunk(s) into 'c'"].join('\n'),
+      );
+      expect(parsed.files).toHaveLength(1);
+      expect(parsed.files[0].status).toBe('failed');
+      expect(parsed.files[0].name).toBe('report.pdf');
+    });
+  }
+
+  // THE MISLABEL THIS FOUND, which is worse than the missed attribution.
+  //
+  // ingest_file RETURNS 0 for a caught extraction error rather than raising, so the ingest
+  // loop's else-branch ran and used to print "Already present" over a FAILED pdf — a failure
+  // reported as a correct no-op. FIRST MARKER WINS, so the ERROR line must claim the file
+  // before the neutral "0 new chunk(s)" line can.
+  it('a failed extraction is failed, NOT already-present, even though 0 chunks follow', () => {
+    const parsed = parseIngestSummary(
+      [
+        'Ingesting: report.pdf',
+        '  ERROR extracting report.pdf: bad xref',
+        '  0 new chunk(s)',
+        "Done! Ingested 0 new chunk(s) into 'c'",
+      ].join('\n'),
+    );
+    expect(parsed.files).toHaveLength(1);
+    expect(parsed.files[0].status).toBe('failed');
+  });
+
+  // SKIP is neither an error nor an ingest; it must not be laundered as already-present.
+  for (const line of ['  SKIP (unsupported office format): a.xyz', '  SKIP (empty document): b.md']) {
+    it(`records a SKIP as skipped: ${line.trim().slice(0, 28)}`, () => {
+      const parsed = parseIngestSummary(
+        ['Ingesting: a.md', line, "Done! Ingested 0 new chunk(s) into 'c'"].join('\n'),
+      );
+      expect(parsed.files[0].status).toBe('skipped');
+    });
+  }
+
+  // A genuine no-op still reads as already-present, via the neutral line.
+  it('a genuine no-op with no error or skip is already-present', () => {
+    const parsed = parseIngestSummary(
+      ['Ingesting: old.md', '  0 new chunk(s)', "Done! Ingested 0 new chunk(s) into 'c'"].join('\n'),
+    );
+    expect(parsed.files[0].status).toBe('already-present');
+  });
 });

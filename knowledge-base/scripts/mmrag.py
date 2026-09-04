@@ -1118,7 +1118,13 @@ def cmd_ingest(args):
                     if count > 0:
                         print(f"  Added {count} chunk(s)")
                     else:
-                        print("  Already present (0 new chunk(s))")
+                        # Deliberately states the FACT, not a cause. ingest_file returns 0
+                        # for four different reasons — chunks already present, unsupported
+                        # format, empty document, and a caught extraction error — and this
+                        # branch cannot tell them apart. It previously said "Already present",
+                        # which reported a FAILED pdf extraction as a correct no-op. The
+                        # specific reason is printed by the code that knows it, above.
+                        print("  0 new chunk(s)")
                 except Exception as e:
                     print(f"  ERROR: {e}")
                     errors += 1

@@ -279,7 +279,7 @@ export interface IngestResult {
 
 export interface IngestFileOutcome {
   name: string;
-  status: 'added' | 'already-present' | 'failed' | 'missing';
+  status: 'added' | 'already-present' | 'skipped' | 'failed' | 'missing';
   chunks: number | null;
 }
 
@@ -500,12 +500,28 @@ export function parseIngestSummary(output: string): {
     // failure. Without this it fell through to "announced but never resolved" below and
     // was reported as failed — which would have called every already-complete source in
     // a fleet re-ingest broken.
-    if (/^\s*Already present/.test(raw) && pending !== null) {
+    // "0 new chunk(s)" is the neutral line: no chunks added and no reason claimed. It is
+    // only reached when nothing above it claimed the file, because the ERROR and SKIP
+    // markers below/above resolve `pending` first — FIRST MARKER WINS. The older
+    // "Already present" wording is still accepted so a mixed-version binary parses.
+    if (/^\s*(?:0 new chunk\(s\)|Already present)/.test(raw) && pending !== null) {
       files.push({ name: pending, status: 'already-present', chunks: 0 });
       pending = null;
       continue;
     }
-    if (/^\s*ERROR:/.test(raw) && pending !== null) {
+    // SKIP is not an error and not an ingest: unsupported format, or an empty document.
+    if (/^\s*SKIP\b/.test(raw) && pending !== null) {
+      files.push({ name: pending, status: 'skipped', chunks: 0 });
+      pending = null;
+      continue;
+    }
+    // `ERROR\b`, NOT `ERROR:`. mmrag prints TWO shapes and only one has the colon:
+    //   "  ERROR: {e}"                      (the ingest loop, both branches)
+    //   "  ERROR extracting {name}: {e}"    (extraction, mmrag.py:960)
+    // The second was invisible to an `ERROR:` anchor, so a failed PDF extraction never
+    // resolved `pending` and fell through to the neutral line — reporting a FAILURE as a
+    // correct no-op. Anchoring on the word covers both and any future shape.
+    if (/^\s*ERROR\b/.test(raw) && pending !== null) {
       files.push({ name: pending, status: 'failed', chunks: null });
       pending = null;
     }
