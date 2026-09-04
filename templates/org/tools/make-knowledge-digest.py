@@ -29,7 +29,16 @@ TITLE_MAX = 96
 
 SECTION = re.compile(r"^## (.+)$")
 RULE = re.compile(r"^### (#\d+)\s*[—-]\s*(.+)$")
-INLINE = re.compile(r"^- \*\*#(\d+) \(([^)]*)\)\*\*\s*[—-]?\s*(.*)$")
+# kbC lines close their ** after the TITLE, not after the paren group. The original
+# pattern required `)**` and therefore matched ZERO of 74 real entries while --check
+# reported OK — staleness and coverage are different questions (see CANDIDATE below).
+INLINE = re.compile(r"^- \*\*#(\d+[a-z]?) \(([^)]*)\)\s*(.*?)\*\*\s*[—:-]?\s*(.*)$")
+# Two kbC entries (#173a/#173b) carry no (date, seat) parenthetical at all.
+INLINE_NOPAREN = re.compile(r"^- \*\*#(\d+[a-z]?)\s*[—-]\s*(.*)$")
+# INDEPENDENT instrument, deliberately dumber than the parsers above: it answers
+# "how many kbC lines EXIST", which is the question a generated-vs-file diff cannot
+# ask. rows == enumerated says nothing about enumerated == exists.
+CANDIDATE = re.compile(r"^- \*\*#\d")
 
 
 def clip(s: str) -> str:
@@ -48,11 +57,26 @@ def build() -> str:
             continue
         m = INLINE.match(raw)
         if m:
-            entries.append((i, "kbC", "#" + m.group(1), clip(m.group(3) or m.group(2))))
+            entries.append((i, "kbC", "#" + m.group(1), clip(m.group(3) or m.group(4) or m.group(2))))
+            continue
+        m = INLINE_NOPAREN.match(raw)
+        if m:
+            entries.append((i, "kbC", "#" + m.group(1), clip(m.group(2))))
             continue
         m = SECTION.match(raw)
         if m:
             entries.append((i, "sec", "", clip(m.group(1))))
+
+    # COVERAGE ASSERTION — hard fail, not a warning. Counted from the raw source with
+    # CANDIDATE, so a parser that silently stops matching cannot hide behind a digest
+    # that still regenerates byte-identically.
+    existing = sum(1 for raw in lines if CANDIDATE.match(raw))
+    indexed = sum(1 for e in entries if e[1] == "kbC")
+    if indexed != existing:
+        raise SystemExit(
+            f"COVERAGE FAIL: {existing} kbC candidate lines in {SRC.name}, "
+            f"{indexed} indexed. The kbC parser does not cover the source."
+        )
 
     # End line of each entry = start of the next one minus 1; last runs to EOF.
     # An address without an END is an invitation to read to the bottom of a 551 KB
