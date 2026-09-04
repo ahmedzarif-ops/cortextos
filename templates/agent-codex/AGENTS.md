@@ -61,9 +61,36 @@ Complete the following in order. Do not skip steps.
    ```bash
    cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID 'Booting up... one moment'
    ```
-2. Read all bootstrap files: IDENTITY.md, SOUL.md, GUARDRAILS.md, GOALS.md, HEARTBEAT.md, MEMORY.md, USER.md, TOOLS.md, SYSTEM.md
+2. **⛔ CODEX CONTEXT BUDGET — READ THIS BEFORE STEP 2, IT CHANGES HOW STEPS 2, 3 AND 8 ARE RUN.**
+   Your window is **258,400 tokens**. The bootstrap set on a mature seat is **0.9–1.2 MB on disk**, and
+   reading it whole spends most of the window before you have done anything. Measured 2026-09-04: a seat
+   that read the files whole reached **59% after bootstrap alone**; the same seats using the protocol
+   below booted at **15.5% and 25.8%**.
+   **This is a READING protocol, not a permission to skip.** Nothing here is optional to *know* — the
+   change is that you load an INDEX and then read only what the work needs, by address.
+
+   **Read whole (small, and every line is load-bearing):** `IDENTITY.md`, `SOUL.md`, `GOALS.md`,
+   `USER.md`, `SYSTEM.md`, `TOOLS.md`, `HEARTBEAT.md`.
+
+   **Read HEADINGS FIRST, bodies by address:** `GUARDRAILS.md`, `MEMORY.md` — these are the two that
+   grow without bound (one seat's `GUARDRAILS.md` is 169 KB).
+   ```bash
+   grep -n '^#' GUARDRAILS.md; grep -n '^#' MEMORY.md    # the map
+   sed -n 'START,ENDp' GUARDRAILS.md                      # one section, when you need it
+   ```
+   ⚠ **A pinned or "read even if truncated" block is NOT optional** — read those bodies at boot.
    - TOOLS.md is a compact command index — load the relevant skill (e.g. `plugins/cortextos-agent-skills/skills/tasks/SKILL.md`, `plugins/cortextos-agent-skills/skills/comms/SKILL.md`) when you need full docs for a workflow
-3. Read org knowledge base: `../../knowledge.md` (shared facts all agents need)
+3. Org knowledge base — **READ THE DIGEST, NOT THE FILE**: `../../knowledge-digest.md` (~15 KB index)
+   instead of `../../knowledge.md` (~550 KB). Every digest entry carries the line range holding its body:
+   ```bash
+   sed -n 'START,ENDp' ../../knowledge.md      # read ONE entry
+   grep -n '<term>' ../../knowledge.md          # find entries the digest title did not surface
+   ```
+   ⛔ **A DIGEST IS AN INDEX, NOT THE KNOWLEDGE — and its titles are lossy by construction.** When a
+   decision turns on what a rule actually says, **open the body at its address**; never act on a title.
+   If the digest is missing or stale (`python3 ../../tools/make-knowledge-digest.py --check` → exit 3),
+   say so and grep `knowledge.md` directly. **A missing index is an instrument condition, not a licence
+   to proceed uninformed.**
 4. Discover available skills: `cortextos bus list-skills --format text`
 5. Discover active agents: `cortextos bus list-agents` (live roster from enabled-agents.json)
 6. **Crons are daemon-managed.** External crons auto-load from `${CTX_ROOT}/.cortextOS/state/agents/${CTX_AGENT_NAME}/crons.json` on daemon start; you do not need to restore them. Use `cortextos bus list-crons $CTX_AGENT_NAME` to see what's scheduled. To add or change a cron at runtime, read `plugins/cortextos-agent-skills/skills/cron-management/SKILL.md` and use `cortextos bus add-cron`.
@@ -72,7 +99,13 @@ Complete the following in order. Do not skip steps.
    cortextos bus recall-facts --days 3
    ```
    Read these before the daily memory file — they capture granular decisions and outcomes from previous sessions that did not make it into MEMORY.md.
-8. Check today's memory file (`memory/$(date -u +%Y-%m-%d).md`) for any in-progress work
+8. Check today's memory file for in-progress work — **TAIL IT, DO NOT READ IT WHOLE.** A working day's
+   file reaches 150–340 KB and the part that tells you what is in flight is the END:
+   ```bash
+   tail -150 "memory/$(date -u +%Y-%m-%d).md"
+   ```
+   Read further back only when the tail references something you cannot resolve, and then by address
+   (`grep -n`, then `sed -n 'START,ENDp'`) rather than by loading the file.
 9. If resuming a task, query the knowledge base: `cortextos bus kb-query "<task topic>" --org $CTX_ORG`
 10. Check inbox: `cortextos bus check-inbox`
 11. Update heartbeat: `cortextos bus update-heartbeat "online"`
