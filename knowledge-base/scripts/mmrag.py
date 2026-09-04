@@ -1174,13 +1174,32 @@ def cmd_ingest(args):
         if count > 0:
             print(f"{indent}Added {count} chunk(s)")
         else:
-            # ⚠ BYTE-STABLE COUPLING WITH cortextos #7 (city u6mtz, 891cafb). The kb-ingest wrapper
-            # parses "Already present" and "Added N chunk(s)" LITERALLY to derive per-file status.
-            # Do not reword either string without telling city — a parser keyed on prose is only as
-            # stable as the prose, and this is the seam between two PRs that touch one function.
-            # The file branch used to print the filename and then go SILENT on a no-op, so a
-            # fully-present file was indistinguishable from one that produced no output at all.
-            print(f"{indent}Already present (0 new chunk(s))")
+            # ⛔ THIS LINE CLAIMS NOTHING, ON PURPOSE — AND IT USED TO CLAIM "Already present"
+            # (city 2y5dc, 2026-09-04, and city is right; I verified it against this file rather
+            # than accepting the relay).
+            #
+            # `ingest_file` returns a bare 0 for AT LEAST FOUR DIFFERENT REASONS:
+            #   · every chunk already indexed        (a correct no-op)
+            #   · unsupported format                 (prints its own SKIP line)
+            #   · empty document                     (prints its own SKIP line)
+            #   · a CAUGHT EXTRACTION ERROR          (mmrag.py:961 — `except: print("  ERROR
+            #     extracting …"); return 0`, verified, it does NOT re-raise)
+            #
+            # So "Already present" asserted ONE of four causes, and one of the four is a FAILURE.
+            # A failed PDF read printed "ERROR extracting …" and was then followed by this line
+            # announcing the file was already present — the benign cause stated for a broken one,
+            # which is this seat's entire thesis pointed at its own output.
+            #
+            # THE CALLER STRUCTURALLY CANNOT TELL: the return type is an int with no reason
+            # attached. So the honest line is the one that claims nothing and lets the SKIP/ERROR
+            # markers above it speak for themselves (#7 resolves per-file status on the FIRST
+            # marker). ⇒ FOLLOW-UP, not done here: give ingest_file a reason alongside the count,
+            # so the caller can distinguish rather than being careful about wording.
+            #
+            # #7 at c3f5e6f accepts BOTH wordings — /^\s*(?:0 new chunk\(s\)|Already present)/ —
+            # deliberately, for the mixed-version window while `dist` is rebuilt. So this was
+            # decided on CONTENT, not on compatibility.
+            print(f"{indent}0 new chunk(s)")
             # SKIPPED IS COUNTED ON BOTH BRANCHES NOW. It used to be incremented only in the
             # DIRECTORY branch, so re-ingesting a single already-present file gave
             # total=0, skipped=0 — which any caller gating on "did it do anything" reads as

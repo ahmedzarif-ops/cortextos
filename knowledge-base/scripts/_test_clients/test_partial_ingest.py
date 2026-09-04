@@ -253,8 +253,8 @@ def test_skipped_counted_for_a_single_file():
                "Skipped: 1" in out2, detail=out2[-300:])
         # BYTE-STABLE COUPLING WITH #7: city's wrapper parses these two strings literally.
         # Asserted here so a reword breaks a test rather than breaking city's parser silently.
-        _check("prints the literal 'Already present (0 new chunk(s))' that #7's parser reads",
-               "Already present (0 new chunk(s))" in out2, detail=out2[-300:])
+        _check("prints the NEUTRAL '0 new chunk(s)' line, claiming no cause",
+               "0 new chunk(s)" in out2, detail=out2[-300:])
         _check("a no-op re-ingest is not an error", "Errors:" not in out2, detail=out2[-200:])
 
 
@@ -331,10 +331,15 @@ def test_output_satisfies_pr7_parser_regexes():
     # against #7's ACTUAL patterns — copied from src/bus/knowledge-base.ts:481/491/496 — so a
     # reword breaks a test HERE instead of breaking a parser THERE.
     import re, io, contextlib
+    # Copied VERBATIM from #7 at head c3f5e6f (src/bus/knowledge-base.ts:493/507/524), read from the
+    # branch, not from a relay. Three things moved since the first version of this test:
+    #   ^\s+ -> ^\s*   the indent constraint was withdrawn (city z2nuj)
+    #   ERROR: -> ERROR\b  anchored on the WORD, so "ERROR extracting …" also resolves a file
+    #   the neutral line accepts BOTH wordings during the mixed-version window
     PR7 = {
-        "Added":          re.compile(r"^\s+Added\s+(\d+)\s+chunk"),
-        "Already present": re.compile(r"^\s+Already present"),
-        "ERROR":          re.compile(r"^\s+ERROR:"),
+        "Added":   re.compile(r"^\s*Added\s+(\d+)\s+chunk"),
+        "neutral": re.compile(r"^\s*(?:0 new chunk\(s\)|Already present)"),
+        "ERROR":   re.compile(r"^\s*ERROR\b"),
     }
 
     with tempfile.TemporaryDirectory() as d:
@@ -363,29 +368,34 @@ def test_output_satisfies_pr7_parser_regexes():
     def matches(pattern, text):
         return any(pattern.match(l) for l in text.splitlines())
 
-    _check("the Added line satisfies #7's /^\\s+Added\\s+(\\d+)\\s+chunk/",
+    _check(f"the Added line satisfies #7's {PR7['Added'].pattern}",
            matches(PR7["Added"], added_out), detail=repr(added_out[-160:]))
-    _check("the Already-present line satisfies #7's /^\\s+Already present/",
-           matches(PR7["Already present"], present_out), detail=repr(present_out[-160:]))
-    _check("the ERROR line satisfies #7's /^\\s+ERROR:/",
+    _check(f"the neutral line satisfies #7's {PR7['neutral'].pattern}",
+           matches(PR7["neutral"], present_out), detail=repr(present_out[-160:]))
+    _check(f"the ERROR line satisfies #7's {PR7['ERROR'].pattern}",
            matches(PR7["ERROR"], error_out), detail=repr(error_out[-160:]))
 
     # THE CASE THAT WAS UNDEFENDED: a caller passing an empty indent. Before `indent = indent or "  "`
     # these lines started at column 0 and every regex above stopped matching.
     line_added = f"{'' or '  '}Added 3 chunk(s)"
-    line_present = f"{'' or '  '}Already present (0 new chunk(s))"
+    line_present = f"{'' or '  '}0 new chunk(s)"
     _check("an EMPTY indent still yields leading whitespace (Added)",
            bool(PR7["Added"].match(line_added)), detail=repr(line_added))
-    _check("an EMPTY indent still yields leading whitespace (Already present)",
-           bool(PR7["Already present"].match(line_present)), detail=repr(line_present))
+    _check("an EMPTY indent still yields leading whitespace (neutral line)",
+           bool(PR7["neutral"].match(line_present)), detail=repr(line_present))
     # ⚠ THE INDENT CONSTRAINT WAS WITHDRAWN (city z2nuj; verified at #7 head 202753a: ^\s+ -> ^\s*),
     # so a column-0 line is now ACCEPTED and the old "regexes reject column 0" control is obsolete.
     # Asserting it would pin a constraint the other side deliberately dropped.
     # THE PREFIX CONSTRAINT WAS NOT WITHDRAWN, and that is what the control now guards — because
     # "format the output as you like" covered the whitespace ONLY, and reading a partial withdrawal
     # as a full one would re-break the parser on the partial path.
-    _check("CONTROL: the ERROR pattern still REJECTS a line without the colon",
-           not PR7["ERROR"].match("  ERROR after 3 chunk(s) landed: boom"),
+    # ⛔ THE OLD CONTROL HERE ASSERTED THE OPPOSITE OF THE CURRENT CONTRACT and is removed.
+    # It required /^\s*ERROR:/ to REJECT "ERROR after …". #7 now anchors on ERROR\b precisely so
+    # that shape DOES resolve a file — the colon requirement is gone. Keeping it would have pinned
+    # a constraint city deliberately widened, which is the same mistake in the other direction.
+    _check("CONTROL: the ERROR pattern rejects a line that does not start with the word",
+           not PR7["ERROR"].match("  Added 3 chunk(s)")
+           and not PR7["ERROR"].match("  ERRORS: 2"),
            detail="if this passes, the ERROR assertion above proves nothing")
     _check("CONTROL: the Added pattern still REJECTS a non-numeric count",
            not PR7["Added"].match("  Added some chunk(s)"),
