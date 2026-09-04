@@ -7,6 +7,7 @@ import { OutputBuffer } from './output-buffer.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { ensureDir, atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
+import { readLocalOverrides } from '../utils/local-overrides.js';
 import { logEvent } from '../bus/event.js';
 import { WsUnixJsonRpcClient, type JsonRpcResponse } from '../utils/ws-unix-client.js';
 import { resolveOrchestratorAgent } from '../utils/orchestrator-env.js';
@@ -86,6 +87,14 @@ const SOCKET_BASENAME = 'codex.sock';
 const SOCKET_PATH_WARN_BYTES = 100;
 const BOOTSTRAP_PATTERN = '[codex-app-server] ready';
 
+/**
+ * Boot-turn cap for local/ overrides. The Codex boot protocol refuses a single
+ * injected blob over 1 MiB of characters; this sits an order of magnitude below
+ * that so the overrides can never be the thing that trips it. Exceeding it drops
+ * the overrides LOUDLY (see composeBootPrompt) — it never truncates them.
+ */
+const MAX_LOCAL_OVERRIDE_BYTES = 128 * 1024;
+
 const SLASH_REWRITE_RE = /^\/([a-z][a-z0-9_-]*)(?:\s+([\s\S]*))?$/i;
 const LOCAL_SLASH_COMMANDS = new Set(['goal']);
 
@@ -158,8 +167,9 @@ export class CodexAppServerPTY {
       await this.initializeRpc();
       await this.startOrResumeThread(mode);
       this._outputBuffer.push(`${BOOTSTRAP_PATTERN} thread=${this._threadId}\n`);
-      if (prompt.trim()) {
-        this.queueTurn([{ type: 'text', text: prompt, text_elements: [] }]);
+      const bootPrompt = this.composeBootPrompt(prompt);
+      if (bootPrompt.trim()) {
+        this.queueTurn([{ type: 'text', text: bootPrompt, text_elements: [] }]);
       }
     } catch (err) {
       this._alive = false;
@@ -167,6 +177,83 @@ export class CodexAppServerPTY {
       this.kill();
       throw err;
     }
+  }
+
+  /**
+   * INTERIM (option a): deliver `{agentDir}/local/*.md` on the Codex runtime.
+   *
+   * AgentPTY passes the same content to claude-code as `--append-system-prompt`.
+   * codex-app-server has no equivalent flag, so the only delivery channel here is
+   * the boot TURN. The file-set rule is shared (utils/local-overrides.ts) so the
+   * two adapters cannot silently diverge on WHICH files are read.
+   *
+   * ⚠ THIS IS NOT PARITY, AND THE DIFFERENCE IS NOT COSMETIC — IT IS WHY THE
+   * DURABLE DESIGN (task 07263733) STAYS OPEN.
+   * `--append-system-prompt` is part of the SYSTEM prompt: it survives
+   * compaction, so a claude seat still has its overrides after hour six. Content
+   * delivered as a turn is CONVERSATION: it is eligible for compaction, so a
+   * codex seat can silently lose its overrides mid-session while every liveness
+   * signal stays green. A seat that has forgotten its instructions and a seat
+   * that never had them are indistinguishable from outside.
+   * Consequence to hold onto: presence at boot is NOT evidence of presence later.
+   * Verify at boot only, and re-verify after any compaction.
+   *
+   * SIZE: fail LOUD, never truncate. A silently shortened instruction set is the
+   * failure this whole change exists to remove, and half a rulebook is worse than
+   * none because it still reads like a rulebook.
+   */
+  private composeBootPrompt(prompt: string): string {
+    const overrides = readLocalOverrides(this._env.agentDir);
+
+    if (overrides.skipped.length > 0) {
+      this._outputBuffer.push(
+        `[codex-app-server] local/ overrides SKIPPED (unreadable or not a file): ${overrides.skipped.join(', ')}\n`,
+      );
+    }
+    if (!overrides.content) return prompt;
+
+    if (overrides.bytes > MAX_LOCAL_OVERRIDE_BYTES) {
+      // Dropped, not trimmed, and said out loud in both channels.
+      this._outputBuffer.push(
+        `[codex-app-server] local/ overrides DROPPED: ${overrides.bytes} bytes over the ` +
+          `${MAX_LOCAL_OVERRIDE_BYTES}-byte boot cap (${overrides.files.length} files: ${overrides.files.join(', ')}). ` +
+          `Booting WITHOUT them.\n`,
+      );
+      try {
+        const paths = resolvePaths(this._env.agentName, this._env.instanceId, this._env.org);
+        // Same reasoning as emitUnsupportedRequestEvent: no heartbeat refresh.
+        // Emitting an error does not prove the reasoning loop is alive.
+        logEvent(
+          paths,
+          this._env.agentName,
+          this._env.org,
+          'error',
+          'local_overrides_dropped',
+          'warning',
+          {
+            runtime: 'codex-app-server',
+            bytes: overrides.bytes,
+            cap: MAX_LOCAL_OVERRIDE_BYTES,
+            files: overrides.files,
+          },
+        );
+      } catch { /* logging must never block a boot */ }
+      return prompt;
+    }
+
+    this._outputBuffer.push(
+      `[codex-app-server] local/ overrides injected: ${overrides.files.length} files, ${overrides.bytes} bytes ` +
+        `(${overrides.files.join(', ')})\n`,
+    );
+
+    // Delimited so the content is attributable in the transcript rather than
+    // blending into the boot instructions.
+    const block =
+      `<local-overrides source="{agentDir}/local/*.md" files="${overrides.files.join(',')}" bytes="${overrides.bytes}">\n` +
+      `${overrides.content}\n` +
+      `</local-overrides>`;
+
+    return prompt.trim() ? `${block}\n\n${prompt}` : block;
   }
 
   write(data: string): void {

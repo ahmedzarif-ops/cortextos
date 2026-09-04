@@ -2,6 +2,7 @@ import { join } from 'path';
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { platform } from 'os';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
+import { readLocalOverrides } from '../utils/local-overrides.js';
 import { OutputBuffer } from './output-buffer.js';
 import { resolveOrchestratorAgent } from '../utils/orchestrator-env.js';
 import { injectMessage as injectMessageIntoPty } from './inject.js';
@@ -324,23 +325,13 @@ export class AgentPTY {
     // Local override pattern (feat #20): concatenate {agentDir}/local/*.md files
     // and append as system prompt. The local/ dir is gitignored so users can customize
     // agent behavior without merge conflicts on framework updates.
-    const agentDir = this.env.agentDir;
-    if (agentDir) {
-      const localDir = join(agentDir, 'local');
-      if (existsSync(localDir)) {
-        try {
-          const mdFiles = readdirSync(localDir)
-            .filter(f => f.endsWith('.md'))
-            .sort()
-            .map(f => join(localDir, f));
-          if (mdFiles.length > 0) {
-            const localContent = mdFiles
-              .map(f => readFileSync(f, 'utf-8'))
-              .join('\n\n');
-            args.push('--append-system-prompt', localContent);
-          }
-        } catch { /* ignore read errors */ }
-      }
+    //
+    // The FILE-SET RULE now lives in utils/local-overrides.ts so a second adapter
+    // can be measured against it. It was inline here, which is exactly why a Codex
+    // seat received none of it: there was nothing to compare against.
+    const localOverrides = readLocalOverrides(this.env.agentDir);
+    if (localOverrides.content) {
+      args.push('--append-system-prompt', localOverrides.content);
     }
 
     // Pass prompt as a plain string — no shell escaping needed when using node-pty directly
