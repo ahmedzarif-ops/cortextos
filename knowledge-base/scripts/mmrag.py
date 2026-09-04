@@ -487,11 +487,46 @@ def chunk_audio(audio_path, chunk_seconds=DEFAULT_AUDIO_CHUNK_SECONDS,
 # File ID helper
 # ---------------------------------------------------------------------------
 def file_id(path, chunk_idx=None):
-    """Generate a stable ID for a file or chunk."""
+    """Generate a stable ID for a file or a MEDIA chunk.
+
+    Text chunks do NOT use this any more — see text_chunk_id. Media (image,
+    video, audio, pdf) still keys on the path because rehashing those would
+    re-embed every asset on first run, spending exactly the request budget the
+    content-hashed text ids exist to reclaim, on ids that were never the problem.
+    """
     h = hashlib.md5(str(path).encode()).hexdigest()[:12]
     if chunk_idx is not None:
         return f"{h}_chunk{chunk_idx}"
     return h
+
+
+def text_chunk_id(path, content):
+    """Content-addressed id for one text chunk, scoped to its file.
+
+    The old scheme was md5(path)+"_chunk{i}": the id depended on the chunk's
+    POSITION, never on its text. An edit re-flows every following chunk across
+    the overlap, so chunk k's CONTENT changes while its id does not, and
+    already_exists() then reports the stale embedding as present. That failure
+    is silent, permanent without --force, and raised by a *successful* ingest.
+
+    The path is part of the hash on purpose, and this is the one deliberate
+    deviation from "hash the content". Hashing content alone would dedup
+    identical chunks ACROSS files into a single row, so metadata["source"] could
+    name only one of them and deleting one file would take the other's chunk
+    with it. Every cleanup path here selects on metadata["source"], so a shared
+    id makes per-path deletion unsound. The cost is one duplicate embedding for
+    genuinely identical text in two files; the gain is provenance and safe
+    deletion. Unchanged content under the same path still hashes the same, which
+    is the whole property the change is for.
+
+    NUL separates the two fields so that no path/content pair can be confused
+    with a different pair by concatenation.
+    """
+    h = hashlib.sha256()
+    h.update(str(path).encode("utf-8"))
+    h.update(b"\x00")
+    h.update(content.encode("utf-8"))
+    return f"txt_{h.hexdigest()[:32]}"
 
 # ---------------------------------------------------------------------------
 # Ingest logic
@@ -502,6 +537,45 @@ def already_exists(collection, doc_id):
         return False
     existing = collection.get(ids=[doc_id])
     return bool(existing and existing["ids"])
+
+
+def prune_orphaned_chunks(collection, source, current_ids):
+    """Delete rows for `source` whose ids are not in `current_ids`.
+
+    NOT optional, and not cleanup-for-tidiness. With position-keyed ids an edit
+    OVERWROTE chunk k in place, so a stale chunk was at worst wrong. With
+    content-keyed ids the edited chunk lands under a NEW id and the old row is
+    not overwritten — so without this sweep the store would hold BOTH the stale
+    text and the fresh text, and both would answer queries. Skipping it does not
+    leave the old behaviour in place; it is strictly worse than the old
+    behaviour.
+
+    Selection is by metadata["source"], never by id shape, which is what makes
+    this migrate the old md5(path)+"_chunk{i}" rows for free: on the first
+    re-ingest of any file, its old-scheme rows are simply ids that are no longer
+    current, and they go the same way as any other orphan. No migration script.
+
+    Returns the number of rows deleted.
+    """
+    keep = set(current_ids)
+    try:
+        existing = collection.get(where={"source": source}, include=["metadatas"])
+    except Exception:
+        # Older Chroma builds reject `where` on get(); fall back to a full scan
+        # and filter here. Correctness is identical, only the cost differs.
+        everything = collection.get(include=["metadatas"])
+        existing = {
+            "ids": [
+                doc_id
+                for doc_id, meta in zip(everything["ids"], everything["metadatas"])
+                if (meta or {}).get("source") == source
+            ]
+        }
+
+    stale = [doc_id for doc_id in (existing.get("ids") or []) if doc_id not in keep]
+    if stale:
+        collection.delete(ids=stale)
+    return len(stale)
 
 
 def ingest_text_file(client, config, collection, file_path):
@@ -518,9 +592,11 @@ def ingest_text_file(client, config, collection, file_path):
         overlap=config.get("text_chunk_overlap", DEFAULT_TEXT_CHUNK_OVERLAP),
     )
 
+    source = str(file_path.resolve())
+    current_ids = [text_chunk_id(source, chunk) for chunk in chunks]
+
     count = 0
-    for i, chunk in enumerate(chunks):
-        doc_id = file_id(file_path, i)
+    for i, (chunk, doc_id) in enumerate(zip(chunks, current_ids)):
         if already_exists(collection, doc_id):
             continue
 
@@ -530,7 +606,7 @@ def ingest_text_file(client, config, collection, file_path):
             embeddings=[embedding],
             documents=[chunk],
             metadatas=[{
-                "source": str(file_path.resolve()),
+                "source": source,
                 "type": "text",
                 "chunk_index": i,
                 "total_chunks": len(chunks),
@@ -540,6 +616,8 @@ def ingest_text_file(client, config, collection, file_path):
             }],
         )
         count += 1
+
+    prune_orphaned_chunks(collection, source, current_ids)
 
     return count
 
