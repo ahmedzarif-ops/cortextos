@@ -20,7 +20,7 @@ import { nextFireFromCron } from '../daemon/cron-scheduler.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
 import { resolvePaths } from '../utils/paths.js';
-import { resolveEnv, resolveAgentIdentity, resolveTargetAgentDir } from '../utils/env.js';
+import { resolveEnv, resolveAgentIdentity, requireAgentIdentity, resolveTargetAgentDir } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
@@ -115,9 +115,12 @@ busCommand
       console.error(`Warning: agent '${to}' not found in project. Message will be queued but may never be read.`);
     }
 
-    const msgId = sendMessage(paths, env.agentName, to, priority as Priority, text, effectiveReplyTo);
+    // WRITE PATH: the FROM field of a message and the agent on its event are attributed
+    // records, so identity is resolved strictly and never from the cwd.
+    const me = requireAgentIdentity(undefined, 'send-message');
+    const msgId = sendMessage(paths, me, to, priority as Priority, text, effectiveReplyTo);
     try {
-      logEvent(paths, env.agentName, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null }), { refreshHeartbeat: true });
+      logEvent(paths, me, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null }), { refreshHeartbeat: true });
     } catch { /* non-fatal */ }
     console.log(msgId);
   });
@@ -139,7 +142,7 @@ busCommand
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     ackInbox(paths, id);
     try {
-      logEvent(paths, env.agentName, env.org, 'message', 'inbox_ack', 'info', JSON.stringify({ msg_id: id }), { refreshHeartbeat: true });
+      logEvent(paths, requireAgentIdentity(undefined, 'ack-inbox'), env.org, 'message', 'inbox_ack', 'info', JSON.stringify({ msg_id: id }), { refreshHeartbeat: true });
     } catch { /* non-fatal */ }
     console.log(`ACK'd ${id}`);
   });
@@ -157,8 +160,11 @@ busCommand
   .action((title: string, opts: { desc?: string; assignee?: string; priority: string; project?: string; needsApproval?: boolean; blockedBy?: string; blocks?: string }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    // WRITE PATH: the task records its creator, and the auto-notify message below is sent
+    // FROM that same identity. One strict resolution serves both.
+    const me = requireAgentIdentity(undefined, 'create-task');
     const parseList = (raw?: string) => (raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : []);
-    const taskId = createTask(paths, env.agentName, env.org, title, {
+    const taskId = createTask(paths, me, env.org, title, {
       description: opts.desc,
       assignee: opts.assignee,
       priority: opts.priority as Priority,
@@ -169,10 +175,10 @@ busCommand
     });
     console.log(taskId);
     // Auto-notify assignee so the task is visible immediately (issue #78)
-    if (opts.assignee && opts.assignee !== env.agentName) {
+    if (opts.assignee && opts.assignee !== me) {
       const assigneePaths = resolvePaths(opts.assignee, env.instanceId, env.org);
       const desc = opts.desc ? ` — ${opts.desc.slice(0, 120)}` : '';
-      sendMessage(assigneePaths, env.agentName, opts.assignee, 'normal',
+      sendMessage(assigneePaths, me, opts.assignee, 'normal',
         `Task assigned: [${opts.priority}] ${title}${desc} (id: ${taskId})`);
     }
   });
@@ -484,7 +490,8 @@ busCommand
     // stack trace. Previously bad JSON was swallowed and the event was written
     // with empty metadata at exit 0, so callers had no way to notice.
     try {
-      logEvent(paths, env.agentName, env.org, category as EventCategory, event, severity as EventSeverity, opts.meta, { refreshHeartbeat: true });
+      // WRITE PATH: an event IS an attributed record — its whole value is who did what.
+      logEvent(paths, requireAgentIdentity(undefined, 'log-event'), env.org, category as EventCategory, event, severity as EventSeverity, opts.meta, { refreshHeartbeat: true });
     } catch (err) {
       console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
@@ -538,7 +545,11 @@ busCommand
       }
     }
 
-    updateHeartbeat(paths, env.agentName, status, {
+    // WRITE PATH, and the one with the sharpest consequence: a heartbeat signed with a
+    // directory name is a LIVENESS RECORD FOR AN AGENT THAT DOES NOT EXIST — it would appear
+    // in the fleet roster as a healthy seat nobody can find. Refuse rather than invent one.
+    const me = requireAgentIdentity(undefined, 'update-heartbeat');
+    updateHeartbeat(paths, me, status, {
       org: env.org,
       timezone: opts.timezone,
       loopInterval: opts.interval,
@@ -549,11 +560,11 @@ busCommand
     // even if the agent itself forgets to call log-event. This makes the
     // dashboard "agents" list derive from heartbeats, not just explicit events.
     try {
-      logEvent(paths, env.agentName, env.org, 'heartbeat', 'heartbeat', 'info', JSON.stringify({ status, task: opts.task ?? '' }), { refreshHeartbeat: true });
+      logEvent(paths, me, env.org, 'heartbeat', 'heartbeat', 'info', JSON.stringify({ status, task: opts.task ?? '' }), { refreshHeartbeat: true });
     } catch {
       // Non-fatal: heartbeat write already succeeded
     }
-    console.log(`Heartbeat updated: ${env.agentName}`);
+    console.log(`Heartbeat updated: ${me}`);
   });
 
 busCommand
@@ -681,20 +692,25 @@ busCommand
 
     // Write .user-restart marker (same as soft-restart)
     const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
-    const stateDir = join(ctxRoot, 'state', env.agentName);
+    // WRITE PATH, and a judgment call beyond chief's enumerated set: self-restart is an
+    // identity CLAIM ("restart me"). A cwd-derived name either restarts nothing — which
+    // fails visibly — or restarts a DIFFERENT agent whose name happens to match a directory,
+    // which does not. Flagged to chief; cheap to revert if it should keep the old default.
+    const me = requireAgentIdentity(undefined, 'self-restart');
+    const stateDir = join(ctxRoot, 'state', me);
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, '.user-restart'), reason);
 
     // Also write to restarts.log
-    selfRestart(paths, env.agentName, reason);
+    selfRestart(paths, me, reason);
 
     // Send IPC restart-agent signal for self — makes restart immediate
     const ipc = new IPCClient(env.instanceId);
     const daemonRunning = await ipc.isDaemonRunning();
     if (daemonRunning) {
-      const resp = await ipc.send({ type: 'restart-agent', agent: env.agentName, source: 'cortextos bus self-restart' });
+      const resp = await ipc.send({ type: 'restart-agent', agent: me, source: 'cortextos bus self-restart' });
       if (resp.success) {
-        console.log(`Restarting ${env.agentName} via daemon IPC`);
+        console.log(`Restarting ${me} via daemon IPC`);
       } else {
         console.error(`Daemon restart failed: ${resp.error}`);
         process.exit(1);
@@ -714,7 +730,9 @@ busCommand
     const { writeFileSync: fsWrite, existsSync: fsExists, mkdirSync: fsMkdir } = require('fs');
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    hardRestart(paths, env.agentName, opts.reason);
+    // Same judgment call as self-restart above.
+    const me = requireAgentIdentity(undefined, 'hard-restart');
+    hardRestart(paths, me, opts.reason);
     if (opts.handoffDoc && fsExists(opts.handoffDoc)) {
       fsMkdir(paths.stateDir, { recursive: true });
       fsWrite(join(paths.stateDir, '.handoff-doc-path'), opts.handoffDoc + '\n', 'utf-8');
@@ -725,9 +743,9 @@ busCommand
     const ipc = new IPCClient(env.instanceId);
     const daemonRunning = await ipc.isDaemonRunning();
     if (daemonRunning) {
-      const resp = await ipc.send({ type: 'restart-agent', agent: env.agentName, source: 'cortextos bus hard-restart' });
+      const resp = await ipc.send({ type: 'restart-agent', agent: me, source: 'cortextos bus hard-restart' });
       if (resp.success) {
-        console.log(`Hard restart triggered for ${env.agentName} — fresh session incoming`);
+        console.log(`Hard restart triggered for ${me} — fresh session incoming`);
       } else {
         console.error(`Daemon restart failed: ${resp.error}`);
         process.exit(1);
@@ -785,7 +803,10 @@ busCommand
   .action(async (metric: string, hypothesis: string, opts: { surface?: string; direction?: string; window?: string }) => {
     const env = resolveEnv();
     const agentDir = env.agentDir || process.cwd();
-    const id = createExperiment(agentDir, env.agentName, metric, hypothesis, {
+    // WRITE PATH: an experiment records who proposed it, and the approval below is raised
+    // in the same name.
+    const me = requireAgentIdentity(undefined, 'create-experiment');
+    const id = createExperiment(agentDir, me, metric, hypothesis, {
       surface: opts.surface,
       direction: opts.direction as 'higher' | 'lower',
       window: opts.window,
@@ -798,7 +819,7 @@ busCommand
       const paths = resolvePaths(env.agentName, env.instanceId, env.org);
       const approvalId = await createApproval(
         paths,
-        env.agentName,
+        me,
         env.org,
         `Run experiment: ${metric} — ${hypothesis.slice(0, 80)}`,
         'other',
@@ -1098,17 +1119,24 @@ busCommand
 
       // Log outbound and cache last-sent for context injection
       const env = resolveEnv();
-      if (env.agentName && env.ctxRoot) {
-        logOutboundMessage(env.ctxRoot, env.agentName, chatId, message, sentMessageId, {
+      // WRITE PATH — but NOT a `requireAgentIdentity` one, and the difference matters. The
+      // message has ALREADY been sent by the time control reaches here; exiting non-zero now
+      // would report a failed send that in fact succeeded. So resolve strictly and, when
+      // identity is unknown, SKIP the attributed records instead. That is what the original
+      // `if (env.agentName && ...)` guard was reaching for — it just could never be false,
+      // because env.agentName falls back to the cwd.
+      const me = resolveAgentIdentity();
+      if (me && env.ctxRoot) {
+        logOutboundMessage(env.ctxRoot, me, chatId, message, sentMessageId, {
           parseMode: opts.plainText ? 'none' : 'html',
         });
-        cacheLastSent(env.ctxRoot, env.agentName, chatId, message);
+        cacheLastSent(env.ctxRoot, me, chatId, message);
         // Auto-emit activity event so dashboard sees every Telegram send,
         // even from agents that never call log-event directly.
         try {
           const paths = resolvePaths(env.agentName, env.instanceId, env.org);
           const preview = message.length > 120 ? message.slice(0, 120) + '…' : message;
-          logEvent(paths, env.agentName, env.org, 'message', 'telegram_sent', 'info', JSON.stringify({ chat_id: chatId, message_id: sentMessageId, preview }), { refreshHeartbeat: true });
+          logEvent(paths, me, env.org, 'message', 'telegram_sent', 'info', JSON.stringify({ chat_id: chatId, message_id: sentMessageId, preview }), { refreshHeartbeat: true });
         } catch { /* non-fatal */ }
       }
 
@@ -1187,7 +1215,9 @@ busCommand
     // orgDir resolves to where activity-channel.env actually lives (the
     // framework repo path, NOT the runtime state path — see
     // src/bus/approval.ts:postApprovalToActivityChannel for the history).
-    const id = await createApproval(paths, env.agentName, env.org, title, category as ApprovalCategory, context || '', env.frameworkRoot, env.agentDir);
+    // WRITE PATH: an approval records who is asking, and it is read by a human deciding
+    // whether to grant it.
+    const id = await createApproval(paths, requireAgentIdentity(undefined, 'create-approval'), env.org, title, category as ApprovalCategory, context || '', env.frameworkRoot, env.agentDir);
     console.log(id);
   });
 
@@ -1659,8 +1689,11 @@ busCommand
     // Write urgent signal file that fast-checker checks on every poll
     const signalDir = join(ctxRoot, 'state', targetAgent);
     mkdirSync(signalDir, { recursive: true });
+    // WRITE PATH: `from` is the whole content of an urgent signal — the receiving agent
+    // decides what to do with it based on who sent it.
+    const me = requireAgentIdentity(undefined, 'notify-agent');
     const signal = {
-      from: env.agentName,
+      from: me,
       message,
       timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     };
@@ -1668,7 +1701,7 @@ busCommand
 
     // Also send via normal message bus for persistence
     try {
-      sendMessage(paths, env.agentName, targetAgent, 'urgent', message);
+      sendMessage(paths, me, targetAgent, 'urgent', message);
     } catch { /* signal already written */ }
 
     console.log(`Signal sent to ${targetAgent}`);
@@ -2685,6 +2718,10 @@ busCommand
   .action(async (opts: { session?: string; interval: string; telegram: boolean; dryRun: boolean }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    // WRITE PATH: every event this stream emits is attributed, and it emits many. Resolve
+    // ONCE at the start and fail fast — refusing inside the loop would abort a running
+    // stream partway, and refusing per-event would spend the check on every line.
+    const streamIdentity = requireAgentIdentity(undefined, 'tui-stream');
     const sessionName = opts.session || env.agentName;
     const pollMs = Math.max(500, parseInt(opts.interval, 10) || 2000);
 
@@ -2777,7 +2814,7 @@ busCommand
           // Log to event bus
           if (!opts.dryRun) {
             try {
-              logEvent(paths, env.agentName, env.org, 'agent_activity' as any, 'tool_call', 'info', {
+              logEvent(paths, streamIdentity, env.org, 'agent_activity' as any, 'tool_call', 'info', {
                 line: trimmed,
                 session: sessionName,
                 high_signal: isHighSignal,
@@ -2793,7 +2830,7 @@ busCommand
             if (now - lastTelegramSent >= TELEGRAM_COOLDOWN_MS) {
               lastTelegramSent = now;
               try {
-                await telegramApi.sendMessage(chatId, `[${env.agentName}] ${trimmed}`);
+                await telegramApi.sendMessage(chatId, `[${streamIdentity}] ${trimmed}`);
               } catch { /* Never fail the stream */ }
             }
           }
