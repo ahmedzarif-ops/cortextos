@@ -1167,6 +1167,13 @@ def cmd_ingest(args):
     total = 0
     skipped = 0
     errors = 0
+    missing = 0
+    # Counted separately from `skipped` ON PURPOSE. `skipped` is incremented only in
+    # the directory branch, so a single already-present FILE leaves it at 0 — and an exit
+    # rule keyed on it calls a correct no-op a failure. `processed` means "this source was
+    # handled and did not raise", which is true whether it added chunks or had none to add.
+    processed = 0
+    paths_given = bool(args.paths)
 
     try:
         for path_str in args.paths:
@@ -1191,13 +1198,23 @@ def cmd_ingest(args):
                 try:
                     count = ingest_file(client, config, collection, p)
                     total += count
+                    processed += 1
                     if count > 0:
                         print(f"  Added {count} chunk(s)")
+                    else:
+                        # Deliberately states the FACT, not a cause. ingest_file returns 0
+                        # for four different reasons — chunks already present, unsupported
+                        # format, empty document, and a caught extraction error — and this
+                        # branch cannot tell them apart. It previously said "Already present",
+                        # which reported a FAILED pdf extraction as a correct no-op. The
+                        # specific reason is printed by the code that knows it, above.
+                        print("  0 new chunk(s)")
                 except Exception as e:
                     print(f"  ERROR: {e}")
                     errors += 1
             else:
                 print(f"NOT FOUND: {p}")
+                missing += 1
     finally:
         _tracker.persist()
 
@@ -1206,7 +1223,31 @@ def cmd_ingest(args):
         print(f"  Skipped: {skipped} (already existed or empty)")
     if errors:
         print(f"  Errors: {errors}")
+    if missing:
+        print(f"  Missing: {missing}")
     print(_tracker.summary_line())
+
+    # Exit non-zero when the run did not do what it was asked to do.
+    #
+    # Until 2026-09-04 this printed "Done!" and returned None on EVERY path, so
+    # a 429 RESOURCE_EXHAUSTED, a nonexistent source, and a fully successful
+    # ingest were indistinguishable to any caller: all three exited 0. Measured
+    # consequence on this fleet: a day of memories never reached the KB while
+    # every heartbeat reported success, and later queries answered confidently
+    # from stale August documents.
+    #
+    # "Ingested 0 while sources were given" counts as failure. A run that was
+    # asked to index something and indexed nothing has not succeeded, even when
+    # nothing raised.
+    if errors or missing:
+        return 1
+    # Fail only when NOTHING was handled. Deliberately keyed on `processed`, not on
+    # `skipped`: a re-ingest of an already-complete file legitimately adds 0 chunks, and
+    # calling that a failure would make a fleet-wide re-ingest report failure on every seat
+    # whose memory was already indexed — the exact opposite of the defect being fixed.
+    if total == 0 and processed == 0 and paths_given:
+        return 1
+    return 0
 
 
 def deduplicate_results(results, similarity_ratio=0.85):
@@ -1657,7 +1698,11 @@ def main():
         "usage": cmd_usage,
     }
 
-    commands[args.command](args)
+    # Propagate the command's exit code. This line used to discard the return
+    # value, so a command could report failure and the process would still exit
+    # 0 — which is exactly how `kb-ingest` came to print "Done!" on a quota
+    # error and be believed by every caller.
+    sys.exit(commands[args.command](args) or 0)
 
 
 if __name__ == "__main__":
