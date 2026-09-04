@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync } from 'fs';
 import { platform } from 'os';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { OutputBuffer } from './output-buffer.js';
+import { resolveOrchestratorAgent } from '../utils/orchestrator-env.js';
 import { injectMessage as injectMessageIntoPty } from './inject.js';
 
 // node-pty types
@@ -146,17 +147,13 @@ export class AgentPTY {
     } else if (process.env.TZ) {
       ptyEnv['CTX_TIMEZONE'] = process.env.TZ;
     }
-    // CTX_ORCHESTRATOR_AGENT: read from org context.json so agents can route to orchestrator
-    if (this.env.projectRoot && this.env.org) {
-      try {
-        const contextPath = join(this.env.projectRoot, 'orgs', this.env.org, 'context.json');
-        if (existsSync(contextPath)) {
-          const ctx = JSON.parse(readFileSync(contextPath, 'utf-8'));
-          if (ctx.orchestrator) {
-            ptyEnv['CTX_ORCHESTRATOR_AGENT'] = ctx.orchestrator;
-          }
-        }
-      } catch { /* leave unset if context.json is missing or malformed */ }
+    // CTX_ORCHESTRATOR_AGENT: read from org context.json so agents can route to
+    // orchestrator. Resolution is shared with CodexAppServerPTY (see
+    // utils/orchestrator-env.ts); the assignment stays here in each adapter so
+    // the CTX_ parity test can see both sides.
+    const orchestratorAgent = resolveOrchestratorAgent(this.env.projectRoot, this.env.org);
+    if (orchestratorAgent) {
+      ptyEnv['CTX_ORCHESTRATOR_AGENT'] = orchestratorAgent;
     }
 
     this.customizeEnv(ptyEnv);
