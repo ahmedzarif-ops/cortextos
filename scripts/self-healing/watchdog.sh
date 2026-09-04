@@ -46,7 +46,20 @@ fi
 # `cat` on a missing file prints NOTHING and exits 1, so `cat ... || echo 0` yields a single
 # "0". The idiom is safe with a command that stays silent on failure and unsafe with one that
 # prints anyway. Capture first, then default on the exit code.
-current=$(grep -c "telegram-poller.*Poll error\|fetch failed" "$ERR_LOG" 2>/dev/null) || current=0
+# ⛔ AND THE EXIT CODE IS THREE-VALUED, NOT TWO. `|| current=0` fires on ANY non-zero rc, but
+# grep exits 0 = matched, 1 = NO MATCH, 2 = ERROR (unreadable file, permissions, a race with
+# the -f test above). Defaulting to 0 on rc=2 means AN UNREADABLE LOG READS AS A CLEAN ONE:
+# the count passes numeric validation, `delta` goes negative, the rotation branch rewrites it
+# to 0, the script logs "OK: 0 new poller errors" AND RE-BASELINES THE STATE FILE. A watchdog
+# that cannot read its input reports health and forgets what it knew.
+# ⇒ Default ONLY on rc=1. rc>=2 is an error path that must NOT touch the state file.
+current=$(grep -c "telegram-poller.*Poll error\|fetch failed" "$ERR_LOG" 2>/dev/null); grep_rc=$?
+if [ "$grep_rc" -eq 1 ]; then
+  current=0
+elif [ "$grep_rc" -ne 0 ]; then
+  echo "[$ts] ERROR: cannot read $ERR_LOG (grep rc=$grep_rc) — NOT re-baselining; state file left untouched." >> "$LOG_FILE"
+  exit 1
+fi
 last=$(cat "$STATE_FILE" 2>/dev/null || echo 0)
 
 # The state file is written by a previous run and read back as a number. VALIDATE IT BEFORE
@@ -67,7 +80,16 @@ if [ "$delta" -gt "$THRESHOLD" ]; then
   echo "[$ts] WEDGED: $delta new poller errors since last check (threshold $THRESHOLD). Restarting cortextos-daemon." >> "$LOG_FILE"
   "$PM2_BIN" restart cortextos-daemon --update-env >> "$LOG_FILE" 2>&1
   # After restart, snapshot the new line count so we don't immediately re-fire.
-  after=$(grep -c "telegram-poller.*Poll error\|fetch failed" "$ERR_LOG" 2>/dev/null) || after=0
+  # Same three-valued rc here. On an error path we must still write SOMETHING (a restart just
+  # happened), so fall back to the pre-restart count rather than to 0 — 0 would under-report the
+  # next delta and could re-fire a restart loop.
+  after=$(grep -c "telegram-poller.*Poll error\|fetch failed" "$ERR_LOG" 2>/dev/null); after_rc=$?
+  if [ "$after_rc" -eq 1 ]; then
+    after=0
+  elif [ "$after_rc" -ne 0 ]; then
+    echo "[$ts] WARN: cannot re-read $ERR_LOG after restart (grep rc=$after_rc) — snapshotting the pre-restart count." >> "$LOG_FILE"
+    after="$current"
+  fi
   case "$after" in ''|*[!0-9]*) after="$current";; esac
   echo "$after" > "$STATE_FILE"
 else
