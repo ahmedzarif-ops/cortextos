@@ -104,4 +104,36 @@ describe('parseIngestSummary reads the tool instead of trusting it', () => {
     );
     expect(parsed.files[0].status).toBe('failed');
   });
+
+  // THE #7/#9 SEAM. PR #9 prints these markers as f"{indent}..." — the indent becomes a
+  // variable on the OTHER side of this boundary. An `^\s+` anchor works only while every
+  // call site passes a non-empty indent, and nothing asserted that. A caller passing '' would
+  // not error: the line would simply stop being recognised and an already-present file would
+  // be misread as FAILED. Pinned across every indent the printer can produce, including none.
+  for (const indent of ['', ' ', '  ', '    ', '\t']) {
+    it(`recognises per-file markers with indent ${JSON.stringify(indent)}`, () => {
+      const added = parseIngestSummary(
+        [`Ingesting: a.md`, `${indent}Added 5 chunk(s)`, "Done! Ingested 5 new chunk(s) into 'c'"].join('\n'),
+      );
+      expect(added.files[0]).toEqual({ name: 'a.md', status: 'added', chunks: 5 });
+
+      const present = parseIngestSummary(
+        [`Ingesting: b.md`, `${indent}Already present (0 new chunk(s))`, "Done! Ingested 0 new chunk(s) into 'c'"].join('\n'),
+      );
+      expect(present.files[0].status).toBe('already-present');
+
+      const failed = parseIngestSummary(
+        [`Ingesting: c.md`, `${indent}ERROR: 429 RESOURCE_EXHAUSTED`, "Done! Ingested 0 new chunk(s) into 'c'"].join('\n'),
+      );
+      expect(failed.files[0].status).toBe('failed');
+    });
+  }
+
+  // NEGATIVE CONTROL for the tolerant anchor: a column-0 "ERROR:" with NO file announced
+  // must not be attributed to anything. mmrag prints exactly that for a missing config,
+  // before any "Ingesting:" line — so tolerance must not become promiscuity.
+  it('a column-0 ERROR with no pending source is attributed to nothing', () => {
+    const parsed = parseIngestSummary('ERROR: Config not found. Run setup first:');
+    expect(parsed.files).toEqual([]);
+  });
 });

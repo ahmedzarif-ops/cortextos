@@ -463,6 +463,18 @@ export function parseIngestSummary(output: string): {
   //   Ingesting directory: X then  "  Processing: <rel>" then indented Added/ERROR
   //   NOT FOUND: <path>
   // The information was always there; only the totals were being read.
+  // INDENT IS A SEAM, SO DO NOT DEPEND ON IT.
+  //
+  // These markers are printed by mmrag with a leading indent that is a formatting choice on
+  // the OTHER side of this boundary — and PR #9 turns it into an f-string variable
+  // (f"{indent}Already present ..."), so a call site passing '' would silently stop matching
+  // an `^\s+` anchor. Nothing would error: the line would simply not be recognised, and an
+  // already-present file would be misread as failed.
+  //
+  // `^\s*` accepts any indent INCLUDING none, so this parser cannot be broken by a
+  // formatting change it does not control. The `pending !== null` guard is what keeps a
+  // column-0 line (mmrag's own "ERROR: Config not found") from being attributed to a file:
+  // that error is printed before any "Ingesting:" line, so there is nothing pending.
   const files: IngestFileOutcome[] = [];
   let pending: string | null = null;
   for (const raw of output.split('\n')) {
@@ -478,7 +490,7 @@ export function parseIngestSummary(output: string): {
       pending = start[1];
       continue;
     }
-    const added = raw.match(/^\s+Added\s+(\d+)\s+chunk/);
+    const added = raw.match(/^\s*Added\s+(\d+)\s+chunk/);
     if (added && pending !== null) {
       files.push({ name: pending, status: 'added', chunks: Number(added[1]) });
       pending = null;
@@ -488,12 +500,12 @@ export function parseIngestSummary(output: string): {
     // failure. Without this it fell through to "announced but never resolved" below and
     // was reported as failed — which would have called every already-complete source in
     // a fleet re-ingest broken.
-    if (/^\s+Already present/.test(raw) && pending !== null) {
+    if (/^\s*Already present/.test(raw) && pending !== null) {
       files.push({ name: pending, status: 'already-present', chunks: 0 });
       pending = null;
       continue;
     }
-    if (/^\s+ERROR:/.test(raw) && pending !== null) {
+    if (/^\s*ERROR:/.test(raw) && pending !== null) {
       files.push({ name: pending, status: 'failed', chunks: null });
       pending = null;
     }
