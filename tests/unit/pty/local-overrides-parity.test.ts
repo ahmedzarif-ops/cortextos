@@ -124,6 +124,27 @@ describe('adapter parity: both runtimes deliver the SAME bytes', () => {
     expect(codexOut).not.toContain(DEEP_MARKER);
   });
 
+  it('the DELIVERY CAVEAT travels with the content, where the seat will read it', () => {
+    // chief's ruling: the limit must be written where the SEAT reads it. A caveat
+    // that lives only in the adapter source is one the affected agent never sees —
+    // and after a compaction the agent is the only party still present to act on it.
+    const out = codexBootPrompt(AGENT_DIR);
+    expect(out).toContain('CONVERSATION TURN, not as a system prompt');
+    expect(out).toContain('MAY BE COMPACTED AWAY');
+    expect(out).toContain('RE-READ {agentDir}/local/*.md AT EVERY HEARTBEAT');
+    // It must sit INSIDE the delimited block, not float loose in the prompt.
+    const open = out.indexOf('<local-overrides');
+    const close = out.indexOf('</local-overrides>');
+    const caveatAt = out.indexOf('DELIVERY NOTE');
+    expect(open).toBeGreaterThan(-1);
+    expect(caveatAt).toBeGreaterThan(open);
+    expect(caveatAt).toBeLessThan(close);
+  });
+
+  it('the caveat is NOT emitted when there are no overrides (nothing to caveat)', () => {
+    expect(codexBootPrompt(join(ROOT, 'no-such-agent'))).not.toContain('DELIVERY NOTE');
+  });
+
   it('no local/ at all: codex boot prompt is the prompt, unchanged', () => {
     expect(codexBootPrompt(join(ROOT, 'no-such-agent'))).toBe('BOOT_PROMPT');
   });

@@ -248,8 +248,21 @@ export class CodexAppServerPTY {
 
     // Delimited so the content is attributable in the transcript rather than
     // blending into the boot instructions.
+    // THE CAVEAT TRAVELS WITH THE CONTENT, NOT ONLY IN THIS SOURCE FILE.
+    // chief's ruling: the limit has to be written where the SEAT reads it. A
+    // caveat that lives only in the adapter is a caveat the affected agent never
+    // sees — and this particular limit is one only the agent can act on, because
+    // it is the only party present after a compaction.
+    const CAVEAT =
+      'DELIVERY NOTE (codex-app-server interim): this block arrived as a ' +
+      'CONVERSATION TURN, not as a system prompt. It MAY BE COMPACTED AWAY ' +
+      'later in this session, and nothing will announce that it has gone. ' +
+      'RE-READ {agentDir}/local/*.md AT EVERY HEARTBEAT and treat its absence ' +
+      'from this transcript as expected, not as evidence it was never sent.';
+
     const block =
       `<local-overrides source="{agentDir}/local/*.md" files="${overrides.files.join(',')}" bytes="${overrides.bytes}">\n` +
+      `${CAVEAT}\n\n` +
       `${overrides.content}\n` +
       `</local-overrides>`;
 
