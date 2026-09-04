@@ -1083,6 +1083,8 @@ def cmd_ingest(args):
     total = 0
     skipped = 0
     errors = 0
+    missing = 0
+    paths_given = bool(args.paths)
 
     try:
         for path_str in args.paths:
@@ -1114,6 +1116,7 @@ def cmd_ingest(args):
                     errors += 1
             else:
                 print(f"NOT FOUND: {p}")
+                missing += 1
     finally:
         _tracker.persist()
 
@@ -1122,7 +1125,27 @@ def cmd_ingest(args):
         print(f"  Skipped: {skipped} (already existed or empty)")
     if errors:
         print(f"  Errors: {errors}")
+    if missing:
+        print(f"  Missing: {missing}")
     print(_tracker.summary_line())
+
+    # Exit non-zero when the run did not do what it was asked to do.
+    #
+    # Until 2026-09-04 this printed "Done!" and returned None on EVERY path, so
+    # a 429 RESOURCE_EXHAUSTED, a nonexistent source, and a fully successful
+    # ingest were indistinguishable to any caller: all three exited 0. Measured
+    # consequence on this fleet: a day of memories never reached the KB while
+    # every heartbeat reported success, and later queries answered confidently
+    # from stale August documents.
+    #
+    # "Ingested 0 while sources were given" counts as failure. A run that was
+    # asked to index something and indexed nothing has not succeeded, even when
+    # nothing raised.
+    if errors or missing:
+        return 1
+    if total == 0 and skipped == 0 and paths_given:
+        return 1
+    return 0
 
 
 def deduplicate_results(results, similarity_ratio=0.85):
@@ -1573,7 +1596,11 @@ def main():
         "usage": cmd_usage,
     }
 
-    commands[args.command](args)
+    # Propagate the command's exit code. This line used to discard the return
+    # value, so a command could report failure and the process would still exit
+    # 0 — which is exactly how `kb-ingest` came to print "Done!" on a quota
+    # error and be believed by every caller.
+    sys.exit(commands[args.command](args) or 0)
 
 
 if __name__ == "__main__":

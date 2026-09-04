@@ -241,6 +241,21 @@ export function queryKnowledgeBase(
 /**
  * Ingest files into the knowledge base.
  */
+/**
+ * Outcome of an ingest. Returned rather than assumed.
+ *
+ * `ok:false` with `reason:'unverifiable'` is deliberately distinct from a known
+ * failure: if the summary line cannot be parsed we do not know what happened,
+ * and "we could not check" must never be reported as "it worked".
+ */
+export interface IngestResult {
+  ok: boolean;
+  ingested: number | null;
+  errors: number | null;
+  reason?: 'not-configured' | 'missing-path' | 'tool-failed' | 'ingested-nothing' | 'unverifiable';
+  detail?: string;
+}
+
 export function ingestKnowledgeBase(
   paths: string[],
   options: {
@@ -251,7 +266,7 @@ export function ingestKnowledgeBase(
     frameworkRoot: string;
     instanceId: string;
   },
-): void {
+): IngestResult {
   const { agent, scope = 'shared', force, frameworkRoot, instanceId } = options;
   // Normalize once (see queryKnowledgeBase for rationale).
   const org = normalizeOrgName(frameworkRoot, options.org);
@@ -271,7 +286,7 @@ export function ingestKnowledgeBase(
       `[kb] Knowledge base not configured for org ${org}. Skipping ingest — ` +
       `run setup to enable (see HEARTBEAT.md step 10 for the config path).`,
     );
-    return;
+    return { ok: false, ingested: null, errors: null, reason: 'not-configured' };
   }
 
   const pythonPath = getVenvPython(frameworkRoot);
@@ -279,6 +294,15 @@ export function ingestKnowledgeBase(
 
   // Determine collection name (same logic as kb-ingest.sh)
   let collection: string;
+  // A source that does not exist cannot be ingested, and the python tool prints
+  // "NOT FOUND" and carries on. Catch it here so the caller gets a reason rather
+  // than a successful-looking run over nothing.
+  const missing = paths.filter((p) => !existsSync(p));
+  if (missing.length > 0) {
+    console.error(`ERROR: source path(s) not found: ${missing.join(', ')}`);
+    return { ok: false, ingested: null, errors: null, reason: 'missing-path', detail: missing.join(', ') };
+  }
+
   if (scope === 'private') {
     if (!agent) throw new Error('--agent or CTX_AGENT_NAME required for --scope private');
     collection = `agent-${agent}`;
@@ -316,14 +340,83 @@ export function ingestKnowledgeBase(
       : KB_INGEST_TIMEOUT_DEFAULT_MS,
   );
 
-  execFileSync(pythonPath, args, {
-    encoding: 'utf-8',
-    timeout: ingestTimeoutMs,
-    env,
-    stdio: 'inherit',
-  });
+  // stdio was 'inherit', which meant the output went straight past this process
+  // and nothing here could tell a successful ingest from a quota error. The tool
+  // printed "Done!", this printed "Ingest complete", and both were unconditional.
+  // Captured and echoed instead: operators still see everything, and the result
+  // is now something we can actually check.
+  let output = '';
+  try {
+    output = execFileSync(pythonPath, args, {
+      encoding: 'utf-8',
+      timeout: ingestTimeoutMs,
+      env,
+      stdio: ['inherit', 'pipe', 'pipe'],
+    }) as unknown as string;
+    if (output) process.stdout.write(output);
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string; message?: string };
+    const combined = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+    if (combined) process.stdout.write(combined);
+    console.error(`ERROR: ingest failed — ${e.message ?? 'unknown error'}`);
+    return { ok: false, ingested: null, errors: null, reason: 'tool-failed', detail: e.message };
+  }
 
-  console.log(`\nIngest complete → collection: ${collection}`);
+  const parsed = parseIngestSummary(output);
+
+  if (parsed.ingested === null) {
+    // The tool ran and exited 0, but said nothing we recognise. That is not
+    // success — it is an unread result, and the whole defect this replaces was
+    // an unread result being announced as success.
+    console.error(
+      'ERROR: could not verify the ingest — no "Done! Ingested N" line in the output. ' +
+      'Treating as FAILED rather than assuming it worked.',
+    );
+    return { ok: false, ingested: null, errors: null, reason: 'unverifiable' };
+  }
+
+  if (parsed.errors && parsed.errors > 0) {
+    console.error(`ERROR: ingest reported ${parsed.errors} error(s) — collection ${collection} may be incomplete.`);
+    return { ok: false, ingested: parsed.ingested, errors: parsed.errors, reason: 'tool-failed' };
+  }
+
+  if (parsed.ingested === 0 && parsed.skipped === 0 && paths.length > 0) {
+    console.error(
+      `ERROR: ingest indexed 0 chunks from ${paths.length} source(s) and skipped none. ` +
+      'A run asked to index something that indexed nothing has not succeeded.',
+    );
+    return { ok: false, ingested: 0, errors: parsed.errors, reason: 'ingested-nothing' };
+  }
+
+  console.log(`\nIngest complete → collection: ${collection} (${parsed.ingested} chunk(s))`);
+  return { ok: true, ingested: parsed.ingested, errors: parsed.errors ?? 0 };
+}
+
+/**
+ * Read the tool's own summary rather than trusting its exit code alone.
+ *
+ * Returns `ingested: null` when the summary line is absent — "could not parse"
+ * is a distinct answer from "parsed as zero", and collapsing the two is how an
+ * unverifiable run gets reported as a clean one.
+ */
+export function parseIngestSummary(output: string): {
+  ingested: number | null;
+  skipped: number;
+  errors: number | null;
+} {
+  const ingestedMatch = output.match(/Done!\s+Ingested\s+(\d+)\s+new chunk/);
+  const skippedMatch = output.match(/^\s*Skipped:\s*(\d+)/m);
+  const errorsMatch = output.match(/^\s*Errors:\s*(\d+)/m);
+  const missingMatch = output.match(/^\s*Missing:\s*(\d+)/m);
+
+  const errorsFromLines = (errorsMatch ? Number(errorsMatch[1]) : 0)
+    + (missingMatch ? Number(missingMatch[1]) : 0);
+
+  return {
+    ingested: ingestedMatch ? Number(ingestedMatch[1]) : null,
+    skipped: skippedMatch ? Number(skippedMatch[1]) : 0,
+    errors: ingestedMatch ? errorsFromLines : null,
+  };
 }
 
 /**
