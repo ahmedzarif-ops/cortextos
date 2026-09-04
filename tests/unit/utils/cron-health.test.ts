@@ -16,11 +16,13 @@
 import { describe, it, expect } from 'vitest';
 import {
   computeHealth,
+  isScheduleParseable,
   aggregateFleetHealth,
   WARNING_MULTIPLIER,
   type CronHealth,
   type HealthState,
 } from '../../../src/utils/cron-health';
+import { computeNextFire } from '../../../src/daemon/ipc-server';
 import type { CronSummaryRow, CronExecutionLogEntry } from '../../../src/types/index';
 
 // ---------------------------------------------------------------------------
@@ -688,6 +690,88 @@ describe('computeHealth — unparseable schedules never get grace', () => {
     const result = computeHealth(row, [], NOW_MS);
     expect(result.state).toBe('healthy');
     expect(result.reason).toMatch(/not due yet/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// guard's RIDE-ALONG on PR #5 — the gate must not be delegated to the caller.
+//
+// The four tests above pass `nextFire: 'unknown'` themselves, so they only ever proved that
+// computeHealth honours a correctly-built row. They CANNOT tell "computeHealth derives
+// parseability" from "computeHealth trusts its caller" — and the second one is a hole, because
+// only ipc-server's listAllCrons builds that field correctly. Guard's hand-built probe filled it
+// differently and the fix looked broken.
+//
+// Every row below therefore carries a PERFECTLY PLAUSIBLE nextFire — a real future ISO timestamp,
+// exactly what a naive second producer would supply — on a schedule that can never fire.
+// Under the old `nextFire !== 'unknown'` gate all of these return 'healthy'.
+// ---------------------------------------------------------------------------
+
+describe('computeHealth — parseability is DERIVED, not taken from row.nextFire', () => {
+  const UNPARSEABLE = ['@daily', '0 9 * * MON', 'every monday', '*/5'];
+
+  for (const schedule of UNPARSEABLE) {
+    it(`${schedule} is NEVER-FIRED even when the row claims a valid future nextFire`, () => {
+      const row = makeRow({
+        schedule,
+        lastFire: null,
+        created_at: new Date(NOW_MS - 60_000).toISOString(),
+        // The lie a second producer would tell, in good faith:
+        nextFire: new Date(NOW_MS + 3 * DAY_MS).toISOString(),
+      });
+      expect(computeHealth(row, [], NOW_MS).state).toBe('never-fired');
+    });
+  }
+
+  it('CONTROL: a PARSEABLE schedule still gets its grace even when the row says nextFire is unknown', () => {
+    // The mirror of the cases above, and it is what stops "derive it" being satisfied by simply
+    // never granting grace. row.nextFire is now wrong in the OTHER direction and must not matter.
+    const row = makeRow({
+      schedule: '0 9 * * 1',
+      lastFire: null,
+      created_at: new Date(NOW_MS - 60_000).toISOString(),
+      nextFire: 'unknown',
+    });
+    const result = computeHealth(row, [], NOW_MS);
+    expect(result.state).toBe('healthy');
+    expect(result.reason).toMatch(/not due yet/);
+  });
+
+  it('the verdict is identical whatever row.nextFire says — for both a dead and a live schedule', () => {
+    // States the property directly rather than case by case: nextFire has NO influence on state.
+    const NEXTFIRES = ['unknown', new Date(NOW_MS + 3 * DAY_MS).toISOString(), '', 'garbage'];
+    const base = { lastFire: null, created_at: new Date(NOW_MS - 60_000).toISOString() };
+
+    const dead = NEXTFIRES.map(nextFire =>
+      computeHealth(makeRow({ ...base, schedule: '@daily', nextFire }), [], NOW_MS).state);
+    const live = NEXTFIRES.map(nextFire =>
+      computeHealth(makeRow({ ...base, schedule: '0 9 * * 1', nextFire }), [], NOW_MS).state);
+
+    // Assert the VALUES, not just that the set has size 1 — a uniform wrong answer would pass that.
+    expect(dead).toEqual(['never-fired', 'never-fired', 'never-fired', 'never-fired']);
+    expect(live).toEqual(['healthy', 'healthy', 'healthy', 'healthy']);
+  });
+});
+
+describe('isScheduleParseable — the predicate itself', () => {
+  // Tested directly because computeHealth can only reach it through the never-fired branch,
+  // and a predicate that is only ever exercised through one caller is one caller from silence.
+  const PARSEABLE = ['4h', '30m', '1h', '0 3 * * *', '*/5 * * * *', '0 9 * * 1', '55 14 * * 0', '0 8-10 * * *'];
+  const NOT_PARSEABLE = ['@daily', '@weekly', '0 9 * * MON', 'every monday', '*/5', '', '   ', 'nonsense', '* * * *'];
+
+  for (const s of PARSEABLE) {
+    it(`parseable: ${JSON.stringify(s)}`, () => expect(isScheduleParseable(s, NOW_MS)).toBe(true));
+  }
+  for (const s of NOT_PARSEABLE) {
+    it(`NOT parseable: ${JSON.stringify(s)}`, () => expect(isScheduleParseable(s, NOW_MS)).toBe(false));
+  }
+
+  it('agrees with computeNextFire on every case above — one parser, not two', () => {
+    // THE POINT OF THE MOVE. If this ever fails, the health checker and the thing that actually
+    // schedules crons have diverged, which is the defect the ride-along exists to prevent.
+    for (const s of [...PARSEABLE, ...NOT_PARSEABLE]) {
+      expect(isScheduleParseable(s, NOW_MS)).toBe(computeNextFire(s, undefined, NOW_MS) !== 'unknown');
+    }
   });
 });
 

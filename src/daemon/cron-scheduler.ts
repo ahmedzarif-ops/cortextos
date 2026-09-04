@@ -27,104 +27,25 @@
 
 import { homedir } from 'os';
 import { join } from 'path';
-import { parseDurationMs, readCronState } from '../bus/cron-state.js';
+import { parseDurationMs, readCronState, nextFireFromCron } from '../bus/cron-state.js';
 import { readCronsWithStatus, updateCron, cronsFileMtimeMs } from '../bus/crons.js';
 import type { CronDefinition } from '../types/index.js';
 import { appendExecutionLog } from './cron-execution-log.js';
 
 // ---------------------------------------------------------------------------
-// Cron expression parser — no external deps.
-// Supports: *, */N, comma-lists, and ranges for each of the 5 standard fields.
-// Fields: minute hour dom month dow (day-of-week: 0=Sunday … 6=Saturday).
+// Cron expression parser — MOVED to src/bus/cron-state.ts (2026-09-04).
+//
+// WHY IT MOVED (guard's ride-along on PR #5): cron-health.ts needs to answer
+// "can this schedule be parsed at all?" for itself instead of trusting a
+// nextFire string handed to it by its caller. cron-health is a pure module and
+// must not import the daemon, so the parser now lives beside parseDurationMs in
+// cron-state.ts and BOTH the scheduler and the health checker use that one copy.
+//
+// Re-exported here so every existing importer of
+// `nextFireFromCron` from './cron-scheduler.js' keeps working unchanged.
 // ---------------------------------------------------------------------------
 
-/**
- * Expand a single cron field string into the set of matching integers.
- *
- * @param field - Raw field token (e.g. "*", "*\/5", "0,15,30,45", "1-5").
- * @param min   - Minimum valid value for this field (0 or 1).
- * @param max   - Maximum valid value (e.g. 59, 23, 31, 12, 6).
- */
-function expandField(field: string, min: number, max: number): number[] {
-  const result = new Set<number>();
-
-  for (const part of field.split(',')) {
-    if (part === '*') {
-      for (let i = min; i <= max; i++) result.add(i);
-    } else if (part.startsWith('*/')) {
-      const step = parseInt(part.slice(2), 10);
-      if (isNaN(step) || step <= 0) throw new Error(`Invalid cron step: ${part}`);
-      for (let i = min; i <= max; i += step) result.add(i);
-    } else if (part.includes('-')) {
-      const [lo, hi] = part.split('-').map(s => parseInt(s, 10));
-      if (isNaN(lo) || isNaN(hi) || lo > hi) throw new Error(`Invalid cron range: ${part}`);
-      for (let i = lo; i <= hi; i++) result.add(i);
-    } else {
-      const n = parseInt(part, 10);
-      if (isNaN(n)) throw new Error(`Invalid cron value: ${part}`);
-      result.add(n);
-    }
-  }
-
-  return [...result].sort((a, b) => a - b);
-}
-
-/**
- * Compute the next fire timestamp (ms since epoch) for a 5-field cron
- * expression, starting from `fromMs` (exclusive — the next fire must be
- * strictly after fromMs, rounded forward to the next whole minute).
- *
- * @param expr   - 5-field cron expression ("min hour dom month dow").
- * @param fromMs - Starting epoch time in milliseconds.
- * @returns      Epoch ms of the next matching minute, or NaN if unparseable.
- */
-export function nextFireFromCron(expr: string, fromMs: number): number {
-  const parts = expr.trim().split(/\s+/);
-  if (parts.length !== 5) return NaN;
-
-  let [minuteStr, hourStr, domStr, monthStr, dowStr] = parts;
-
-  let minutes: number[], hours: number[], doms: number[], months: number[], dows: number[];
-  try {
-    minutes = expandField(minuteStr, 0, 59);
-    hours   = expandField(hourStr,   0, 23);
-    doms    = expandField(domStr,    1, 31);
-    months  = expandField(monthStr,  1, 12);
-    dows    = expandField(dowStr,    0, 6);
-  } catch {
-    return NaN;
-  }
-
-  // Start from the next whole minute after fromMs
-  const startMs = Math.floor(fromMs / 60_000) * 60_000 + 60_000;
-
-  // Walk forward minute-by-minute (capped at 1 year to avoid infinite loops).
-  const MAX_MINUTES = 366 * 24 * 60;
-  let candidate = startMs;
-
-  for (let i = 0; i < MAX_MINUTES; i++) {
-    const d = new Date(candidate);
-    const m  = d.getMinutes();
-    const h  = d.getHours();
-    const dy = d.getDate();
-    const mo = d.getMonth() + 1; // 1-12
-    const dw = d.getDay();       // 0-6
-
-    if (
-      months.includes(mo) &&
-      doms.includes(dy) &&
-      dows.includes(dw) &&
-      hours.includes(h) &&
-      minutes.includes(m)
-    ) {
-      return candidate;
-    }
-
-    candidate += 60_000;
-  }
-
-  return NaN; // should never reach here for valid expressions
-}
+export { nextFireFromCron };
 
 // ---------------------------------------------------------------------------
 // Internal scheduler state for a single cron

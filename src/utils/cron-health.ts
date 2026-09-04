@@ -21,7 +21,7 @@
  *   After fire_at + grace period passes without a fire, it becomes warning/never-fired.
  */
 
-import { parseDurationMs, cronExpressionMaxGapMs } from '../bus/cron-state.js';
+import { parseDurationMs, cronExpressionMaxGapMs, nextFireFromCron } from '../bus/cron-state.js';
 import type { CronSummaryRow, CronExecutionLogEntry } from '../types/index.js';
 
 // ---------------------------------------------------------------------------
@@ -93,6 +93,36 @@ const MS_24H = 24 * 60 * 60 * 1000;
 // ---------------------------------------------------------------------------
 // Core helper
 // ---------------------------------------------------------------------------
+
+/**
+ * Can this schedule string be parsed by anything that actually schedules crons?
+ *
+ * WHY THIS EXISTS AND WHY IT DOES NOT READ `row.nextFire` (guard's ride-along on PR #5,
+ * 2026-09-04): the not-yet-due grace below must only apply to a cron that CAN fire. The first
+ * version of that gate asked `row.nextFire !== 'unknown'` — i.e. it trusted a value its CALLER
+ * supplied. Exactly one producer fills that field today (`listAllCrons` in ipc-server, correctly,
+ * via `computeNextFire`), so the gate was right by luck of there being one caller. A second
+ * producer filling `nextFire` from anything else — a hand-built probe, a fixture, a future
+ * dashboard path — silently reopens the hole this gate was added to close, and NOTHING FAILS when
+ * it does. Guard's own probe did precisely that and made the fix look broken.
+ *
+ * So parseability is derived HERE, from the schedule itself, using the SAME two parsers the
+ * scheduler uses. Deliberately not a re-implementation: a second, independently-written parse test
+ * would be free to disagree with the real scheduler, which is the same defect wearing a different
+ * hat.
+ *
+ * ⚠ `cronExpressionMaxGapMs` must NOT be used for this. It returns its 31-day FALLBACK for
+ * unrecognised shapes, so it answers "how long might the gap be" and never "is this readable" —
+ * an unparseable schedule and a genuinely monthly one are byte-identical in its output. That
+ * conflation IS the 31-day false-clear guard found.
+ */
+export function isScheduleParseable(schedule: string, nowMs = Date.now()): boolean {
+  if (typeof schedule !== 'string' || schedule.trim() === '') return false;
+  // Interval shorthand ("4h", "30m") — parseDurationMs returns NaN when it cannot read it.
+  if (!isNaN(parseDurationMs(schedule))) return true;
+  // 5-field cron expression — nextFireFromCron returns NaN when it cannot read it.
+  return !isNaN(nextFireFromCron(schedule, nowMs));
+}
 
 /**
  * Compute health for a single cron given its summary row and recent executions.
@@ -185,7 +215,10 @@ export function computeHealth(
     // a month: guard reproduced '@daily' and '0 9 * * MON' reading HEALTHY on this branch while
     // the base correctly said never-fired. My widening turned a true positive into a false clear,
     // which is the failure direction this whole change exists to remove.
-    const parseable = nextFire !== 'unknown';
+    // DERIVED HERE, NOT READ FROM `row.nextFire` — see isScheduleParseable above. The old form
+    // (`nextFire !== 'unknown'`) delegated the safety property of this gate to whoever built the
+    // row, and only one caller in the tree happens to build it correctly.
+    const parseable = isScheduleParseable(cron.schedule, nowMs);
     const createdMs = cron.created_at ? new Date(cron.created_at).getTime() : null;
     const dueYet = createdMs !== null && !isNaN(createdMs)
       ? nowMs - createdMs > expectedIntervalMs
