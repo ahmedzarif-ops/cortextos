@@ -37,36 +37,15 @@ import {
   validateLifecycleStatusOptions,
 } from '../../../src/cli/lifecycle';
 import { CORTEXTOS_VERSION } from '../../../src/version';
+import { scrubLeakedGitEnv } from '../../helpers/git-env';
 
 // THIS FILE SHELLS OUT TO `git` 28 TIMES, EVERY ONE WITH `cwd` SET TO A TEMP DIRECTORY.
 // That is correct, and it is not enough: GIT_DIR OVERRIDES cwd-based discovery. Run under a
 // git hook — which is what `npm test` is during a pre-push — every one of those calls
 // retargets the real repository, and the five `git commit` sites below land five commits on
-// the branch being pushed.
-const LEAKED_GIT_ENV = [
-  'GIT_DIR',
-  'GIT_WORK_TREE',
-  'GIT_INDEX_FILE',
-  'GIT_OBJECT_DIRECTORY',
-  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
-  'GIT_COMMON_DIR',
-  'GIT_PREFIX',
-  'GIT_QUARANTINE_PATH',
-] as const;
-const savedGitEnv = new Map<string, string | undefined>();
-for (const key of LEAKED_GIT_ENV) {
-  savedGitEnv.set(key, process.env[key]);
-  delete process.env[key];
-}
-
-afterAll(() => {
-  // Restore, so this file is a good citizen even though vitest gives it its own process.
-  // Leaving a mutated environment behind is how the defect above happens to someone else.
-  for (const [key, value] of savedGitEnv) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-});
+// the branch being pushed. See tests/helpers/git-env.ts.
+const restoreGitEnv = scrubLeakedGitEnv();
+afterAll(restoreGitEnv);
 
 const tempRoots: string[] = [];
 const originalInstanceId = process.env.CTX_INSTANCE_ID;

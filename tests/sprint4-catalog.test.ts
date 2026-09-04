@@ -1,8 +1,15 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
+import { scrubLeakedGitEnv } from './helpers/git-env';
+
+// This file shells out to `git` with `cwd` set to a temp dir. GIT_DIR overrides that,
+// so under the pre-push hook these calls retarget the real repository. See
+// tests/helpers/git-env.ts.
+const restoreGitEnv = scrubLeakedGitEnv();
+afterAll(restoreGitEnv);
   browseCatalog,
   installCommunityItem,
   prepareSubmission,

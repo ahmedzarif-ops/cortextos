@@ -1,10 +1,17 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
 import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../../../src/bus/system';
 import type { BusPaths } from '../../../src/types';
+import { scrubLeakedGitEnv } from '../../helpers/git-env';
+
+// This file shells out to `git` with `cwd` set to a temp dir. GIT_DIR overrides that,
+// so under the pre-push hook these calls retarget the real repository. See
+// tests/helpers/git-env.ts.
+const restoreGitEnv = scrubLeakedGitEnv();
+afterAll(restoreGitEnv);
 
 function makePaths(testDir: string, agent: string = 'test-agent'): BusPaths {
   return {
