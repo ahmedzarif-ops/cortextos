@@ -281,6 +281,7 @@ def _embed_backoffs():
     plus a non-zero exit is the shape.
     """
     DEFAULT = (5, 15, 45)
+    MIN_ATTEMPTS = 2          # floor: the knob must not become "retry never" — see below
     MAX_ATTEMPTS = 6          # ceiling: the knob must not become "retry more"
     MAX_BACKOFF_S = 120.0     # a single sleep longer than this reads as a hang
 
@@ -304,6 +305,21 @@ def _embed_backoffs():
     # total 65s, and a longer stall reads as a hang, which is a worse failure than a loud one.
     # This knob exists so TESTS need not sleep 65s — not to raise the production ceiling.
     vals = [min(max(v, 0.0), MAX_BACKOFF_S) for v in vals[:MAX_ATTEMPTS]]
+
+    # ⛔ THE CLAMP HAD A CEILING AND NO FLOOR (guard's ride-along on PR #6, 2026-09-04).
+    # `len(backoffs)` IS the attempt count in _retry_transient. So MMRAG_EMBED_BACKOFFS=0 parsed
+    # to (0.0,) — ONE attempt, retries disabled by environment variable. That is precisely the
+    # state this PR exists to remove, reachable by a single character of config, and it fails
+    # QUIETLY: an ingest that dies on the first transient 429 looks exactly like an ingest that
+    # died on a real outage. The empty-parse guard above catches "zero attempts"; nothing caught
+    # "one attempt", and one attempt is not a retry.
+    #
+    # Padded from DEFAULT rather than by repeating the caller's last value: repeating `0` would
+    # give two back-to-back calls with no gap, which is not a retry against a 429 so much as a
+    # second way to fail. The default's own second step is the honest fill.
+    while len(vals) < MIN_ATTEMPTS:
+        vals.append(min(DEFAULT[min(len(vals), len(DEFAULT) - 1)], MAX_BACKOFF_S))
+
     return tuple(vals)
 
 

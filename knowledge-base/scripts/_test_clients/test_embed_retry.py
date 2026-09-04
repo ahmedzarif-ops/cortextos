@@ -144,6 +144,10 @@ def test_backoffs_knob_is_clamped():
             ("", (5, 15, 45), "unset falls back"),
             ("junk", (5, 15, 45), "unparseable falls back"),
             ("0,0,0", (0.0, 0.0, 0.0), "tests can still skip sleeps"),
+            # guard's ride-along: len(backoffs) IS the attempt count, so a single value
+            # meant ONE attempt -- retries disabled by env, which is the bug this PR fixes.
+            ("0", (0.0, 15), "a single 0 is padded to two attempts, not 'retry never'"),
+            ("5", (5.0, 15), "a single value is padded from DEFAULT, not by repeating itself"),
         ]
         for raw, want, why in cases:
             os.environ["MMRAG_EMBED_BACKOFFS"] = raw
@@ -164,14 +168,31 @@ def test_backoffs_knob_is_clamped():
         _check("negatives clamp to 0 rather than reaching time.sleep",
                all(v >= 0 for v in got), "got %r" % (got,))
 
-        # THE ASSERTION THAT MATTERS: no env value can produce zero attempts.
+        # THE ASSERTION THAT MATTERS, AND GUARD MOVED ITS BOUNDARY.
+        #
+        # It was stated as a SET -- "no env value yields zero attempts" -- rather than as cases,
+        # deliberately, so the next bad input would be covered without being enumerated. It was
+        # still WRONG, because it was set at the wrong threshold: ZERO attempts means zero API
+        # calls, but ONE attempt means zero RETRIES, and this PR exists because a call had no
+        # retry. `MMRAG_EMBED_BACKOFFS=0` walked straight through the old check.
+        #
+        # ⇒ A set-shaped assertion is only as good as the boundary it is stated at, and stating
+        #   it as a set is exactly what makes the boundary easy to stop looking at.
+        MIN_ATTEMPTS = 2
         worst = []
-        for raw in [",", ",,,", " , , ", "", "junk", "-1", "0"]:
+        for raw in [",", ",,,", " , , ", "", "junk", "-1", "0", "0.0", "1", "  7  ", "1,", ",1"]:
             os.environ["MMRAG_EMBED_BACKOFFS"] = raw
-            if len(mmrag._embed_backoffs()) == 0:
-                worst.append(raw)
-        _check("NO env value yields zero attempts (zero attempts = zero API calls)",
-               worst == [], "these gave 0 attempts: %r" % worst)
+            n = len(mmrag._embed_backoffs())
+            if n < MIN_ATTEMPTS:
+                worst.append((raw, n))
+        _check("NO env value yields fewer than %d attempts (1 attempt = 0 retries)" % MIN_ATTEMPTS,
+               worst == [], "these gave too few attempts: %r" % worst)
+
+        # POSITIVE CONTROL for the sweep above: without it, a _embed_backoffs() that returned a
+        # huge constant for everything would pass the whole check. The ceiling must still hold.
+        os.environ["MMRAG_EMBED_BACKOFFS"] = "1,2,3,4,5,6,7,8,9"
+        _check("the floor did not disable the ceiling", len(mmrag._embed_backoffs()) <= 6,
+               "got %d" % len(mmrag._embed_backoffs()))
     finally:
         if saved is None:
             os.environ.pop("MMRAG_EMBED_BACKOFFS", None)
