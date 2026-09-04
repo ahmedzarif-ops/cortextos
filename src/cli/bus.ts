@@ -27,6 +27,98 @@ import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
 import type { Priority, Task, TaskStatus, EventCategory, EventSeverity, ApprovalCategory, ApprovalStatus, OrgContext, CronDefinition } from '../types/index.js';
 
 /**
+ * Resolve the timezone and day-mode window for day/night detection.
+ *
+ * PRECEDENCE, and the order is the point: explicit --timezone flag > the AGENT's config.json >
+ * the ORG's context.json > undefined (detectDayNightMode then applies its declared defaults).
+ *
+ * ⛔ WHY THIS EXISTS (sentinel, 2026-09-04): update-heartbeat previously passed the flag through
+ * and passed the literal 'UTC' when it was absent. HEARTBEAT.md instructs every seat to call
+ * update-heartbeat with NO flag, so the entire fleet computed its mode in UTC while the org
+ * declared America/Chicago — five hours off, erring toward DAY DURING THE NIGHT.
+ *
+ * ⭐ AND THE CONFIG ALREADY HELD THE ANSWER. Both files below carry `timezone`,
+ * `day_mode_start` and `day_mode_end`, correctly filled in, and nothing read them. This is not a
+ * missing-configuration bug; it is a configuration that was never consulted — which looks
+ * identical from the outside and is why it survived.
+ *
+ * Every read is best-effort: a missing or malformed file must not stop a heartbeat. A heartbeat
+ * that fails to write is a seat that reads as DEAD, which is a far worse failure than a wrong mode.
+ */
+export function resolveModeSettings(
+  frameworkRoot: string,
+  org: string,
+  agentName: string,
+  flagTimezone?: string,
+): { timezone?: string; dayModeStart?: string; dayModeEnd?: string } {
+  const out: { timezone?: string; dayModeStart?: string; dayModeEnd?: string } = {};
+
+  const readJson = (p: string): Record<string, unknown> | null => {
+    try {
+      if (!existsSync(p)) return null;
+      return JSON.parse(readFileSync(p, 'utf-8')) as Record<string, unknown>;
+    } catch {
+      return null; // malformed config must never block a heartbeat
+    }
+  };
+
+  const str = (v: unknown): string | undefined =>
+    typeof v === 'string' && v.trim() !== '' ? v : undefined;
+
+  if (frameworkRoot) {
+    const agentCfg = readJson(join(frameworkRoot, 'orgs', org, 'agents', agentName, 'config.json'))
+      ?? readJson(join(frameworkRoot, 'agents', agentName, 'config.json'));
+    const orgCtx = readJson(join(frameworkRoot, 'orgs', org, 'context.json'));
+
+    // Agent overrides org, field by field — a seat may legitimately keep different hours from the
+    // org without having to restate the timezone, so these are NOT resolved as one block.
+    out.timezone = str(agentCfg?.timezone) ?? str(orgCtx?.timezone);
+    out.dayModeStart = str(agentCfg?.day_mode_start) ?? str(orgCtx?.day_mode_start);
+    out.dayModeEnd = str(agentCfg?.day_mode_end) ?? str(orgCtx?.day_mode_end);
+  }
+
+  // The explicit flag wins over everything — it is the documented override and the only way to
+  // ask "what would this seat's mode be elsewhere".
+  if (flagTimezone) out.timezone = flagTimezone;
+
+  return out;
+}
+
+/**
+ * Build the options object handed to updateHeartbeat.
+ *
+ * ⛔ THIS EXISTS AS A NAMED, EXPORTED FUNCTION FOR ONE REASON: THE BUG LIVED IN THE SEAM, AND A SEAM
+ * INSIDE A COMMANDER ACTION CANNOT BE TESTED (sentinel, 2026-09-04).
+ *
+ * The original defect was never in detectDayNightMode and never in the config — it was in the single
+ * line that WIRED them, which passed the flag through and substituted 'UTC' when it was absent.
+ * Proof that this is not theoretical: with detectDayNightMode and resolveModeSettings each tested
+ * directly, a mutant restoring `timezone: opts.timezone` at the call site PASSED ALL 19 TESTS.
+ * Both halves were covered and the joint was not — which is exactly where the fleet-wide fault was.
+ *
+ * ⭐ Testing the two ends and not the joint is how a defect survives a suite that looks thorough.
+ * Extracting the joint is the artifact-shaped fix: the wiring is now something an assertion can hold.
+ */
+export function buildHeartbeatOptions(
+  frameworkRoot: string,
+  org: string,
+  agentName: string,
+  opts: { task?: string; timezone?: string; interval?: string },
+  displayName?: string,
+): { org: string; timezone?: string; dayModeStart?: string; dayModeEnd?: string; loopInterval?: string; currentTask?: string; displayName?: string } {
+  const mode = resolveModeSettings(frameworkRoot, org, agentName, opts.timezone);
+  return {
+    org,
+    timezone: mode.timezone,
+    dayModeStart: mode.dayModeStart,
+    dayModeEnd: mode.dayModeEnd,
+    loopInterval: opts.interval,
+    currentTask: opts.task,
+    displayName,
+  };
+}
+
+/**
  * Check if the org requires deliverables and the task has none attached.
  * Returns an error message if the transition should be blocked, or null if allowed.
  */
@@ -487,13 +579,9 @@ busCommand
       }
     }
 
-    updateHeartbeat(paths, env.agentName, status, {
-      org: env.org,
-      timezone: opts.timezone,
-      loopInterval: opts.interval,
-      currentTask: opts.task,
-      displayName,
-    });
+    updateHeartbeat(paths, env.agentName, status, buildHeartbeatOptions(
+      frameworkRoot, env.org, env.agentName, opts, displayName,
+    ));
     // Auto-emit a heartbeat event so the activity feed surfaces any live agent
     // even if the agent itself forgets to call log-event. This makes the
     // dashboard "agents" list derive from heartbeats, not just explicit events.
