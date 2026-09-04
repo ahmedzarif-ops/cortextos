@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync, unlinkSync, appendFileSync } from 'fs';
 import { join } from 'path';
-import type { Task, Priority, TaskStatus, BusPaths, StaleTaskReport, ArchiveReport } from '../types/index.js';
+import type { Task, TaskAnnotation, Priority, TaskStatus, BusPaths, StaleTaskReport, ArchiveReport } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { randomDigits } from '../utils/random.js';
 import { validatePriority, validateTaskId } from '../utils/validate.js';
@@ -292,6 +292,78 @@ export function updateTask(
  * status transition, claim, and completion emits one of these so the
  * full lifecycle can be replayed from disk.
  */
+/**
+ * Append a dated, attributed note to a task WITHOUT touching its description.
+ *
+ * The gap this fills: no bus route could correct a task after creation, so
+ * corrections lived in chat prose and were lost to anyone reading the task later.
+ *
+ * WHY THIS IS NOT `appendTaskAudit`. That log is documented as best-effort and
+ * swallows its own write failures — correct for observability, wrong for a
+ * correction. An annotation that silently vanishes is worse than no annotation:
+ * the reader sees a task with no note and concludes there was nothing to say.
+ * So this writes into the task record itself and THROWS on failure.
+ *
+ * `description` is never modified. A correction is a new fact about the task, not
+ * a replacement for what was originally asked; keeping both is what lets a reader
+ * see that the ask changed, and when, and who changed it.
+ */
+export function annotateTask(
+  paths: BusPaths,
+  taskId: string,
+  text: string,
+  agent: string,
+): TaskAnnotation {
+  validateTaskId(taskId);
+
+  // Reject an empty note loudly rather than recording a blank one. A blank
+  // annotation is indistinguishable from "someone looked and had nothing to add",
+  // which is a claim this command has no business making on the writer's behalf.
+  const body = (text ?? '').trim();
+  if (!body) {
+    throw new Error('annotate-task: note text is empty. Pass the note, or do not annotate.');
+  }
+  const who = (agent ?? '').trim();
+  if (!who) {
+    throw new Error('annotate-task: no agent identity. Set CTX_AGENT_NAME or pass --agent.');
+  }
+
+  // A missing task directory IS "not found" — it must not surface as a path-type error
+  // from deeper in the stack. The caller asked whether this task exists; answer that
+  // question, in the caller's vocabulary.
+  let filePath: string | null = null;
+  try {
+    filePath = findTaskFile(paths, taskId);
+  } catch {
+    filePath = null;
+  }
+  if (!filePath) {
+    throw new Error(`Task ${taskId} not found`);
+  }
+
+  const before = readFileSync(filePath, 'utf-8');
+  const task: Task = JSON.parse(before);
+  const descriptionBefore = task.description;
+
+  const entry: TaskAnnotation = {
+    ts: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    agent: who,
+    text: body,
+  };
+  task.annotations = [...(task.annotations ?? []), entry];
+  task.updated_at = entry.ts;
+
+  // The invariant, asserted rather than trusted: appending a note must not have
+  // altered the description. Cheap, and it fails here instead of silently later.
+  if (task.description !== descriptionBefore) {
+    throw new Error(`annotate-task: refusing to write — description changed for ${taskId}`);
+  }
+
+  atomicWriteSync(filePath, JSON.stringify(task));
+  appendTaskAudit(paths, taskId, { event: 'update', agent: who, note: `annotated: ${body}` });
+  return entry;
+}
+
 export interface TaskAuditEntry {
   ts: string; // ISO 8601
   event: 'create' | 'claim' | 'update' | 'complete';

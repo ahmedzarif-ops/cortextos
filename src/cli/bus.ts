@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
 import { validateAgentName, validateTaskId } from '../utils/validate.js';
-import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
+import { annotateTask, createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
@@ -174,6 +174,26 @@ busCommand
       const desc = opts.desc ? ` — ${opts.desc.slice(0, 120)}` : '';
       sendMessage(assigneePaths, env.agentName, opts.assignee, 'normal',
         `Task assigned: [${opts.priority}] ${title}${desc} (id: ${taskId})`);
+    }
+  });
+
+busCommand
+  .command('annotate-task')
+  .argument('<id>', 'Task ID')
+  .argument('<text>', 'Note to append (dated and attributed; the description is not touched)')
+  .description("Append a dated, attributed note to a task without rewriting its description")
+  .action((id: string, text: string) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    try {
+      const entry = annotateTask(paths, id, text, env.agentName);
+      console.log(`Annotated ${id} at ${entry.ts} by ${entry.agent}`);
+    } catch (err) {
+      // Fail loudly and non-zero. A correction that reports success without
+      // being written is worse than no correction: the next reader sees a task
+      // with no note and concludes there was nothing to add.
+      console.error(`ERROR: ${(err as Error).message}`);
+      process.exit(1);
     }
   });
 

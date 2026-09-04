@@ -38,6 +38,15 @@ export interface TaskOutput {
   label?: string;
 }
 
+/** One note appended to a task after creation. Never mutates the description. */
+export interface TaskAnnotation {
+  /** ISO 8601, second precision (matches the audit log's format). */
+  ts: string;
+  /** Who wrote it. Attribution is the point: a correction with no author is a rumour. */
+  agent: string;
+  text: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -57,6 +66,15 @@ export interface Task {
   due_date: string | null;
   archived: boolean;
   result?: string;
+  /**
+   * Dated, attributed notes appended after creation.
+   *
+   * Separate from `description` ON PURPOSE: the description is what the task was
+   * ASSIGNED as, and rewriting it destroys the record of what was originally asked.
+   * A correction is a new fact about the task, not a replacement for the old one —
+   * so annotations accumulate and `description` stays byte-identical forever.
+   */
+  annotations?: TaskAnnotation[];
   /** Linked deliverables (files saved via `cortextos bus save-output`). */
   outputs?: TaskOutput[];
   /**
