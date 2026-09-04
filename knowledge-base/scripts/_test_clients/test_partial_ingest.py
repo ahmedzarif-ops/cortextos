@@ -251,6 +251,10 @@ def test_skipped_counted_for_a_single_file():
         _check("second run adds nothing", "Ingested 0 new chunk(s)" in out2, detail=out2[-200:])
         _check("and says SKIPPED rather than staying silent",
                "Skipped: 1" in out2, detail=out2[-300:])
+        # BYTE-STABLE COUPLING WITH #7: city's wrapper parses these two strings literally.
+        # Asserted here so a reword breaks a test rather than breaking city's parser silently.
+        _check("prints the literal 'Already present (0 new chunk(s))' that #7's parser reads",
+               "Already present (0 new chunk(s))" in out2, detail=out2[-300:])
         _check("a no-op re-ingest is not an error", "Errors:" not in out2, detail=out2[-200:])
 
 

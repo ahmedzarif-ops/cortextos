@@ -1155,6 +1155,13 @@ def cmd_ingest(args):
         if count > 0:
             print(f"{indent}Added {count} chunk(s)")
         else:
+            # ⚠ BYTE-STABLE COUPLING WITH cortextos #7 (city u6mtz, 891cafb). The kb-ingest wrapper
+            # parses "Already present" and "Added N chunk(s)" LITERALLY to derive per-file status.
+            # Do not reword either string without telling city — a parser keyed on prose is only as
+            # stable as the prose, and this is the seam between two PRs that touch one function.
+            # The file branch used to print the filename and then go SILENT on a no-op, so a
+            # fully-present file was indistinguishable from one that produced no output at all.
+            print(f"{indent}Already present (0 new chunk(s))")
             # SKIPPED IS COUNTED ON BOTH BRANCHES NOW. It used to be incremented only in the
             # DIRECTORY branch, so re-ingesting a single already-present file gave
             # total=0, skipped=0 — which any caller gating on "did it do anything" reads as
