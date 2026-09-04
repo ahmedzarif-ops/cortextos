@@ -1084,6 +1084,11 @@ def cmd_ingest(args):
     skipped = 0
     errors = 0
     missing = 0
+    # Counted separately from `skipped` ON PURPOSE. `skipped` is incremented only in
+    # the directory branch, so a single already-present FILE leaves it at 0 — and an exit
+    # rule keyed on it calls a correct no-op a failure. `processed` means "this source was
+    # handled and did not raise", which is true whether it added chunks or had none to add.
+    processed = 0
     paths_given = bool(args.paths)
 
     try:
@@ -1109,8 +1114,11 @@ def cmd_ingest(args):
                 try:
                     count = ingest_file(client, config, collection, p)
                     total += count
+                    processed += 1
                     if count > 0:
                         print(f"  Added {count} chunk(s)")
+                    else:
+                        print("  Already present (0 new chunk(s))")
                 except Exception as e:
                     print(f"  ERROR: {e}")
                     errors += 1
@@ -1143,7 +1151,11 @@ def cmd_ingest(args):
     # nothing raised.
     if errors or missing:
         return 1
-    if total == 0 and skipped == 0 and paths_given:
+    # Fail only when NOTHING was handled. Deliberately keyed on `processed`, not on
+    # `skipped`: a re-ingest of an already-complete file legitimately adds 0 chunks, and
+    # calling that a failure would make a fleet-wide re-ingest report failure on every seat
+    # whose memory was already indexed — the exact opposite of the defect being fixed.
+    if total == 0 and processed == 0 and paths_given:
         return 1
     return 0
 

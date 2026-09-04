@@ -74,4 +74,34 @@ describe('parseIngestSummary reads the tool instead of trusting it', () => {
     const r = parseIngestSummary('We should have Ingested more chunks today.');
     expect(r.ingested).toBeNull();
   });
+
+  // REGRESSION — a correct no-op must not read as a failure.
+  //
+  // mmrag increments `skipped` ONLY in its directory branch, so re-ingesting a single
+  // already-complete FILE yields total=0 AND skipped=0. An exit rule keyed on `skipped`
+  // therefore calls a correct no-op a failure, which would have made a fleet-wide
+  // re-ingest report failure on every seat whose memory was already indexed — the exact
+  // inverse of the defect this suite exists to catch. Measured live before the fix: rc=1.
+  it('an already-present file is handled, not failed', () => {
+    const out = [
+      'Ingesting: 2026-09-03.md',
+      '  Already present (0 new chunk(s))',
+      '',
+      "Done! Ingested 0 new chunk(s) into 'agent-city'",
+    ].join('\n');
+    const parsed = parseIngestSummary(out);
+    expect(parsed.ingested).toBe(0);
+    expect(parsed.files).toHaveLength(1);
+    expect(parsed.files[0].status).toBe('already-present');
+    expect(parsed.files[0].name).toBe('2026-09-03.md');
+  });
+
+  // POSITIVE CONTROL for the line above: a source announced and then NOT resolved is still
+  // a failure. Without this, "treat unresolved as fine" would satisfy the test above.
+  it('a source announced but never resolved is still failed', () => {
+    const parsed = parseIngestSummary(
+      ["Ingesting: ghost.md", "", "Done! Ingested 0 new chunk(s) into 'agent-city'"].join('\n'),
+    );
+    expect(parsed.files[0].status).toBe('failed');
+  });
 });

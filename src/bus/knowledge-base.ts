@@ -279,7 +279,7 @@ export interface IngestResult {
 
 export interface IngestFileOutcome {
   name: string;
-  status: 'added' | 'failed' | 'missing';
+  status: 'added' | 'already-present' | 'failed' | 'missing';
   chunks: number | null;
 }
 
@@ -423,9 +423,19 @@ export function ingestKnowledgeBase(
     return { ok: false, ingested: parsed.ingested, errors: parsed.errors, reason: 'tool-failed' };
   }
 
-  if (parsed.ingested === 0 && parsed.skipped === 0 && paths.length > 0) {
+  // Fail only when NOTHING was handled.
+  //
+  // This deliberately does NOT key on `skipped`: mmrag increments that counter only in its
+  // directory branch, so a single already-present FILE leaves it at 0. Keyed on `skipped`,
+  // a re-ingest of already-complete memory reports FAILURE — which would have broken a
+  // fleet-wide re-ingest on every seat that was already up to date, the exact inverse of
+  // the defect this fixes. `handled` counts sources that reached a real outcome.
+  const handled = parsed.files.filter(
+    (f) => f.status === 'added' || f.status === 'already-present',
+  ).length;
+  if (parsed.ingested === 0 && parsed.skipped === 0 && handled === 0 && paths.length > 0) {
     console.error(
-      `ERROR: ingest indexed 0 chunks from ${paths.length} source(s) and skipped none. ` +
+      `ERROR: ingest indexed 0 chunks from ${paths.length} source(s) and handled none. ` +
       'A run asked to index something that indexed nothing has not succeeded.',
     );
     return { ok: false, ingested: 0, errors: parsed.errors, reason: 'ingested-nothing' };
@@ -471,6 +481,15 @@ export function parseIngestSummary(output: string): {
     const added = raw.match(/^\s+Added\s+(\d+)\s+chunk/);
     if (added && pending !== null) {
       files.push({ name: pending, status: 'added', chunks: Number(added[1]) });
+      pending = null;
+      continue;
+    }
+    // A file already fully indexed adds nothing and that is a CORRECT outcome, not a
+    // failure. Without this it fell through to "announced but never resolved" below and
+    // was reported as failed — which would have called every already-complete source in
+    // a fleet re-ingest broken.
+    if (/^\s+Already present/.test(raw) && pending !== null) {
+      files.push({ name: pending, status: 'already-present', chunks: 0 });
       pending = null;
       continue;
     }
