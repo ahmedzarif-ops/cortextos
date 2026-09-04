@@ -201,3 +201,37 @@ export function sanitizeForPtyInjection(input: string): string {
       '$1[quoted] $2',
     );
 }
+
+/**
+ * Reject an empty or whitespace-only cron prompt.
+ *
+ * WHY THIS EXISTS (sentinel, 2026-09-04, task_1788527435071_76924227): I did this to my own seat.
+ * A heredoc did not inherit a shell variable, so `cat` of the intended prompt file failed and the
+ * shell passed an EMPTY STRING to `cortextos bus update-cron --prompt ""`. It was ACCEPTED, WRITTEN,
+ * and reported `Updated cron 'unpushed-watch' for sentinel` at rc=0. The cron survived with an empty
+ * prompt — a scheduled job that fires on time and does nothing, while every liveness signal stays
+ * green, which is this seat's own thesis turned on its own tooling.
+ *
+ * ⛔ THE SUCCESS LINE IS THE DEFECT, NOT THE MISSING VALIDATION. `rc=0` plus "Updated" is
+ * indistinguishable from a real update, so nothing downstream can notice: `list-crons` shows the
+ * cron, `fire_count` still increments, and the next fire injects nothing. It was caught only
+ * because the write was verified BY EFFECT afterwards, and it would have gone unnoticed until the
+ * next fire produced no work — at which point the empty prompt looks like an agent that ignored
+ * its cron.
+ *
+ * The check runs INSIDE the write path (addCron / updateCron), not only in the CLI, so a rejected
+ * call leaves crons.json BYTE-UNCHANGED. That is the requirement and it is not an implementation
+ * detail: a version that threw AFTER writing would pass an rc-only test and leave the damage behind.
+ * Sibling of validateMessageText — same class, one command over, found the same day.
+ *
+ * A prompt is only checked when one is SUPPLIED. `update-cron` with no `--prompt` must keep working;
+ * an absent field and an empty one are different requests and only the second is an error.
+ */
+export function validateCronPrompt(prompt: string): void {
+  if (typeof prompt !== 'string' || prompt.trim() === '') {
+    throw new Error(
+      'Cron prompt is empty. A cron must carry at least one non-whitespace character, ' +
+      'or it fires on schedule and injects nothing while reporting success.'
+    );
+  }
+}
