@@ -486,6 +486,142 @@ def test_directory_branch_satisfies_pr7_line_487():
            f"lines={[l for l in lines if 'Added' in l]!r}")
 
 
+def _install_chunks_by_source_fault(monkey, fail_on_call):
+    """Make `mmrag.chunks_by_source` raise on the Nth call and delegate on every other.
+
+    1-based. Call 1 during cmd_ingest is the BASELINE; call 2 is the post-failure READ-BACK.
+    Returns the call counter so a test can assert the fault was actually reached — a fault
+    injector that never fires produces a clean run that looks exactly like a passing test.
+    """
+    real = mmrag.chunks_by_source
+    state = {"calls": 0}
+
+    def shim(collection):
+        state["calls"] += 1
+        if state["calls"] == fail_on_call:
+            raise RuntimeError("injected: collection could not be read back")
+        return real(collection)
+
+    mmrag.chunks_by_source = shim
+    monkey.append(({"chunks_by_source": real}, state))
+    return state
+
+
+def _run_ingest_with_readback_fault(f, fail_on_call, embed_fail_on_call=3):
+    """One mid-file 429 plus a chunks_by_source fault. Returns (stdout, collection, counter)."""
+    col = FakeCollection()
+    monkey = []
+    try:
+        _install(monkey, col, fail_on_call=embed_fail_on_call)
+        counter = _install_chunks_by_source_fault(monkey, fail_on_call)
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            mmrag.cmd_ingest(_Args([str(f)]))
+        return buf.getvalue(), col, counter
+    finally:
+        _restore(monkey)
+
+
+def test_unknown_arm_when_the_readback_fails():
+    print("\n[test 8/10] the UNKNOWN arm — read-back fails AFTER chunks landed (guard emzin)")
+    # ⛔ THIS ARM WAS EXECUTED BY NO TEST. Verified by mutation before writing this, on the suite
+    # at ce16908: DELETING THE ENTIRE `if landed is None:` BRANCH left the suite at 7/7 ALL PASS,
+    # rc=0. The arm carries this PR's own name — "could not tell" must not print as 0 — and it was
+    # the one part of the change nothing exercised.
+    #
+    # THE SCENARIO, and it is the realistic one: the baseline read SUCCEEDS (so the run believes it
+    # can account for a partial), the file then fails mid-way, and the READ-BACK fails. That is a
+    # store that went unreadable between the two reads — the same class of fault that produced the
+    # 11:52Z fleet-wide "empty KB" reading.
+    with tempfile.TemporaryDirectory() as d:
+        f = _write_file(d, "halfway.md", 5)
+        out, col, counter = _run_ingest_with_readback_fault(f, fail_on_call=2)
+
+        # THE FAULT INJECTOR MUST HAVE FIRED. Without this the whole test can pass vacuously on a
+        # run where chunks_by_source was called once, or not at all.
+        _check("the read-back call was actually reached (>=2 calls)",
+               counter["calls"] >= 2, detail=f"calls={counter['calls']}")
+
+        _check("the per-file line says the count is UNKNOWN",
+               "partial count UNKNOWN — could not read the collection back" in out,
+               detail=out[-400:])
+        _check("the summary NAMES the file under PARTIAL COUNT UNKNOWN",
+               "PARTIAL COUNT UNKNOWN (collection could not be read back):" in out
+               and "halfway.md" in out.split("PARTIAL COUNT UNKNOWN")[-1],
+               detail=out[-400:])
+        # The two halves of the defect this PR exists to remove, asserted as MUTUALLY EXCLUSIVE.
+        _check("it does NOT invent a chunk number",
+               "chunk(s) landed" not in out, detail=out[-400:])
+        _check("and it is NOT listed as a known partial",
+               "is now PARTIAL in the store" not in out, detail=out[-400:])
+        _check("it is still counted as an error", "Errors: 1" in out, detail=out[-300:])
+
+        # ⭐ THE CONTROL THAT MAKES THE ARM MEAN SOMETHING: chunks REALLY DID land. If the store
+        # were empty, "UNKNOWN" would be over-reporting and 0 would have been the honest answer.
+        # Read through list's own derivation, after the fault is restored.
+        by_source, _ = col.list_counts()
+        landed_really = by_source.get(str(f.resolve()), {}).get("chunks", 0)
+        _check("CONTROL: chunks DID land, so UNKNOWN is covering a real partial",
+               landed_really > 0, detail=f"list shows {landed_really}")
+        # And the unaccountable chunks are NOT silently added to the total — the total may only
+        # claim what it can prove.
+        _check("the total does not claim the chunks it could not read back",
+               "Ingested 0 new chunk(s)" in out, detail=out[-300:])
+
+
+def test_unknown_arm_when_the_baseline_was_never_taken():
+    print("\n[test 9/10] the UNKNOWN arm — no BASELINE, so no delta is knowable")
+    # THE SECOND, INDEPENDENT ROUTE INTO THE SAME ARM, and test 8 does not cover it: there the
+    # baseline exists and the read-back raises; here `baseline is None` from the start because the
+    # FIRST chunks_by_source call raised. `_landed_since_baseline` returns None on a different
+    # line, and a `return 0` there is invisible to test 8 — the branch is never entered.
+    with tempfile.TemporaryDirectory() as d:
+        f = _write_file(d, "nobaseline.md", 5)
+        out, col, counter = _run_ingest_with_readback_fault(f, fail_on_call=1)
+
+        _check("the baseline call was actually reached", counter["calls"] >= 1,
+               detail=f"calls={counter['calls']}")
+        _check("no baseline means the count is UNKNOWN, not 0",
+               "partial count UNKNOWN — could not read the collection back" in out,
+               detail=out[-400:])
+        _check("it does NOT report '0 chunk(s) landed' as if that were measured",
+               "chunk(s) landed" not in out, detail=out[-400:])
+        _check("the summary names it as an unknown, not as a clean failure",
+               "PARTIAL COUNT UNKNOWN (collection could not be read back):" in out,
+               detail=out[-400:])
+
+        by_source, _ = col.list_counts()
+        landed_really = by_source.get(str(f.resolve()), {}).get("chunks", 0)
+        _check("CONTROL: chunks DID land here too — 0 would have been a false report",
+               landed_really > 0, detail=f"list shows {landed_really}")
+
+
+def test_no_fault_still_reports_a_number():
+    print("\n[test 10/10] CONTROL: with no read-back fault the SAME run reports a NUMBER")
+    # Without this, tests 8 and 9 prove only that a mid-file failure prints UNKNOWN — which a
+    # version that ALWAYS printed UNKNOWN would also satisfy. This is the negative arm: same file,
+    # same 429, no chunks_by_source fault, and the count must come back as a measured number.
+    with tempfile.TemporaryDirectory() as d:
+        f = _write_file(d, "measurable.md", 5)
+        col = FakeCollection()
+        monkey = []
+        try:
+            _install(monkey, col, fail_on_call=3)
+            import io, contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                mmrag.cmd_ingest(_Args([str(f)]))
+            out = buf.getvalue()
+        finally:
+            _restore(monkey)
+
+        _check("a measured count is reported", "chunk(s) landed" in out, detail=out[-400:])
+        _check("and UNKNOWN is NOT printed", "UNKNOWN" not in out, detail=out[-400:])
+        _check("it is named as a real partial", "is now PARTIAL in the store" in out,
+               detail=out[-400:])
+
+
 def main():
     test_partial_is_reported_and_matches_list()
     test_clean_run_still_agrees()
@@ -494,13 +630,16 @@ def main():
     test_negative_delta_is_unknown_not_zero()
     test_output_satisfies_pr7_parser_regexes()
     test_directory_branch_satisfies_pr7_line_487()
+    test_unknown_arm_when_the_readback_fails()
+    test_unknown_arm_when_the_baseline_was_never_taken()
+    test_no_fault_still_reports_a_number()
     print()
     if FAILURES:
         print(f"FAILED: {len(FAILURES)} assertion(s)")
         for f in FAILURES:
             print(f"  - {f}")
         return 1
-    print("ALL PASS (7 scenarios)")
+    print("ALL PASS (10 scenarios)")
     return 0
 
 
