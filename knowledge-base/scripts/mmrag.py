@@ -1083,6 +1083,75 @@ def cmd_ingest(args):
     total = 0
     skipped = 0
     errors = 0
+    # Per-file outcomes: (display_name, landed, error_or_None). A run that half-worked has to be
+    # able to SAY SO per file — an aggregate "Errors: 2" cannot tell you which file is now a
+    # partial document in the store, and a partial document is worse than a missing one because
+    # a query answers from it.
+    outcomes = []
+
+    # BASELINE, taken ONCE before any writing, through the same derivation `list` renders.
+    # This is what makes the partial recoverable at all: the chunk counter lives inside the
+    # handler frame and dies with it on a mid-file raise, so the only place the truth survives
+    # is THE STORE ITSELF. Measure the effect, not the operation.
+    try:
+        baseline, _ = chunks_by_source(collection)
+    except Exception:
+        baseline = None
+
+    def _landed_since_baseline(path):
+        """Chunks this run actually wrote for `path`, read back from the collection.
+
+        Returns None when it cannot be established — NEVER 0, because "nothing landed" and
+        "I could not tell" must not print the same number. A silent 0 here would recreate, one
+        layer down, the exact defect this change exists to remove.
+        """
+        if baseline is None:
+            return None
+        try:
+            now, _ = chunks_by_source(collection)
+        except Exception:
+            return None
+        src = str(Path(path).resolve())
+        before = baseline.get(src, {}).get("chunks", 0)
+        after = now.get(src, {}).get("chunks", 0)
+        return max(after - before, 0)
+
+    def _ingest_one(path, display, indent):
+        """Ingest one file, and make a MID-FILE FAILURE ACCOUNT FOR WHAT IT ALREADY WROTE.
+
+        ⛔ THE DEFECT (city 8j1dj, 2026-09-04): `count` is a local inside the handler and is
+        incremented AFTER `collection.upsert`. On a mid-file 429 the handler unwinds, `count` is
+        never returned, and `total += count` never runs — so 40 chunks that ARE in the store are
+        reported as 0 added, 1 error. The ingest under-reports and `list` disagrees with it, which
+        is precisely how a seat concludes "nothing landed" about a file that is now HALF PRESENT.
+        """
+        nonlocal total, skipped, errors
+        try:
+            count = ingest_file(client, config, collection, path)
+        except Exception as e:
+            landed = _landed_since_baseline(path)
+            errors += 1
+            if landed is None:
+                print(f"{indent}ERROR: {e}")
+                print(f"{indent}  ⚠ partial count UNKNOWN — could not read the collection back")
+                outcomes.append((display, None, e))
+            else:
+                total += landed
+                print(f"{indent}ERROR after {landed} chunk(s) landed: {e}")
+                if landed:
+                    print(f"{indent}  ⚠ {display} is now PARTIAL in the store — queries will answer from it")
+                outcomes.append((display, landed, e))
+            return
+        total += count
+        if count > 0:
+            print(f"{indent}Added {count} chunk(s)")
+        else:
+            # SKIPPED IS COUNTED ON BOTH BRANCHES NOW. It used to be incremented only in the
+            # DIRECTORY branch, so re-ingesting a single already-present file gave
+            # total=0, skipped=0 — which any caller gating on "did it do anything" reads as
+            # failure, though the no-op is correct and expected.
+            skipped += 1
+        outcomes.append((display, count, None))
 
     try:
         for path_str in args.paths:
@@ -1092,26 +1161,10 @@ def cmd_ingest(args):
                 print(f"Ingesting directory: {p} ({len(files)} files)")
                 for f in files:
                     print(f"  Processing: {f.relative_to(p)}")
-                    try:
-                        count = ingest_file(client, config, collection, f)
-                        total += count
-                        if count > 0:
-                            print(f"    Added {count} chunk(s)")
-                        elif count == 0:
-                            skipped += 1
-                    except Exception as e:
-                        print(f"    ERROR: {e}")
-                        errors += 1
+                    _ingest_one(f, str(f.relative_to(p)), "    ")
             elif p.is_file():
                 print(f"Ingesting: {p.name}")
-                try:
-                    count = ingest_file(client, config, collection, p)
-                    total += count
-                    if count > 0:
-                        print(f"  Added {count} chunk(s)")
-                except Exception as e:
-                    print(f"  ERROR: {e}")
-                    errors += 1
+                _ingest_one(p, p.name, "  ")
             else:
                 print(f"NOT FOUND: {p}")
     finally:
@@ -1122,6 +1175,21 @@ def cmd_ingest(args):
         print(f"  Skipped: {skipped} (already existed or empty)")
     if errors:
         print(f"  Errors: {errors}")
+
+    # NAME THE PARTIALS. `Errors: 2` says how many files broke and never says which, nor whether
+    # any of them left half a document behind — and the half-written file is the one that needs a
+    # human decision, because a re-ingest is cheap and a silently partial document is not.
+    partials = [(d, n) for d, n, e in outcomes if e is not None and n]
+    unknowns = [d for d, n, e in outcomes if e is not None and n is None]
+    if partials:
+        print("  PARTIAL — these files failed mid-way AFTER writing chunks:")
+        for d, n in partials:
+            print(f"    {d}: {n} chunk(s) landed, then failed")
+    if unknowns:
+        print("  PARTIAL COUNT UNKNOWN (collection could not be read back):")
+        for d in unknowns:
+            print(f"    {d}")
+
     print(_tracker.summary_line())
 
 
@@ -1415,6 +1483,29 @@ def cmd_status(args):
             print(f"  {t}: {c} chunks")
 
 
+def chunks_by_source(collection):
+    """Group every chunk in a collection by its `source` metadata.
+
+    THE ONE IMPLEMENTATION, ON PURPOSE (sentinel, 2026-09-04). `cmd_list` RENDERS this and the
+    partial-ingest accounting in `cmd_ingest` MEASURES against it. Because both go through this
+    function, "the count ingest reported" and "the delta `list` shows" are the same derivation
+    rather than two derivations that happen to agree — and a second, independently-written counter
+    would be free to disagree with the one operators actually read.
+
+    Returns (by_source, total_chunks). by_source maps the resolved source path to
+    {"type", "chunks", "filename"} — the shape cmd_list already printed.
+    """
+    by_source = {}
+    all_data = collection.get(include=["metadatas"])
+    for meta in (all_data["metadatas"] or []):
+        src = meta.get("source", "unknown")
+        if src not in by_source:
+            by_source[src] = {"type": meta.get("type", "unknown"), "chunks": 0,
+                              "filename": meta.get("filename", "")}
+        by_source[src]["chunks"] += 1
+    return by_source, len(all_data["ids"])
+
+
 def cmd_list(args):
     config = load_config()
     collection_name = args.collection or config.get("default_collection", "default")
@@ -1425,21 +1516,12 @@ def cmd_list(args):
         print("No data found.")
         return
 
-    all_data = collection.get(include=["metadatas"])
-    if not all_data["ids"]:
+    by_source, total_chunks = chunks_by_source(collection)
+    if not total_chunks:
         print("No documents in collection.")
         return
 
-    # Group by source
-    by_source = {}
-    for meta in all_data["metadatas"]:
-        src = meta.get("source", "unknown")
-        if src not in by_source:
-            by_source[src] = {"type": meta.get("type", "unknown"), "chunks": 0,
-                              "filename": meta.get("filename", "")}
-        by_source[src]["chunks"] += 1
-
-    print(f"Collection: {collection_name} ({len(by_source)} files, {len(all_data['ids'])} chunks)")
+    print(f"Collection: {collection_name} ({len(by_source)} files, {total_chunks} chunks)")
     print(f"{'Source':<60} {'Type':<15} {'Chunks':<8}")
     print("-" * 85)
     for src, info in sorted(by_source.items()):
