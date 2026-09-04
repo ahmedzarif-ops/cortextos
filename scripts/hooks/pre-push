@@ -13,6 +13,25 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+# GIT SETS THESE WHEN IT RUNS A HOOK, AND EVERY CHILD PROCESS INHERITS THEM.
+#
+# GIT_DIR in particular OVERRIDES cwd-based repository discovery, so a `git` call that passes
+# `cwd: <a temp dir>` — which reads as perfectly scoped — writes into the repository being
+# pushed instead. The test suite does exactly that, so running the suite THROUGH THIS HOOK
+# rewrites the branch the hook is gating.
+#
+# Measured 2026-09-04 on tests/unit/lifecycle/legacy-status.test.ts, one variable changed:
+#   without GIT_DIR:  45/45 pass, 0 commits, 0 files dirty
+#   with    GIT_DIR:  3 fail, FIVE "fixture" commits on HEAD, 29 files dirty
+# The three failures are caused by the leak too, so the hook was manufacturing the very red it
+# then refused to push on.
+#
+# Unset here rather than only in the tests: this is the ONE place that protects every test,
+# including the ones that do not exist yet. The tests are hardened separately, because a test
+# that is only safe when its caller behaves is not a safe test.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_PREFIX GIT_QUARANTINE_PATH
+
 echo "[pre-push] Running build..."
 if ! npm run build --silent; then
   echo ""
