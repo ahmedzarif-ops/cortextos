@@ -22,6 +22,7 @@ import {
 } from '../telegram/lifecycle.js';
 import { collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
 import { stripControlChars } from '../utils/validate.js';
+import { assertNoHermesNativeCronCollision } from '../utils/hermes-runtime.js';
 import { processMediaMessage } from '../telegram/media.js';
 import { stripBom } from '../utils/strip-bom.js';
 import { BuzzRelayClient, BuzzDispatcher, loadBuzzConfig, type NostrEvent } from '../buzz/index.js';
@@ -2001,6 +2002,22 @@ export class AgentManager {
   reloadCrons(agentName: string): boolean {
     const scheduler = this.cronSchedulers.get(agentName);
     if (scheduler) {
+      const entry = this.agents.get(agentName);
+      if (entry?.process['config']?.runtime === 'hermes'
+        && entry.process['config']?.hermes_cron_ownership === 'cortextos') {
+        try {
+          assertNoHermesNativeCronCollision(
+            entry.process['config']?.hermes_profile,
+            agentName,
+            process.env['HERMES_HOME'],
+          );
+        } catch (err) {
+          scheduler.stop();
+          this.cronSchedulers.delete(agentName);
+          console.error(`[daemon] Stopped external cron scheduler for Hermes agent "${agentName}": ${err}`);
+          return false;
+        }
+      }
       scheduler.reload();
       console.log(`[agent-manager] Cron scheduler reloaded for ${agentName}`);
       return true;
@@ -2009,10 +2026,11 @@ export class AgentManager {
     const entry = this.agents.get(agentName);
     if (!entry) return false;
 
-    // Hermes manages its own crons natively — no daemon scheduler exists by
-    // design. The reload IS a no-op; report success so the caller does not
-    // retry forever.
-    if (entry.process['config']?.runtime === 'hermes') {
+    // Native-owned Hermes crons have no daemon scheduler. An explicit
+    // cortextOS owner uses the same persistent crons.json scheduler as every
+    // other standing seat.
+    if (entry.process['config']?.runtime === 'hermes'
+      && entry.process['config']?.hermes_cron_ownership !== 'cortextos') {
       return true;
     }
 
@@ -2033,7 +2051,8 @@ export class AgentManager {
    * a Claude-Code `CronCreate` callback would emit so the agent's session sees
    * a normal-looking cron-fire message and handles it with existing skill code.
    *
-   * Hermes agents manage their own cron system natively — skip them here.
+   * Hermes agents default to native cron ownership; those explicitly set to
+   * `cortextos` use this scheduler instead.
    * If crons.json is absent or empty the scheduler starts but has nothing to do;
    * it will pick up new entries on the next `reloadCrons()` call.
    */
@@ -2047,13 +2066,33 @@ export class AgentManager {
     const entry = this.agents.get(agentName);
     if (!entry) return;
 
-    // Hermes manages its own cron scheduling — don't double-schedule
-    if (entry.process['config']?.runtime === 'hermes') {
+    // Native-owned Hermes scheduling must not be double-scheduled.
+    if (entry.process['config']?.runtime === 'hermes'
+      && entry.process['config']?.hermes_cron_ownership !== 'cortextos') {
       console.log(`[daemon] Skipping external cron scheduler for Hermes agent "${agentName}"`);
       return;
     }
+    if (entry.process['config']?.runtime === 'hermes') {
+      try {
+        assertNoHermesNativeCronCollision(
+          entry.process['config']?.hermes_profile,
+          agentName,
+          process.env['HERMES_HOME'],
+        );
+      } catch (err) {
+        console.error(`[daemon] Refusing external cron scheduler for Hermes agent "${agentName}": ${err}`);
+        return;
+      }
+    }
 
     const onFire = async (cron: CronDefinition): Promise<void> => {
+      if (entry.process['config']?.runtime === 'hermes') {
+        assertNoHermesNativeCronCollision(
+          entry.process['config']?.hermes_profile,
+          agentName,
+          process.env['HERMES_HOME'],
+        );
+      }
       // DELIBERATE EXCEPTION to the identity rule: this fires on a timer long
       // after any await and injects by NAME, so a cron fires into whichever
       // instance currently holds the name. That is the intended routing — a cron

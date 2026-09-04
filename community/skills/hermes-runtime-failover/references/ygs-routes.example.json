@@ -1,0 +1,114 @@
+{
+  "trigger": {
+    "metric": "claude_weekly_remaining_percent",
+    "at_or_below": 10,
+    "observed_value": 9,
+    "observed_at_utc": "REPLACE_WITH_FRESH_UTC_TIMESTAMP",
+    "max_age_minutes": 30,
+    "denominator": "percent_remaining",
+    "source": "cortextos-check-usage-api:anthropic-oauth"
+  },
+  "trigger_receipt": {
+    "path": "/absolute/path/to/TRIGGER-RECEIPT.json",
+    "sha256": "REPLACE_WITH_LOWERCASE_SHA256"
+  },
+  "restore": {
+    "day": "Sunday",
+    "time": "15:00",
+    "timezone": "America/Chicago",
+    "occurrence_utc": "REPLACE_WITH_NEXT_SUNDAY_1500_AMERICA_CHICAGO"
+  },
+  "restore_snapshot": {
+    "path": "/absolute/path/to/RESTORE-STATE.json",
+    "sha256": "REPLACE_WITH_LOWERCASE_SHA256",
+    "taken_at_utc": "REPLACE_WITH_SNAPSHOT_UTC_TIMESTAMP",
+    "reason": "REPLACE_WITH_CAPTURE_REASON",
+    "captured_from": "live-seat-configs"
+  },
+  "fleet_snapshot": {
+    "path": "/absolute/path/to/FLEET-SNAPSHOT.json",
+    "sha256": "REPLACE_WITH_LOWERCASE_SHA256",
+    "taken_at_utc": "REPLACE_WITH_SNAPSHOT_UTC_TIMESTAMP",
+    "captured_from": "live-seat-configs"
+  },
+  "spend_snapshot": {
+    "path": "/absolute/path/to/SPEND-ESTIMATE.json",
+    "sha256": "REPLACE_WITH_LOWERCASE_SHA256",
+    "generated_at_utc": "REPLACE_WITH_FRESH_UTC_TIMESTAMP",
+    "currency": "USD",
+    "total_expected_weekly_usd": 12.34
+  },
+  "live_changes": 0,
+  "evidence_max_age_minutes": 240,
+  "cutover": {
+    "canary_seat": "city",
+    "coordinator_seat": "chief",
+    "order": ["city", "social", "growth", "sentinel", "chief"],
+    "restore_order": ["city", "social", "growth", "sentinel", "chief"]
+  },
+  "seats": {
+    "chief": {
+      "runtime": "hermes",
+      "profile": "ygs-chief",
+      "model": "deepseek/deepseek-v4-pro",
+      "provider": "nous",
+      "reasoning": "high",
+      "cron_ownership": "cortextos",
+      "mcp_required": ["context7"]
+    },
+    "growth": {
+      "runtime": "hermes",
+      "profile": "ygs-growth",
+      "model": "deepseek/deepseek-v4-pro",
+      "provider": "nous",
+      "reasoning": "high",
+      "cron_ownership": "cortextos",
+      "mcp_required": ["context7"]
+    },
+    "guard": {
+      "runtime": "codex-app-server",
+      "model": "gpt-5-codex"
+    },
+    "city": {
+      "runtime": "hermes",
+      "profile": "ygs-city",
+      "model": "deepseek/deepseek-v4-flash",
+      "provider": "nous",
+      "reasoning": "high",
+      "cron_ownership": "cortextos",
+      "mcp_required": ["context7"]
+    },
+    "social": {
+      "runtime": "hermes",
+      "profile": "ygs-social",
+      "model": "deepseek/deepseek-v4-pro",
+      "provider": "nous",
+      "reasoning": "high",
+      "cron_ownership": "cortextos",
+      "mcp_required": ["context7"]
+    },
+    "sentinel": {
+      "runtime": "hermes",
+      "profile": "ygs-sentinel",
+      "model": "qwen/qwen3.8-27b",
+      "provider": "nous",
+      "reasoning": "high",
+      "cron_ownership": "cortextos",
+      "mcp_required": ["context7"]
+    }
+  },
+  "mcp_evidence": {
+    "chief": { "context7": { "profile": "ygs-chief", "tested_at_utc": "REPLACE", "connected": true, "tools_discovered": 2, "invocation_id": "REPLACE_UNIQUE_INVOCATION", "session_id": "REPLACE_PROFILE_SESSION", "tool_name": "mcp__context7__resolve_library_id", "result_marker": "/colinhacks/zod", "transcript_file": "/absolute/path/to/transcript.json", "transcript_sha256": "REPLACE", "usage_file": "/absolute/path/to/usage.json", "usage_sha256": "REPLACE" } },
+    "growth": { "context7": { "profile": "ygs-growth", "tested_at_utc": "REPLACE", "connected": true, "tools_discovered": 2, "invocation_id": "REPLACE_UNIQUE_INVOCATION", "session_id": "REPLACE_PROFILE_SESSION", "tool_name": "mcp__context7__resolve_library_id", "result_marker": "/colinhacks/zod", "transcript_file": "/absolute/path/to/transcript.json", "transcript_sha256": "REPLACE", "usage_file": "/absolute/path/to/usage.json", "usage_sha256": "REPLACE" } },
+    "city": { "context7": { "profile": "ygs-city", "tested_at_utc": "REPLACE", "connected": true, "tools_discovered": 2, "invocation_id": "REPLACE_UNIQUE_INVOCATION", "session_id": "REPLACE_PROFILE_SESSION", "tool_name": "mcp__context7__resolve_library_id", "result_marker": "/colinhacks/zod", "transcript_file": "/absolute/path/to/transcript.json", "transcript_sha256": "REPLACE", "usage_file": "/absolute/path/to/usage.json", "usage_sha256": "REPLACE" } },
+    "social": { "context7": { "profile": "ygs-social", "tested_at_utc": "REPLACE", "connected": true, "tools_discovered": 2, "invocation_id": "REPLACE_UNIQUE_INVOCATION", "session_id": "REPLACE_PROFILE_SESSION", "tool_name": "mcp__context7__resolve_library_id", "result_marker": "/colinhacks/zod", "transcript_file": "/absolute/path/to/transcript.json", "transcript_sha256": "REPLACE", "usage_file": "/absolute/path/to/usage.json", "usage_sha256": "REPLACE" } },
+    "sentinel": { "context7": { "profile": "ygs-sentinel", "tested_at_utc": "REPLACE", "connected": true, "tools_discovered": 2, "invocation_id": "REPLACE_UNIQUE_INVOCATION", "session_id": "REPLACE_PROFILE_SESSION", "tool_name": "mcp__context7__resolve_library_id", "result_marker": "/colinhacks/zod", "transcript_file": "/absolute/path/to/transcript.json", "transcript_sha256": "REPLACE", "usage_file": "/absolute/path/to/usage.json", "usage_sha256": "REPLACE" } }
+  },
+  "cron_evidence": {
+    "chief": { "profile": "ygs-chief", "checked_at_utc": "REPLACE", "enabled_native_jobs": 0, "jobs_path": "/Users/guest1/.hermes/profiles/ygs-chief/cron/jobs.json", "jobs_sha256": "absent" },
+    "growth": { "profile": "ygs-growth", "checked_at_utc": "REPLACE", "enabled_native_jobs": 0, "jobs_path": "/Users/guest1/.hermes/profiles/ygs-growth/cron/jobs.json", "jobs_sha256": "absent" },
+    "city": { "profile": "ygs-city", "checked_at_utc": "REPLACE", "enabled_native_jobs": 0, "jobs_path": "/Users/guest1/.hermes/profiles/ygs-city/cron/jobs.json", "jobs_sha256": "absent" },
+    "social": { "profile": "ygs-social", "checked_at_utc": "REPLACE", "enabled_native_jobs": 0, "jobs_path": "/Users/guest1/.hermes/profiles/ygs-social/cron/jobs.json", "jobs_sha256": "absent" },
+    "sentinel": { "profile": "ygs-sentinel", "checked_at_utc": "REPLACE", "enabled_native_jobs": 0, "jobs_path": "/Users/guest1/.hermes/profiles/ygs-sentinel/cron/jobs.json", "jobs_sha256": "absent" }
+  }
+}

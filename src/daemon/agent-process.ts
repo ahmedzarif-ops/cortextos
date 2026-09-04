@@ -4,7 +4,8 @@ import { homedir } from 'os';
 import type { AgentConfig, AgentStatus, CtxEnv } from '../types/index.js';
 import { AgentPTY } from '../pty/agent-pty.js';
 import { CodexAppServerPTY } from '../pty/codex-app-server-pty.js';
-import { HermesPTY, hermesDbExists } from '../pty/hermes-pty.js';
+import { HermesPTY } from '../pty/hermes-pty.js';
+import { hermesDbExists } from '../utils/hermes-runtime.js';
 import { OpencodePTY, opencodeSessionExists } from '../pty/opencode-pty.js';
 import { MessageDedup, injectMessage as injectMessageIntoPty } from '../pty/inject.js';
 import type { TelegramAPI } from '../telegram/api.js';
@@ -934,21 +935,30 @@ export class AgentProcess {
   }
 
   private shouldContinue(): boolean {
-    // Hermes: session continuity is determined by whether the SQLite DB exists.
-    // HERMES_HOME env var overrides the default ~/.hermes path.
-    if (this.config.runtime === 'hermes') {
-      const hermesHome = process.env['HERMES_HOME'];
-      return hermesDbExists(hermesHome);
-    }
-
-    // Check for force-fresh marker (all runtimes honor it).
+    // Check force-fresh before any runtime-specific continuation logic. Hermes
+    // previously returned on state.db existence first, making hard restart
+    // silently continue the old session.
     const forceFreshPath = join(this.env.ctxRoot, 'state', this.name, '.force-fresh');
     if (existsSync(forceFreshPath)) {
       try {
-        const { unlinkSync } = require('fs');
         unlinkSync(forceFreshPath);
       } catch { /* ignore */ }
       return false;
+    }
+
+    // Hermes: session continuity is determined by whether the SQLite DB exists.
+    // The explicit profile keeps each standing seat on its own history DB;
+    // daemon-level HERMES_HOME may relocate the common Hermes root.
+    if (this.config.runtime === 'hermes') {
+      try {
+        return hermesDbExists(this.config.hermes_profile, process.env['HERMES_HOME'], this.name);
+      } catch (err) {
+        // Config defects must not abort the daemon's whole discovery pass. The
+        // subsequent spawn is caught by start() and records this seat crashed
+        // with an actionable validation error while other seats still start.
+        this.log(`Invalid Hermes profile configuration: ${err}`);
+        return false;
+      }
     }
 
     // codex-app-server: session continuity is tracked by the adapter's own

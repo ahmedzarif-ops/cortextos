@@ -8,6 +8,8 @@ import {
   validateEventSeverity,
   validateApprovalCategory,
   validateModel,
+  validateHermesProfile,
+  resolveHermesProfile,
   isValidJson,
   stripControlChars,
   sanitizeForPtyInjection,
@@ -127,10 +129,25 @@ describe('validateModel', () => {
   it('accepts valid models', () => {
     expect(() => validateModel('claude-opus-4-5-20250514')).not.toThrow();
     expect(() => validateModel('claude-haiku-4-5-20251001')).not.toThrow();
+    expect(() => validateModel('deepseek/deepseek-v4-flash')).not.toThrow();
   });
 
   it('rejects invalid models', () => {
     expect(() => validateModel('model; rm -rf /')).toThrow();
+    expect(() => validateModel('~deepseek/deepseek-v4-flash')).toThrow();
+  });
+});
+
+describe('Hermes profile validation', () => {
+  it('accepts an isolated profile and falls back to a legacy agent name', () => {
+    expect(() => validateHermesProfile('city-agent')).not.toThrow();
+    expect(resolveHermesProfile(undefined, 'legacy-agent')).toBe('legacy-agent');
+  });
+
+  it('rejects shared, malformed, and oversized profiles', () => {
+    expect(() => validateHermesProfile('default')).toThrow(/shared/);
+    expect(() => validateHermesProfile('_hidden')).toThrow(/Invalid Hermes profile/);
+    expect(() => validateHermesProfile('a'.repeat(65))).toThrow(/Invalid Hermes profile/);
   });
 });
 

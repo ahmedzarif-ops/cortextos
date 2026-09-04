@@ -111,9 +111,31 @@ export function validateApprovalCategory(category: string): asserts category is 
 }
 
 export function validateModel(model: string): void {
-  if (!/^[a-zA-Z0-9._-]+$/.test(model)) {
-    throw new Error(`Invalid model name '${model}'. Must be alphanumeric with dots and hyphens.`);
+  if (!/^[a-zA-Z0-9._-]+(?:\/[a-zA-Z0-9._-]+)*$/.test(model)) {
+    throw new Error(`Invalid model name '${model}'. Use a fixed model ID with letters, numbers, dots, underscores, hyphens, and optional slash-separated provider segments.`);
   }
+}
+
+const HERMES_PROFILE_REGEX = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+/** Validate a Hermes named profile suitable for an isolated standing seat. */
+export function validateHermesProfile(profile: string): void {
+  if (!HERMES_PROFILE_REGEX.test(profile)) {
+    throw new Error(`Invalid Hermes profile '${profile}'. Expected 1-64 lowercase letters, numbers, underscores, or hyphens, beginning with a letter or number.`);
+  }
+  if (profile === 'default' || profile === 'shared') {
+    throw new Error(`Hermes standing agents require an isolated named profile; '${profile}' is shared.`);
+  }
+}
+
+/**
+ * Resolve an explicit Hermes profile, falling back to the agent name for
+ * legacy Hermes configs created before hermes_profile was introduced.
+ */
+export function resolveHermesProfile(profile: string | undefined, agentName: string): string {
+  const resolved = profile || agentName;
+  validateHermesProfile(resolved);
+  return resolved;
 }
 
 export function isValidJson(str: string): boolean {

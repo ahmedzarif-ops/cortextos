@@ -24,6 +24,9 @@ const mockHermesDbExists = vi.fn().mockReturnValue(false);
 
 vi.mock('../../../src/pty/hermes-pty.js', () => ({
   HermesPTY: function HermesPTY() { return mockPty; },
+}));
+
+vi.mock('../../../src/utils/hermes-runtime.js', () => ({
   hermesDbExists: (...args: unknown[]) => mockHermesDbExists(...args),
 }));
 
@@ -122,28 +125,67 @@ beforeEach(() => {
 describe('AgentProcess - Hermes runtime: shouldContinue', () => {
   it('spawns in fresh mode when Hermes state.db does not exist', async () => {
     mockHermesDbExists.mockReturnValue(false);
-    const ap = new AgentProcess('hermes-agent', mockEnv, { runtime: 'hermes' });
+    const ap = new AgentProcess('hermes-agent', mockEnv, {
+      runtime: 'hermes', hermes_profile: 'hermes-agent',
+    });
     await ap.start();
     expect(mockPty.spawn).toHaveBeenCalledWith('fresh', expect.any(String));
   });
 
   it('spawns in continue mode when Hermes state.db exists', async () => {
     mockHermesDbExists.mockReturnValue(true);
-    const ap = new AgentProcess('hermes-agent', mockEnv, { runtime: 'hermes' });
+    const ap = new AgentProcess('hermes-agent', mockEnv, {
+      runtime: 'hermes', hermes_profile: 'hermes-agent',
+    });
     await ap.start();
     expect(mockPty.spawn).toHaveBeenCalledWith('continue', expect.any(String));
   });
 
-  it('passes HERMES_HOME env var to hermesDbExists', async () => {
+  it('checks the configured profile under the Hermes root', async () => {
     const originalHermesHome = process.env['HERMES_HOME'];
     process.env['HERMES_HOME'] = '/custom/hermes';
     mockHermesDbExists.mockReturnValue(false);
 
+    const ap = new AgentProcess('hermes-agent', mockEnv, {
+      runtime: 'hermes', hermes_profile: 'hermes-agent',
+    });
+    await ap.start();
+
+    expect(mockHermesDbExists).toHaveBeenCalledWith('hermes-agent', '/custom/hermes', 'hermes-agent');
+    process.env['HERMES_HOME'] = originalHermesHome;
+  });
+
+  it('passes the agent name as a safe fallback for legacy configs without hermes_profile', async () => {
     const ap = new AgentProcess('hermes-agent', mockEnv, { runtime: 'hermes' });
     await ap.start();
 
-    expect(mockHermesDbExists).toHaveBeenCalledWith('/custom/hermes');
-    process.env['HERMES_HOME'] = originalHermesHome;
+    expect(mockHermesDbExists).toHaveBeenCalledWith(undefined, process.env['HERMES_HOME'], 'hermes-agent');
+    expect(mockPty.spawn).toHaveBeenCalledWith('fresh', expect.any(String));
+  });
+
+  it('contains invalid Hermes profile validation to this seat during startup', async () => {
+    mockHermesDbExists.mockImplementation(() => { throw new Error('invalid profile'); });
+    const ap = new AgentProcess('hermes-agent', mockEnv, {
+      runtime: 'hermes', hermes_profile: '../shared',
+    });
+
+    await expect(ap.start()).resolves.toBeUndefined();
+    expect(mockPty.spawn).toHaveBeenCalledWith('fresh', expect.any(String));
+  });
+
+  it('honors .force-fresh before checking the Hermes profile database', async () => {
+    const marker = '/tmp/test-ctx/state/hermes-agent/.force-fresh';
+    fsMocks.existsSync.mockImplementation((path: string) => path === marker);
+    mockHermesDbExists.mockReturnValue(true);
+
+    const ap = new AgentProcess('hermes-agent', mockEnv, {
+      runtime: 'hermes', hermes_profile: 'hermes-agent',
+    });
+    await ap.start();
+
+    expect(mockPty.spawn).toHaveBeenCalledWith('fresh', expect.any(String));
+    expect(fsMocks.unlinkSync).toHaveBeenCalledWith(marker);
+    expect(mockHermesDbExists).not.toHaveBeenCalled();
   });
 });
 
@@ -186,7 +228,9 @@ describe('AgentProcess - Hermes runtime: ONE VOICE lifecycle prompts', () => {
 
 describe('AgentProcess - Hermes runtime: stop uses Ctrl+D', () => {
   it('sends Ctrl+D (not /exit) when stopping a hermes agent', async () => {
-    const ap = new AgentProcess('hermes-agent', mockEnv, { runtime: 'hermes' });
+    const ap = new AgentProcess('hermes-agent', mockEnv, {
+      runtime: 'hermes', hermes_profile: 'hermes-agent',
+    });
     await ap.start();
     expect(capturedOnExit).not.toBeNull();
 
