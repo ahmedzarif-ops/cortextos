@@ -13,7 +13,7 @@ import { execFileSync } from 'child_process';
 import { createServer, type Socket } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import packageMetadata from '../../../package.json';
 import {
   collectLegacyStatus,
@@ -37,6 +37,15 @@ import {
   validateLifecycleStatusOptions,
 } from '../../../src/cli/lifecycle';
 import { CORTEXTOS_VERSION } from '../../../src/version';
+import { scrubLeakedGitEnv } from '../../helpers/git-env';
+
+// THIS FILE SHELLS OUT TO `git` 28 TIMES, EVERY ONE WITH `cwd` SET TO A TEMP DIRECTORY.
+// That is correct, and it is not enough: GIT_DIR OVERRIDES cwd-based discovery. Run under a
+// git hook — which is what `npm test` is during a pre-push — every one of those calls
+// retargets the real repository, and the five `git commit` sites below land five commits on
+// the branch being pushed. See tests/helpers/git-env.ts.
+const restoreGitEnv = scrubLeakedGitEnv();
+afterAll(restoreGitEnv);
 
 const tempRoots: string[] = [];
 const originalInstanceId = process.env.CTX_INSTANCE_ID;
