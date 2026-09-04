@@ -353,8 +353,21 @@ export function annotateTask(
   task.annotations = [...(task.annotations ?? []), entry];
   task.updated_at = entry.ts;
 
-  // The invariant, asserted rather than trusted: appending a note must not have
-  // altered the description. Cheap, and it fails here instead of silently later.
+  // FUTURE-EDIT TRIPWIRE, not a runtime check — and the distinction is the point.
+  //
+  // As this function stands today the comparison CANNOT FAIL: nothing between the read above
+  // and this line assigns `task.description`, so it compares a value with itself. Read as a
+  // runtime guarantee it is decoration, and a check that cannot fail is not a check.
+  //
+  // It is kept, and kept deliberately, for the edit that has not happened yet: `description`
+  // is a string, so `descriptionBefore` holds a COPY of the value, and any future line that
+  // reassigns `task.description` between the read and the write fails loudly HERE rather than
+  // silently overwriting what was originally asked. That is the invariant this command exists
+  // to protect — a correction is a new fact about the task, never a replacement for the ask.
+  //
+  // Its limit, stated so nobody reads more into it: it catches REASSIGNMENT of the field. It
+  // would not catch mutation of a nested object, and `description` is not one today. If that
+  // ever changes, this line stops covering what its comment claims.
   if (task.description !== descriptionBefore) {
     throw new Error(`annotate-task: refusing to write — description changed for ${taskId}`);
   }
