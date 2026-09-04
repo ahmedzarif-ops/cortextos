@@ -70,10 +70,36 @@ describe('template regression guard: ONE VOICE survives a fresh onboarding', () 
       }
     });
 
-    it('SOUL.md states the lifecycle routing rule', () => {
+    it('SOUL.md states the lifecycle routing rule IN ITS OWN SECTION', () => {
       const body = read(`${dir}/SOUL.md`);
       if (body === null) return;
-      expect(body).toMatch(ROUTING_MARKER);
+      // ⛔ THIS ASSERTION USED TO BE `expect(body).toMatch(ROUTING_MARKER)` AND A MUTANT SURVIVED IT.
+      // Measured 2026-09-04 (sentinel): deleting the ENTIRE
+      // `## Lifecycle communication — ONE VOICE` section from templates/analyst/SOUL.md left this
+      // suite at 26/26 GREEN. The marker still matched — on an unrelated line in the Day/Night Mode
+      // section: "No owner-initiated Telegram at all — route anything urgent to the configured
+      // orchestrator instead."
+      // ⇒ A PRESENCE CHECK WHOSE NEEDLE IS NOT UNIQUE TO THE THING IT GUARDS CANNOT SEE THAT THING
+      // REMOVED. It reported clean over a template that had lost the rule entirely — one
+      // `/onboarding` away from restoring a live seat with no countermand, which is the exact
+      // failure this file's header says it exists to prevent.
+      // ⚠ AND THE SENTENCE THAT KEPT IT GREEN IS ITSELF SCOPED TO NIGHT MODE — a conditional
+      // statement of the rule, the defect class named at the top of this file. The
+      // CONDITIONAL_PROHIBITION patterns miss it because they look for "unless", not for a
+      // section scope.
+      // ⇒ Require the SECTION, then require the marker INSIDE it. Both, because a heading with an
+      // empty body would satisfy the first alone.
+      const section = body.match(
+        /^##\s+Lifecycle communication[^\n]*\n([\s\S]*?)(?=^##\s|\Z)/m,
+      );
+      expect(section, `${dir}/SOUL.md has no "## Lifecycle communication" section`).not.toBeNull();
+      expect(section?.[1] ?? '', `${dir}: the lifecycle section does not state the routing rule`)
+        .toMatch(ROUTING_MARKER);
+      // The rule must be stated UNCONDITIONALLY somewhere in that section: either as the duty of a
+      // non-orchestrator seat, or as the orchestrator's own inverted duty. A section that only
+      // says "route to the orchestrator" without saying WHEN is the conditional shape again.
+      expect(section?.[1] ?? '', `${dir}: the lifecycle section states no unconditional duty`)
+        .toMatch(/unconditional|owner contact is yours to make/i);
     });
 
     it('AGENTS.md pairs any lifecycle owner-send with the routing rule', () => {
