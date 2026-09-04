@@ -415,7 +415,60 @@ def describe_media(client, config, file_path, media_type="video"):
 # ---------------------------------------------------------------------------
 # ChromaDB
 # ---------------------------------------------------------------------------
-def get_chroma_collection(collection_name="default"):
+def require_existing_store():
+    """FAIL CLOSED before a client is constructed, when the store is not there to read.
+
+    `chromadb.PersistentClient(path=...)` CREATES the path it is given. So a mis-set
+    MMRAG_CHROMADB_DIR does not raise — it manufactures an empty store at the wrong place
+    and every reader answers "No documents" at rc=0. That is the same defect this file's
+    fail-closed work already fixed one layer up, arriving by a different road: the earlier
+    fix made an UNOPENABLE store loud, and this one covers the store that opened perfectly
+    because the reader had just built it.
+
+    Measured 2026-09-04 on the pre-fix code: `list --collection agent-city` against a path
+    that did not exist printed "No documents in collection 'agent-city'" at rc=0 and left a
+    188KB chroma.sqlite3 behind.
+
+    THE RATCHET IS WHY THIS MATTERS MORE THAN A TIDY ERROR MESSAGE. After that first run the
+    wrong path EXISTS and holds a real, valid, empty store — so it looks more legitimate on
+    every subsequent run, and the evidence that anything went wrong is gone. The check has to
+    happen before the first construction or it has nothing left to catch.
+
+    Checks: present, a directory, and non-empty. An empty directory is never a valid store,
+    and that is deliberately implementation-independent — requiring `chroma.sqlite3` by name
+    would couple this to a chroma internal that can change between versions.
+
+    KNOWN LIMIT, stated rather than implied: this cannot detect residue. A wrong path that
+    was already populated by an earlier bad run passes every one of these checks, because at
+    that point it IS a real store — just not yours. Only naming the resolved path in the
+    output (which every arm here does) gives a reader the chance to notice.
+
+    WRITE paths must be able to create a store on first use, so they pass must_exist=False.
+    The default is True so that a future caller inherits the fail-closed behaviour rather
+    than the permissive one.
+    """
+    if CHROMADB_DIR.exists() and CHROMADB_DIR.is_dir() and any(CHROMADB_DIR.iterdir()):
+        return
+
+    if not CHROMADB_DIR.exists():
+        why = "the path does not exist"
+    elif not CHROMADB_DIR.is_dir():
+        why = "the path is not a directory"
+    else:
+        why = "the directory is empty, so no store has ever been written there"
+
+    print(f"ERROR: refusing to read a knowledge store at {CHROMADB_DIR}", file=sys.stderr)
+    print(f"  cause: {why}", file=sys.stderr)
+    print("  This is NOT an empty collection - there is no store here to read.", file=sys.stderr)
+    print("  Chroma would CREATE this path on open, so a wrong MMRAG_CHROMADB_DIR would", file=sys.stderr)
+    print("  otherwise answer 'No documents' at exit 0 and leave a real empty store behind.", file=sys.stderr)
+    print("  Check MMRAG_DIR / MMRAG_CHROMADB_DIR point at the intended store.", file=sys.stderr)
+    sys.exit(2)
+
+
+def get_chroma_collection(collection_name="default", must_exist=True):
+    if must_exist:
+        require_existing_store()
     import chromadb
     client = chromadb.PersistentClient(path=str(CHROMADB_DIR))
     return client.get_or_create_collection(
@@ -424,7 +477,9 @@ def get_chroma_collection(collection_name="default"):
     )
 
 
-def get_chroma_client():
+def get_chroma_client(must_exist=True):
+    if must_exist:
+        require_existing_store()
     import chromadb
     return chromadb.PersistentClient(path=str(CHROMADB_DIR))
 
@@ -1159,7 +1214,11 @@ def cmd_ingest(args):
     config = load_config()
     client = get_genai_client(get_api_key(config))
     collection_name = args.collection or config.get("default_collection", "default")
-    collection = get_chroma_collection(collection_name)
+    # INGEST IS THE ONE PATH THAT MAY CREATE A STORE. A first ingest on a fresh install
+    # has nothing to open yet, so the fail-closed guard is deliberately off HERE and only
+    # here — every read path keeps the default. Stated at the call site because the reason
+    # lives in what this command does, not in the helper.
+    collection = get_chroma_collection(collection_name, must_exist=False)
 
     if args_force:
         print(f"Force mode: will re-ingest existing files")
@@ -1654,11 +1713,12 @@ def cmd_status(args):
     config = load_config()
     collection_name = args.collection or config.get("default_collection", "default")
 
-    try:
-        collection = get_chroma_collection(collection_name)
-        count = collection.count()
-    except Exception:
-        count = 0
+    # Was: `except Exception: count = 0`, which reported an UNOPENABLE store as a chunk
+    # count of zero. That is worse than cmd_list's old behaviour: "No data found" at least
+    # reads as an absence, while "Total chunks: 0" reads as a MEASUREMENT, and a reader has
+    # no reason to doubt a number.
+    collection = open_collection_or_exit(collection_name)
+    count = collection.count()
 
     print(f"Collection: {collection_name}")
     print(f"Total chunks: {count}")
@@ -1688,6 +1748,37 @@ def cmd_status(args):
             print(f"  {t}: {c} chunks")
 
 
+def open_collection_or_exit(collection_name):
+    """Open a collection, or FAIL CLOSED naming the store that was consulted.
+
+    The defect this replaces: callers wrapped this in a bare `except` and turned an
+    UNOPENABLE store into "No data found." (cmd_list) or `count = 0` (cmd_status), both
+    at exit 0. An empty collection and a store that could not be opened at all then
+    produced the same answer — and sentinel read the WHOLE FLEET as empty across six runs
+    before anyone doubted the reader.
+
+    `~/.mmrag` is the default when MMRAG_DIR is unset, so a mis-set or unset environment
+    silently consults a store that has never existed rather than the one you meant. That is
+    why the resolved path is printed: "empty" is only meaningful next to WHICH store.
+    """
+    try:
+        return get_chroma_collection(collection_name)
+    except Exception as e:
+        print(f"ERROR: could not open the knowledge store at {CHROMADB_DIR}", file=sys.stderr)
+        print(f"  collection: {collection_name}", file=sys.stderr)
+        print(f"  cause: {type(e).__name__}: {e}", file=sys.stderr)
+        print("  This is NOT an empty collection - the store could not be read.", file=sys.stderr)
+        # Point at the RIGHT remedy. A missing dependency and a mis-set path are the two
+        # observed causes and they need opposite fixes; printing the path advice for an
+        # ImportError sends the reader to check an environment variable that is already
+        # correct. The observed fleet-wide case was the venv, not the path.
+        if isinstance(e, ImportError):
+            print("  CAUSE IS A MISSING DEPENDENCY, not the path: run this with the "
+                  "knowledge-base venv python (knowledge-base/venv/bin/python3).", file=sys.stderr)
+        else:
+            print("  Check MMRAG_DIR / MMRAG_CHROMADB_DIR point at the intended store.", file=sys.stderr)
+        sys.exit(2)
+
 def chunks_by_source(collection):
     """Group every chunk in a collection by its `source` metadata.
 
@@ -1715,15 +1806,18 @@ def cmd_list(args):
     config = load_config()
     collection_name = args.collection or config.get("default_collection", "default")
 
-    try:
-        collection = get_chroma_collection(collection_name)
-    except Exception:
-        print("No data found.")
-        return
+    collection = open_collection_or_exit(collection_name)
 
     by_source, total_chunks = chunks_by_source(collection)
     if not total_chunks:
-        print("No documents in collection.")
+        # BOTH CHANGES KEPT. #9 supplies the read (`chunks_by_source` is the ONE
+        # implementation, so the count `ingest` reports and the delta `list` shows are the
+        # same derivation); #12 supplies the STORE NAME in the empty arm. Dropping either
+        # would silently undo the PR it came from: without the call, `by_source` below is
+        # undefined; without the path, "no documents" cannot be told apart from "read the
+        # wrong store", which is the exact ambiguity #12 exists to remove and the one a
+        # reader is most likely to over-trust.
+        print(f"No documents in collection '{collection_name}' (store: {CHROMADB_DIR})")
         return
 
     print(f"Collection: {collection_name} ({len(by_source)} files, {total_chunks} chunks)")
