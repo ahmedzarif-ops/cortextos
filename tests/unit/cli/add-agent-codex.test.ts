@@ -95,7 +95,7 @@ describe('PR-02: add-agent --runtime codex-app-server', () => {
     expect(existsSync(join(agentDir, 'CLAUDE.md'))).toBe(false);
   });
 
-  it('writes runtime=codex-app-server and model=gpt-5-codex into config.json', async () => {
+  it('writes runtime=codex-app-server and model=gpt-5.6-sol into config.json', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -107,7 +107,7 @@ describe('PR-02: add-agent --runtime codex-app-server', () => {
     const cfgPath = join(tempRoot, 'orgs', 'testorg', 'agents', 'codex-cfg', 'config.json');
     const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8'));
     expect(cfg.runtime).toBe('codex-app-server');
-    expect(cfg.model).toBe('gpt-5-codex');
+    expect(cfg.model).toBe('gpt-5.6-sol');
     expect(cfg.agent_name).toBe('codex-cfg');
   });
 

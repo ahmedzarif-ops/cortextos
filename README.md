@@ -114,7 +114,7 @@ pm2 start ecosystem.config.js && pm2 save && pm2 startup
 | `orchestrator` | Coordinates agents, manages goals, handles morning/evening reviews, approves actions |
 | `analyst` | System health, metrics, theta-wave autoresearch, analytics |
 | `agent` | General-purpose worker — use this as the base for specialist agents |
-| `agent-codex` | Codex-runtime worker, scaffolds with `runtime: codex-app-server` and `model: gpt-5-codex` (see `templates/agent-codex/`) |
+| `agent-codex` | Codex-runtime worker, scaffolds with `runtime: codex-app-server` and `model: gpt-5.6-sol` (see `templates/agent-codex/`) |
 | `agent-opencode` | OpenCode-runtime worker, scaffolds with `runtime: opencode` and the context-handoff lifecycle (see `templates/agent-opencode/`) |
 
 Add a codex agent the same way you add a claude agent:
@@ -134,7 +134,7 @@ Every agent's `config.json` carries an explicit `runtime` field that the daemon 
 | Runtime | Adapter | Default model | Skills location |
 |---|---|---|---|
 | `claude-code` | `ClaudePTY` (default) | claude-sonnet-4-6 | `.claude/skills/<skill>/SKILL.md` |
-| `codex-app-server` | `CodexAppServerPTY` | `gpt-5-codex` | `plugins/cortextos-agent-skills/skills/<skill>/SKILL.md` (linked into `~/.codex/skills/<agent>__<skill>`) |
+| `codex-app-server` | `CodexAppServerPTY` | `gpt-5.6-sol` | `plugins/cortextos-agent-skills/skills/<skill>/SKILL.md` (linked into `~/.codex/skills/<agent>__<skill>`) |
 | `opencode` | `OpencodePTY` | `openai/gpt-4.1-nano` (set in `config.json`) | `plugins/cortextos-agent-skills/skills/<skill>/SKILL.md` (linked into `.opencode/skills/<skill>`) |
 | `hermes` | `HermesPTY` (experimental) | model per `config.json` | hermes-specific |
 

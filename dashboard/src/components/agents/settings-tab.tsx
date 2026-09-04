@@ -22,7 +22,7 @@ interface AgentConfig {
 
 const MODEL_PLACEHOLDER: Record<NonNullable<AgentConfig['runtime']>, string> = {
   'claude-code': 'claude-sonnet-4-5',
-  'codex-app-server': 'gpt-5-codex',
+  'codex-app-server': 'gpt-5.6-sol',
   hermes: 'hermes-1',
 };
 

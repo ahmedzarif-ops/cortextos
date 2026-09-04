@@ -548,7 +548,7 @@ This is the lookup the scripts implement. Use it to read the manifest and the re
 ### config.json — TRANSFORM (mechanical)
 Flip `runtime` `"claude-code"` -> `"codex-app-server"` (this is the ONLY field the
 daemon branches on to select the codex PTY — setting it wrong silently keeps the
-claude PTY). Set `model` to a codex model (`gpt-5-codex` template default; `gpt-5.5`
+claude PTY). Set `model` to a codex model (`gpt-5.6-sol` template default; `gpt-5.5`
 also valid). DROP `dangerously_skip_permissions` (meaningless — codex hardcodes
 `approvalPolicy:'never'` / `danger-full-access`). DROP the `ecosystem` block (the
 codex template does not carry it). ADD `codex_context_cap` (default 256000) so codex
