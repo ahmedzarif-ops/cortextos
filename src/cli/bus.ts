@@ -404,12 +404,27 @@ busCommand
   .option('--agent <name>', 'Agent claiming the task (defaults to CTX_AGENT_NAME)')
   .action((id: string, opts: { agent?: string }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    const agent = opts.agent || env.agentName;
+    // Same defect as annotate-task, and one degree worse. `env.agentName` falls back to
+    // basename(process.cwd()), so `opts.agent || env.agentName` was never empty and the
+    // `if (!agent)` guard below could not fire — a check that cannot fail is not a check.
+    //
+    // Why it is worse here than on a note: claim-task WRITES OWNERSHIP, and `claimTask`
+    // rejects a claim when someone else already owns the task. A claim signed with a
+    // directory name does not merely mislabel the owner — it hands the task to `Desktop`
+    // and then LOCKS THE REAL AGENT OUT, using the mutual exclusion this command exists to
+    // provide. The failure arrives as "another agent already owns it", which reads as the
+    // command working correctly.
+    const agent = resolveAgentIdentity(opts.agent);
     if (!agent) {
-      console.error('ERROR: --agent or CTX_AGENT_NAME required');
+      console.error(
+        'ERROR: claim-task: no agent identity. Pass --agent <name> or set CTX_AGENT_NAME. ' +
+          'The current directory name is deliberately NOT used to claim a task.',
+      );
       process.exit(1);
     }
+    // One identity for the whole command: paths were previously resolved from env.agentName,
+    // which could differ from the name being written into the task.
+    const paths = resolvePaths(agent, env.instanceId, env.org);
     try {
       const task = claimTask(paths, id, agent);
       console.log(`Claimed ${id} -> in_progress (assigned to ${agent})`);
