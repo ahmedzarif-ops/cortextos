@@ -1135,6 +1135,22 @@ def cmd_ingest(args):
         is precisely how a seat concludes "nothing landed" about a file that is now HALF PRESENT.
         """
         nonlocal total, skipped, errors
+
+        # ⛔ THE INDENT IS PART OF A CROSS-PR CONTRACT, NOT COSMETIC (guard wxr52, 2026-09-04).
+        # cortextos #7 derives per-file status by matching THREE regexes against this function's
+        # output, and every one of them REQUIRES LEADING WHITESPACE:
+        #     /^\s+Added\s+(\d+)\s+chunk/   /^\s+Already present/   /^\s+ERROR:/
+        # Both call sites below pass a non-empty indent today, so the seam is correct as shipped —
+        # guard checked that rather than assuming it. What is undefended is the COUPLING: a third
+        # call site passing "" (the obvious choice for a top-level file) puts these lines at column
+        # 0, all three regexes stop matching, and #7 SILENTLY LOSES PER-FILE STATUS while both
+        # suites stay green — because each PR's tests only ever exercise its own end.
+        # Guard found one of the three lines; the class is all three, because they share this indent.
+        #
+        # Normalised HERE, once, at the single point they have in common. Today's bytes are
+        # unchanged (both callers already pass whitespace); a future empty indent can no longer
+        # break a parser in another repository's PR.
+        indent = indent or "  "
         try:
             count = ingest_file(client, config, collection, path)
         except Exception as e:
@@ -1146,7 +1162,12 @@ def cmd_ingest(args):
                 outcomes.append((display, None, e))
             else:
                 total += landed
-                print(f"{indent}ERROR after {landed} chunk(s) landed: {e}")
+                # ⛔ THE "ERROR:" PREFIX IS LOAD-BEARING — KEEP THE COLON IMMEDIATELY AFTER IT.
+                # I had written this as "ERROR after N chunk(s) landed: {e}", which does NOT match
+                # #7's /^\s+ERROR:/ — so THIS PR, whose entire purpose is to make partial failures
+                # visible, made them INVISIBLE to the parser that consumes them, and only on the
+                # partial path. main emits "ERROR: {e}"; that is the contract #7 was written against.
+                print(f"{indent}ERROR: {e} — after {landed} chunk(s) landed")
                 if landed:
                     print(f"{indent}  ⚠ {display} is now PARTIAL in the store — queries will answer from it")
                 outcomes.append((display, landed, e))

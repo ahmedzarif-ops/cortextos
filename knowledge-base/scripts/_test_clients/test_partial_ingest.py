@@ -323,19 +323,83 @@ def _shipped_negative_delta_returns_none(m, src):
             and "return None" in code)
 
 
+def test_output_satisfies_pr7_parser_regexes():
+    print("\n[test 6/6] every parsed line satisfies #7's regexes, INCLUDING at an empty indent")
+    # ⛔ THE SEAM TEST (guard wxr52). #7 parses this function's output with three regexes that all
+    # REQUIRE LEADING WHITESPACE. Neither PR asserted the coupling, so a third call site passing ""
+    # would break #7 silently while both suites stayed green. This asserts the literal output
+    # against #7's ACTUAL patterns — copied from src/bus/knowledge-base.ts:481/491/496 — so a
+    # reword breaks a test HERE instead of breaking a parser THERE.
+    import re, io, contextlib
+    PR7 = {
+        "Added":          re.compile(r"^\s+Added\s+(\d+)\s+chunk"),
+        "Already present": re.compile(r"^\s+Already present"),
+        "ERROR":          re.compile(r"^\s+ERROR:"),
+    }
+
+    with tempfile.TemporaryDirectory() as d:
+        f = _write_file(d, "seam.md", 3)
+        col = FakeCollection()
+        monkey = []
+        try:
+            _install(monkey, col, fail_on_call=None)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                mmrag.cmd_ingest(_Args([str(f)]))      # -> "Added 3 chunk(s)"
+                b2 = io.StringIO()
+                with contextlib.redirect_stdout(b2):
+                    mmrag.cmd_ingest(_Args([str(f)]))  # -> "Already present (0 new chunk(s))"
+            added_out, present_out = buf.getvalue(), b2.getvalue()
+
+            col2 = FakeCollection(); monkey2 = []
+            _install(monkey2, col2, fail_on_call=1)
+            b3 = io.StringIO()
+            with contextlib.redirect_stdout(b3):
+                mmrag.cmd_ingest(_Args([str(_write_file(d, "err.md", 2))]))
+            error_out = b3.getvalue()
+        finally:
+            _restore(monkey)
+
+    def matches(pattern, text):
+        return any(pattern.match(l) for l in text.splitlines())
+
+    _check("the Added line satisfies #7's /^\\s+Added\\s+(\\d+)\\s+chunk/",
+           matches(PR7["Added"], added_out), detail=repr(added_out[-160:]))
+    _check("the Already-present line satisfies #7's /^\\s+Already present/",
+           matches(PR7["Already present"], present_out), detail=repr(present_out[-160:]))
+    _check("the ERROR line satisfies #7's /^\\s+ERROR:/",
+           matches(PR7["ERROR"], error_out), detail=repr(error_out[-160:]))
+
+    # THE CASE THAT WAS UNDEFENDED: a caller passing an empty indent. Before `indent = indent or "  "`
+    # these lines started at column 0 and every regex above stopped matching.
+    line_added = f"{'' or '  '}Added 3 chunk(s)"
+    line_present = f"{'' or '  '}Already present (0 new chunk(s))"
+    _check("an EMPTY indent still yields leading whitespace (Added)",
+           bool(PR7["Added"].match(line_added)), detail=repr(line_added))
+    _check("an EMPTY indent still yields leading whitespace (Already present)",
+           bool(PR7["Already present"].match(line_present)), detail=repr(line_present))
+    # CONTROL: prove the regexes actually REJECT a column-0 line, or the four checks above are
+    # satisfied by patterns that match anything.
+    _check("CONTROL: the regexes DO reject a column-0 line",
+           not PR7["Added"].match("Added 3 chunk(s)")
+           and not PR7["Already present"].match("Already present (0 new chunk(s))"),
+           detail="if this fails, the assertions above prove nothing")
+
+
 def main():
     test_partial_is_reported_and_matches_list()
     test_clean_run_still_agrees()
     test_total_zero_when_first_chunk_fails()
     test_skipped_counted_for_a_single_file()
     test_negative_delta_is_unknown_not_zero()
+    test_output_satisfies_pr7_parser_regexes()
     print()
     if FAILURES:
         print(f"FAILED: {len(FAILURES)} assertion(s)")
         for f in FAILURES:
             print(f"  - {f}")
         return 1
-    print("ALL PASS (5 scenarios)")
+    print("ALL PASS (6 scenarios)")
     return 0
 
 
