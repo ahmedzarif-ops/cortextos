@@ -4,7 +4,8 @@
 # Run once after cloning:
 #   bash scripts/setup-hooks.sh
 #
-# Installs a pre-push hook that runs npm run build && npm test before
+# Installs a pre-push hook that runs npm run build && npm test (the FAST
+# lane) before
 # any push. If either fails, the push is aborted and you fix it locally
 # rather than failing on CI.
 

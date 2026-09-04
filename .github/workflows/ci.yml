@@ -62,6 +62,15 @@ jobs:
       - name: Run codex parity tests
         run: npm run test:codex
 
+      # THE SLOW LANE — its own job, so a multi-minute timing simulation cannot
+      # decide whether a push is allowed, and cannot hide behind 140 other files
+      # when it fails. Same tests, unweakened, run serially with a real timeout.
+      # `continue-on-error: false` is explicit: this lane still GATES CI. It is
+      # removed from the PRE-PUSH gate, not from the build.
+      - name: Slow lane (timing simulations)
+        run: npm run test:slow
+        continue-on-error: false
+
   dashboard-build:
     name: Dashboard Build
     runs-on: ubuntu-latest
