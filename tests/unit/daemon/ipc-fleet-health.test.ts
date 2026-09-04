@@ -195,7 +195,16 @@ describe('computeFleetHealth', () => {
     // paul: one warning cron + one never-fired
     writeCronsJson('paul', [
       makeCron('morning-briefing', '24h'),
-      makeCron('weekly-report', '7d'),
+      // ⛔ created_at pushed back deliberately (sentinel, 2026-09-04, guard's review of PR #5).
+      // makeCron defaults created_at to 1 day ago. never-fired now splits three ways, and a '7d'
+      // cron created 1 day ago with no log is NOT YET DUE — correctly healthy, not a fault. That
+      // made this fixture's `weekly-report` stop being a never-fired case and turned this test red.
+      // THE FIX IS THE FIXTURE, NOT THE ASSERTIONS: this test exists to exercise four DIFFERENT
+      // states, so re-pointing the numbers would have silently deleted the never-fired case from
+      // the only test that covers it. Aged past its interval, it is genuinely never-fired.
+      makeCron('weekly-report', '7d', {
+        created_at: new Date(Date.now() - 30 * 86_400_000).toISOString(),
+      }),
     ]);
     writeExecutionLog('paul', [
       makeLogEntry('morning-briefing', 'fired', now - 50 * 3_600_000), // 50h ago, 24h schedule → warning

@@ -21,7 +21,7 @@
  *   After fire_at + grace period passes without a fire, it becomes warning/never-fired.
  */
 
-import { parseDurationMs } from '../bus/cron-state.js';
+import { parseDurationMs, cronExpressionMaxGapMs, nextFireFromCron } from '../bus/cron-state.js';
 import type { CronSummaryRow, CronExecutionLogEntry } from '../types/index.js';
 
 // ---------------------------------------------------------------------------
@@ -95,6 +95,36 @@ const MS_24H = 24 * 60 * 60 * 1000;
 // ---------------------------------------------------------------------------
 
 /**
+ * Can this schedule string be parsed by anything that actually schedules crons?
+ *
+ * WHY THIS EXISTS AND WHY IT DOES NOT READ `row.nextFire` (guard's ride-along on PR #5,
+ * 2026-09-04): the not-yet-due grace below must only apply to a cron that CAN fire. The first
+ * version of that gate asked `row.nextFire !== 'unknown'` — i.e. it trusted a value its CALLER
+ * supplied. Exactly one producer fills that field today (`listAllCrons` in ipc-server, correctly,
+ * via `computeNextFire`), so the gate was right by luck of there being one caller. A second
+ * producer filling `nextFire` from anything else — a hand-built probe, a fixture, a future
+ * dashboard path — silently reopens the hole this gate was added to close, and NOTHING FAILS when
+ * it does. Guard's own probe did precisely that and made the fix look broken.
+ *
+ * So parseability is derived HERE, from the schedule itself, using the SAME two parsers the
+ * scheduler uses. Deliberately not a re-implementation: a second, independently-written parse test
+ * would be free to disagree with the real scheduler, which is the same defect wearing a different
+ * hat.
+ *
+ * ⚠ `cronExpressionMaxGapMs` must NOT be used for this. It returns its 31-day FALLBACK for
+ * unrecognised shapes, so it answers "how long might the gap be" and never "is this readable" —
+ * an unparseable schedule and a genuinely monthly one are byte-identical in its output. That
+ * conflation IS the 31-day false-clear guard found.
+ */
+export function isScheduleParseable(schedule: string, nowMs = Date.now()): boolean {
+  if (typeof schedule !== 'string' || schedule.trim() === '') return false;
+  // Interval shorthand ("4h", "30m") — parseDurationMs returns NaN when it cannot read it.
+  if (!isNaN(parseDurationMs(schedule))) return true;
+  // 5-field cron expression — nextFireFromCron returns NaN when it cannot read it.
+  return !isNaN(nextFireFromCron(schedule, nowMs));
+}
+
+/**
  * Compute health for a single cron given its summary row and recent executions.
  *
  * @param row               - CronSummaryRow from list-all-crons / listAllCrons().
@@ -115,8 +145,21 @@ export function computeHealth(
   const gapMs: number | null = lastFireMs !== null ? nowMs - lastFireMs : null;
 
   // Expected interval: derive from schedule.
-  // parseDurationMs returns NaN for cron expressions — treat those as 0 (unknown).
-  const expectedIntervalMs = Math.max(0, parseDurationMs(cron.schedule) || 0);
+  //
+  // ⛔ THIS USED TO READ `parseDurationMs(cron.schedule) || 0` AND THAT EXEMPTED 66% OF THE FLEET.
+  // parseDurationMs only understands the interval shorthand (`4h`, `30m`) and returns NaN for a
+  // 5-field cron expression; `NaN || 0` gave 0, and the staleness branch below is gated on `> 0`.
+  // Measured 2026-09-04: 18 of 27 live crons could therefore never score `warning` — including
+  // every daily and weekly review, sweep and metrics cron. A daily cron dead for five days read
+  // `healthy`. The 9 that WERE checked were the hourly interval crons, i.e. exactly the ones whose
+  // silence a human would notice anyway. (task_1788511684383_66545168)
+  //
+  // For expressions we use the MAX GAP, never cronExpressionMinIntervalMs — that returns 24h for a
+  // weekly cron and would flag every healthy weekly cron stale after 48h, every week.
+  const intervalFromShorthand = parseDurationMs(cron.schedule);
+  const expectedIntervalMs = !isNaN(intervalFromShorthand) && intervalFromShorthand > 0
+    ? intervalFromShorthand
+    : cronExpressionMaxGapMs(cron.schedule);
 
   // ── 24h metrics ───────────────────────────────────────────────────────────
 
@@ -140,10 +183,54 @@ export function computeHealth(
     }
   }
 
-  // never-fired: no execution log entry at all
+  // never-fired — but SPLIT THREE WAYS, because "no fire" has three different causes and the
+  // previous single bucket rendered them identically. (task_1788511684383_66545168)
+  //
+  //   attempted PRESENT + fired ABSENT  -> the scheduler DISPATCHED and the run DIED.
+  //   both ABSENT, a fire time has passed -> the scheduler never reached it.
+  //   both ABSENT, nothing due yet      -> NOT YET DUE. No information. Not a fault.
+  //
+  // cron-scheduler.ts persists `last_fire_attempted_at` BEFORE awaiting the dispatch, expressly
+  // "to detect crash" — and nothing outside cron-scheduler ever read it. The discriminating field
+  // was already on disk, written deliberately, unused.
+  //
+  // The third branch is not politeness: without it every newly-created cron scores as a fault on
+  // the day it is added, and a checker that cries wolf on every new cron is switched off.
   if (lastFireMs === null) {
+    const attemptedMs = cron.last_fire_attempted_at
+      ? new Date(cron.last_fire_attempted_at).getTime()
+      : null;
+
+    if (attemptedMs !== null && !isNaN(attemptedMs)) {
+      return makeHealth(agent, org, cron.name, nextFire, 'failure',
+        `dispatched ${formatRelativeMs(nowMs - attemptedMs)} ago and never completed — the run died`,
+        lastFireMs, expectedIntervalMs, gapMs, successRate24h, firesLast24h);
+    }
+
+    // ⛔ THE GRACE IS GATED ON PARSE SUCCESS (guard's review of PR #5, 2026-09-04).
+    // computeNextFire returns the literal 'unknown' when neither the interval shorthand nor the
+    // 5-field parser can read the schedule. Such a cron WILL NEVER FIRE — the scheduler cannot
+    // schedule it — so `never-fired` is the honest verdict and grace is exactly wrong.
+    // Without this gate the fallback (31 days, deliberately long) HID a permanently dead cron for
+    // a month: guard reproduced '@daily' and '0 9 * * MON' reading HEALTHY on this branch while
+    // the base correctly said never-fired. My widening turned a true positive into a false clear,
+    // which is the failure direction this whole change exists to remove.
+    // DERIVED HERE, NOT READ FROM `row.nextFire` — see isScheduleParseable above. The old form
+    // (`nextFire !== 'unknown'`) delegated the safety property of this gate to whoever built the
+    // row, and only one caller in the tree happens to build it correctly.
+    const parseable = isScheduleParseable(cron.schedule, nowMs);
+    const createdMs = cron.created_at ? new Date(cron.created_at).getTime() : null;
+    const dueYet = createdMs !== null && !isNaN(createdMs)
+      ? nowMs - createdMs > expectedIntervalMs
+      : true;
+    if (parseable && !dueYet) {
+      return makeHealth(agent, org, cron.name, nextFire, 'healthy',
+        'created recently and not due yet — no fire expected',
+        lastFireMs, expectedIntervalMs, gapMs, successRate24h, firesLast24h);
+    }
+
     return makeHealth(agent, org, cron.name, nextFire, 'never-fired',
-      'cron has never fired — no execution history',
+      'cron has never fired — no execution history and a fire time has passed',
       lastFireMs, expectedIntervalMs, gapMs, successRate24h, firesLast24h);
   }
 
