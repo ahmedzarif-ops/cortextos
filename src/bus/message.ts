@@ -6,7 +6,7 @@ import { PRIORITY_MAP } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { acquireLock, releaseLock } from '../utils/lock.js';
 import { randomString } from '../utils/random.js';
-import { validateAgentName, validatePriority } from '../utils/validate.js';
+import { validateAgentName, validatePriority, validateMessageText } from '../utils/validate.js';
 
 // ---------------------------------------------------------------------------
 // Security (H10): HMAC-SHA256 message signing
@@ -59,6 +59,8 @@ export function sendMessage(
   validateAgentName(from);
   validateAgentName(to);
   validatePriority(priority);
+  // Must precede the id/signature below: a rejected send leaves no id, no sig, no file.
+  validateMessageText(text);
 
   const pnum = PRIORITY_MAP[priority];
   const epochMs = Date.now();

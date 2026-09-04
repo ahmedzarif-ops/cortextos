@@ -40,6 +40,28 @@ export function validateOrgName(org: string): void {
   }
 }
 
+/**
+ * Reject an empty or whitespace-only message body.
+ *
+ * WHY THIS EXISTS (sentinel, 2026-09-04, task_1788506864700_32505229): sendMessage validated
+ * `from`, `to` and `priority` and never `text`. An empty send returned rc=0, MINTED AN ID, and was
+ * HMAC-SIGNED — so it woke the recipient carrying the same `sig` as real traffic, and nothing at
+ * either end distinguished it from a genuine message. Verified live against sentinel itself:
+ * `""` -> rc=0 + id, `"   "` -> rc=0 + id, both delivered and both signed.
+ *
+ * The check is on the TRIMMED body and it runs BEFORE the id is minted, so a rejected send leaves
+ * NO id, NO signature and NO file. That ordering is the requirement, not an implementation detail:
+ * a version that returned non-zero while still minting and signing would pass an rc-only test and
+ * leave the artifact behind.
+ */
+export function validateMessageText(text: string): void {
+  if (typeof text !== 'string' || text.trim() === '') {
+    throw new Error(
+      'Message body is empty. A message must contain at least one non-whitespace character.'
+    );
+  }
+}
+
 export function validatePriority(priority: string): asserts priority is Priority {
   if (!VALID_PRIORITIES.includes(priority as Priority)) {
     throw new Error(
