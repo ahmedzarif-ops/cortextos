@@ -10,6 +10,7 @@ import { AgentProcess } from './agent-process.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { KEYS } from '../pty/inject.js';
 import { stripControlChars, sanitizeForPtyInjection, wrapFenceSafe } from '../utils/validate.js';
+import { ensureDir } from '../utils/atomic.js';
 import { agentHoldsContextHandoffLease, releaseContextHandoffLease, requestContextHandoffLease } from './context-handoff-lease.js';
 
 type LogFn = (msg: string) => void;
@@ -158,9 +159,19 @@ export class FastChecker {
     const agentName = this.agent.name;
     this.heartbeatTimer = setInterval(() => {
       const ts = new Date().toISOString();
-      execFile('cortextos', ['bus', 'update-heartbeat', `[watchdog] ${agentName} alive — idle session ${ts}`], (err) => {
-        if (err) this.log(`Heartbeat watchdog error: ${err.message}`);
-      });
+      try {
+        // The child cannot start in a missing cwd, even though its writer creates stateDir.
+        ensureDir(this.paths.stateDir);
+        execFile('cortextos', ['bus', 'update-heartbeat', `[watchdog] ${agentName} alive — idle session ${ts}`], {
+          // Bind the CLI write target and file-based context to this checker's seat.
+          env: { ...process.env, CTX_AGENT_NAME: agentName },
+          cwd: this.paths.stateDir,
+        }, (err) => {
+          if (err) this.log(`Heartbeat watchdog error: ${err.message}`);
+        });
+      } catch (err) {
+        this.log(`Heartbeat watchdog error: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }, HEARTBEAT_INTERVAL_MS);
 
     while (this.running) {

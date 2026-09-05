@@ -832,6 +832,10 @@ describe('FastChecker', () => {
       expect(execFile).toHaveBeenCalledWith(
         'cortextos',
         expect.arrayContaining(['bus', 'update-heartbeat', expect.stringContaining('[watchdog] my-agent alive — idle session')]),
+        expect.objectContaining({
+          env: expect.objectContaining({ CTX_AGENT_NAME: 'my-agent' }),
+          cwd: paths.stateDir,
+        }),
         expect.any(Function),
       );
       checker.stop();
@@ -863,6 +867,7 @@ describe('FastChecker', () => {
       expect(execFile).not.toHaveBeenCalledWith(
         'cortextos',
         expect.arrayContaining([expect.stringContaining('[watchdog]')]),
+        expect.any(Object),
         expect.any(Function),
       );
       checker.stop();
