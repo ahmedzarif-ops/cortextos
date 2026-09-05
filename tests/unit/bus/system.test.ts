@@ -244,6 +244,56 @@ describe('Bus System', () => {
       expect(report.agents[0].stale).toBe(true);
     });
 
+    // The generator writes this line as `<iso> (by <who>)` when an author is
+    // known — see the `## Updated` push in src/cli/goals.ts. Every test above
+    // uses the BARE `<iso>` form, which the writer emits only when no author is
+    // recorded, so the suite validated a shape production rarely produces and
+    // the whole check returned parse_error on a live fleet without failing CI.
+    // These cases pin the form that is actually written.
+    it('parses the "<iso> (by <who>)" form the generator writes — fresh', () => {
+      const agentDir = join(testDir, 'orgs', 'myorg', 'agents', 'worker');
+      mkdirSync(agentDir, { recursive: true });
+
+      const recentDate = new Date().toISOString();
+      writeFileSync(
+        join(agentDir, 'GOALS.md'),
+        `# Goals\n\n## Updated\n${recentDate} (by chief)\n\nSome goal`,
+      );
+
+      const report = checkGoalStaleness(testDir, 7);
+      expect(report.agents[0].status).toBe('fresh');
+      expect(report.agents[0].stale).toBe(false);
+      expect(report.summary.fresh).toBe(1);
+    });
+
+    it('parses the "<iso> (by <who>)" form the generator writes — stale', () => {
+      const agentDir = join(testDir, 'orgs', 'myorg', 'agents', 'worker');
+      mkdirSync(agentDir, { recursive: true });
+
+      const oldDate = new Date(Date.now() - 10 * 86400 * 1000).toISOString();
+      writeFileSync(
+        join(agentDir, 'GOALS.md'),
+        `# Goals\n\n## Updated\n${oldDate} (by chief)\n\nSome goal`,
+      );
+
+      const report = checkGoalStaleness(testDir, 7);
+      expect(report.agents[0].status).toBe('stale');
+      expect(report.agents[0].stale).toBe(true);
+      expect(report.summary.stale).toBe(1);
+    });
+
+    // Guards the direction of the fix: taking the leading token must not make a
+    // line parse that should not. A trailing author on rubbish is still rubbish.
+    it('still reports parse_error when the leading token is not a date', () => {
+      const agentDir = join(testDir, 'orgs', 'myorg', 'agents', 'worker');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, 'GOALS.md'), '# Goals\n\n## Updated\nnot-a-date (by chief)\n');
+
+      const report = checkGoalStaleness(testDir);
+      expect(report.agents[0].status).toBe('parse_error');
+      expect(report.agents[0].stale).toBe(true);
+    });
+
     it('returns empty report when no orgs directory', () => {
       const report = checkGoalStaleness(testDir);
       expect(report.summary.total).toBe(0);
