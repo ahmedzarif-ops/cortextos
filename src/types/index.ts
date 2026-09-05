@@ -712,7 +712,8 @@ export type IPCCommandType =
   | 'add-cron'
   | 'update-cron'
   | 'remove-cron'
-  | 'fleet-health';
+  | 'fleet-health'
+  | 'daemon-info';
 
 // ---------------------------------------------------------------------------
 // Execution log pagination response — Subtask 4.3
