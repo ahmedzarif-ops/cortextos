@@ -682,8 +682,14 @@ busCommand
     }
 
     for (const hb of heartbeats) {
-      const stale = new Date(hb.last_heartbeat) < new Date(Date.now() - 2 * 60 * 60 * 1000);
-      const staleFlag = stale ? ' [STALE]' : '';
+      // Per-agent threshold, so this marker agrees with the alerting rule instead of contradicting it.
+      const { ms: thresholdMs, derived } = resolveStaleThresholdMs(hb.agent);
+      const stale = new Date(hb.last_heartbeat) < new Date(Date.now() - thresholdMs);
+      // Name the threshold on the row that uses it. A bare [STALE] invites the reader to supply their
+      // own idea of how late is late, and every reader supplies a different one.
+      const staleFlag = stale
+        ? ` [STALE >${fmtDuration(thresholdMs)}${derived ? '' : ', default'}]`
+        : '';
       const label = hb.display_name ? `${hb.display_name} (${hb.agent})` : hb.agent;
       console.log(`${label} (${hb.org}) — ${hb.status}${staleFlag} — last seen ${hb.last_heartbeat}`);
       if (hb.current_task) console.log(`  task: ${hb.current_task}`);
@@ -2141,6 +2147,55 @@ function agentExistsInFramework(agentName: string, frameworkRoot: string): boole
 /**
  * Format an ISO timestamp for display (shortens to "YYYY-MM-DD HH:mm UTC").
  */
+/** Default used when an agent's own heartbeat cadence cannot be determined. */
+const DEFAULT_STALE_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * How long since the last heartbeat before an agent should be called STALE.
+ *
+ * This used to be a flat 2 hours for every agent. The documented alerting rule is different — alert
+ * when a heartbeat is older than TWICE THE AGENT'S OWN LOOP INTERVAL (templates/analyst/CLAUDE.md) —
+ * and a fixed threshold cannot agree with a per-agent rule at more than one cadence.
+ *
+ * It was wrong in BOTH directions, which is why this is not a cosmetic fix:
+ *
+ *   - An agent on a 4h heartbeat is marked [STALE] at 2h, but nothing is supposed to alert until 8h.
+ *     Six hours of a red-looking marker that means nothing actionable — and a marker that cries wolf
+ *     is a marker people learn to skip, which costs you the one time it is real.
+ *   - An agent on a 30m heartbeat should alert at 1h, but is not marked until 2h. Here the marker is
+ *     the opposite failure: SILENT for an hour after the agent is genuinely overdue.
+ *
+ * So the same constant was simultaneously too eager and too lazy, and which one you got depended on
+ * an agent's cadence — the thing the constant did not look at.
+ *
+ * The threshold is now derived from the agent's own `heartbeat` cron, so the marker and the alerting
+ * rule cannot drift apart. Where no such cron exists (or its schedule is not an interval — a clock
+ * expression like `0 * * * *` has no single "interval" to double) we fall back to the old 2h AND SAY
+ * SO in the output, because a derived threshold and a defaulted one are different claims and a reader
+ * cannot otherwise tell which they are looking at.
+ */
+export function resolveStaleThresholdMs(agent: string): { ms: number; derived: boolean } {
+  try {
+    const heartbeatCron = readCrons(agent).find(c => c.name === 'heartbeat');
+    if (heartbeatCron) {
+      const intervalMs = parseDurationMs(heartbeatCron.schedule);
+      if (!isNaN(intervalMs) && intervalMs > 0) {
+        return { ms: intervalMs * 2, derived: true };
+      }
+    }
+  } catch {
+    // fall through to the default
+  }
+  return { ms: DEFAULT_STALE_MS, derived: false };
+}
+
+/** Render a duration as a short human string: 8h, 90m, 45s. */
+export function fmtDuration(ms: number): string {
+  if (ms >= 60 * 60 * 1000 && ms % (60 * 60 * 1000) === 0) return `${ms / (60 * 60 * 1000)}h`;
+  if (ms >= 60 * 1000) return `${Math.round(ms / (60 * 1000))}m`;
+  return `${Math.round(ms / 1000)}s`;
+}
+
 function fmtTs(iso: string | undefined): string {
   if (!iso) return '-';
   return iso.replace('T', ' ').slice(0, 16) + ' UTC';
