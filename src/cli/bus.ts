@@ -22,6 +22,7 @@ import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, 
 import { resolvePaths } from '../utils/paths.js';
 import { resolveEnv, resolveAgentIdentity, requireAgentIdentity, resolveTargetAgentDir } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-server.js';
+import { describeSchedulerClock, schedulerClockNotes } from '../utils/scheduler-clock.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
 import type { Priority, Task, TaskStatus, EventCategory, EventSeverity, ApprovalCategory, ApprovalStatus, OrgContext, CronDefinition } from '../types/index.js';
@@ -2230,7 +2231,7 @@ busCommand
   .description('List all persistent crons configured for an agent')
   .argument('<agent>', 'Agent name')
   .option('--json', 'Emit raw JSON instead of a formatted table')
-  .action((agent: string, opts: { json?: boolean }) => {
+  .action(async (agent: string, opts: { json?: boolean }) => {
     try { validateAgentName(agent); } catch (err) { console.error(String(err)); process.exit(1); }
 
     const crons = readCrons(agent);
@@ -2300,12 +2301,19 @@ busCommand
     const pad = (s: string, w: number) => s.padEnd(w);
     const sep = '-'.repeat(nameW + schedW + enW + lastW + nextW + 63 + 5);
 
+    // The Next Fire values above were computed on THIS process's clock, which is
+    // not necessarily the one the scheduler uses. Say so, and say loudly when
+    // the two disagree — the failure this guards against is silent agreement.
+    const clock = await describeSchedulerClock(env.instanceId);
+
     console.log(`\nCrons for ${agent} (${rows.length})\n`);
-    console.log(`  ${pad('Name', nameW)}  ${pad('Schedule', schedW)}  ${pad('Enabled', enW)}  ${pad('Last Fire', lastW)}  ${pad('Next Fire', nextW)}  Prompt`);
+    console.log(`  ${pad('Name', nameW)}  ${pad('Schedule', schedW)}  ${pad('Enabled', enW)}  ${pad('Last Fire', lastW)}  ${pad('Next Fire*', nextW)}  Prompt`);
     console.log(`  ${sep}`);
     for (const r of rows) {
       console.log(`  ${pad(r.name, nameW)}  ${pad(r.schedule, schedW)}  ${pad(r.enabled, enW)}  ${pad(r.last_fire, lastW)}  ${pad(r.next_fire, nextW)}  ${r.prompt}`);
     }
+    console.log('');
+    for (const line of schedulerClockNotes(clock)) console.log(line);
     console.log('');
   });
 

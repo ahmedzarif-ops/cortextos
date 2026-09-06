@@ -586,6 +586,36 @@ export class IPCServer {
           };
           break;
 
+        // daemon-info: read-only introspection of the DAEMON's own process.
+        //
+        // Exists because cron schedules are matched against process-LOCAL time
+        // (see nextFireFromCron: it compares the cron fields to d.getHours(),
+        // d.getDate() and d.getDay()).  The scheduler therefore fires on the
+        // DAEMON's clock, while any CLI that recomputes a next-fire for display
+        // does so on the CALLER's clock.  When the two processes were launched
+        // under different TZ values those answers diverge silently, and the
+        // divergence is invisible from either side alone.  This command lets a
+        // caller ask the daemon which clock it is actually on.
+        //
+        // Both `resolvedTimezone` and `envTimezone` are reported, deliberately:
+        // an unset TZ still resolves to a zone (the host default), so reporting
+        // only one of them hides the difference between "launched with TZ=UTC"
+        // and "inherited UTC from the host".  Those are different situations
+        // with different fixes, and a caller cannot tell them apart afterwards.
+        case 'daemon-info':
+          response = {
+            success: true,
+            data: {
+              resolvedTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+              envTimezone: process.env.TZ ?? null,
+              utcOffsetMinutes: -new Date().getTimezoneOffset(),
+              pid: process.pid,
+              startedAt: new Date(Date.now() - Math.round(process.uptime() * 1000)).toISOString(),
+              now: new Date().toISOString(),
+            },
+          };
+          break;
+
         case 'list-agents':
           response = {
             success: true,
