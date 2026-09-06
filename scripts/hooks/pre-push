@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # pre-push hook — installed by scripts/setup-hooks.sh
 #
-# Runs npm run build && npm test before any push.
-# Fails the push if either step fails, so broken code never reaches CI.
+# Builds, then blocks the push if it introduces any test failure that origin/main does not
+# already have. The bar is NOT-WORSE, not green — see scripts/hooks/lib/not-worse-gate.sh.
 #
 # To bypass in an emergency (last resort):
 #   git push --no-verify
 # Do NOT use --no-verify routinely. Fix the error instead.
+#
+# It should now be rare to need it: the gate no longer demands a green suite, only that you do not
+# make things worse. If you find yourself reaching for --no-verify often, that is evidence about the
+# gate rather than about you — say so rather than building the habit.
 
 set -euo pipefail
 
@@ -32,20 +36,15 @@ cd "$REPO_ROOT"
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
 unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_PREFIX GIT_QUARANTINE_PATH
 
-echo "[pre-push] Running build..."
-if ! npm run build --silent; then
-  echo ""
-  echo "[pre-push] Build failed. Fix the error before pushing." >&2
-  echo "[pre-push] Push aborted." >&2
-  exit 1
-fi
-
-echo "[pre-push] Running tests..."
-if ! npm test --silent; then
-  echo ""
-  echo "[pre-push] Tests failed. Fix the failing tests before pushing." >&2
-  echo "[pre-push] Push aborted." >&2
-  exit 1
-fi
-
-echo "[pre-push] Build and tests passed. Pushing..."
+# THE BAR IS "NOT WORSE", NOT "GREEN".
+#
+# This hook used to require a fully green suite. `main` has not been green for some time, so the gate
+# was unpassable BY CONSTRUCTION: every push, including pushes that fixed things, needed --no-verify.
+# A gate that must be bypassed to do ordinary work stops being a gate — people learn the bypass, and
+# then it is not there on the day it would have caught something. Measured on this repo: the suite ran
+# 30 failing entries on main while a branch adding 11 passing tests was refused.
+#
+# So the question changed from "is the suite green" to "does this branch introduce a failure that
+# origin/main does not already have". See scripts/hooks/lib/not-worse-gate.sh for the full reasoning,
+# including why the baseline is pinned by ref and built like-for-like, and why it fails CLOSED.
+exec "$REPO_ROOT/scripts/hooks/lib/not-worse-gate.sh"
