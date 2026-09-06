@@ -81,8 +81,31 @@ function assertUnsetsEveryVariable(source: string, label: string): void {
   // header comment says "Runs npm run build && npm test", so indexOf('npm run build') lands
   // on line 4 and the window excludes the very unsets it is meant to inspect. This caught
   // exactly that on its first run.
-  const runsBuild = source.indexOf('if ! npm run build');
-  expect(runsBuild, `${label}: no longer runs the build the way this test locates it`).toBeGreaterThan(0);
+  // WHERE "WORK" BEGINS, and this locator has now been wrong twice for opposite reasons.
+  //
+  // First it was `indexOf('npm run build')`, which matched the hook's own HEADER COMMENT on line 4
+  // and sliced a window that excluded the very unsets it was meant to inspect — a check that could
+  // only pass.
+  //
+  // Then the hook stopped running the build inline: it now unsets, then `exec`s the not-worse gate,
+  // which builds and tests in the exec'd process. `indexOf('if ! npm run build')` returned -1 and the
+  // test failed — CORRECTLY, in the sense that it noticed, but for a reason that is not a defect.
+  //
+  // So locate the FIRST line that actually does work, under either shape, and fail loudly if neither
+  // exists rather than silently slicing the whole file (which would make every assertion below pass).
+  // `exec` is a legitimate boundary: it REPLACES the process, so a variable unset before it is unset
+  // for everything the gate then runs.
+  const workMarkers = [/^\s*if ! npm run build/m, /^\s*exec\s+/m];
+  const positions = workMarkers
+    .map((re) => source.search(re))
+    .filter((i) => i > 0);
+  expect(
+    positions.length,
+    `${label}: found no line that runs the build or execs a gate — this test can no longer locate ` +
+      `where the hook starts doing work, so it cannot prove the unsets come first. Update the ` +
+      `markers deliberately; do NOT widen the slice to make this pass.`,
+  ).toBeGreaterThan(0);
+  const runsBuild = Math.min(...positions);
   const unsetBeforeWork = source.slice(0, runsBuild);
   for (const key of LEAKED_GIT_ENV) {
     expect(
