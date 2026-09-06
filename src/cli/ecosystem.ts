@@ -1,15 +1,75 @@
 import { Command } from 'commander';
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync, realpathSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
+
+/**
+ * The timezone to BAKE INTO the generated ecosystem file, as a literal.
+ *
+ * WHY A LITERAL AND NOT `process.env.TZ || ...`
+ * ---------------------------------------------
+ * Every other env var in the generated file is written as `process.env.X || 'default'` so PM2 picks up
+ * the calling shell's value. For TZ that pattern is not a convenience — it is a live defect.
+ *
+ * Cron schedules are matched against process-LOCAL time (`nextFireFromCron` compares the cron fields to
+ * `d.getHours()`, `d.getDate()`, `d.getDay()`), so THE DAEMON'S TIMEZONE IS THE FLEET'S SCHEDULE. If TZ
+ * is read from whoever runs `pm2 start`, then any shell that ever restarts the daemon silently re-times
+ * every clock cron in the system.
+ *
+ * That is not hypothetical. On 2026-09-04 a daemon was restarted from an agent's terminal that had
+ * `TZ=UTC` exported. The daemon inherited it, and every `m h * * *` cron in the fleet fired five hours
+ * early for nine days before anyone noticed — the schedules were wrong while every status display was
+ * green, because each process was internally consistent about its own clock.
+ *
+ * WHY WE DO NOT JUST READ `Intl.DateTimeFormat().resolvedOptions().timeZone`
+ * -------------------------------------------------------------------------
+ * That call RESPECTS `process.env.TZ`. Using it here would read the zone off the shell that happens to
+ * run `cortextos ecosystem` — reintroducing exactly the contamination this change exists to stop, just
+ * one step earlier and far less visibly, because it would be baked in as a literal that LOOKS deliberate.
+ *
+ * So we read the SYSTEM zone from /etc/localtime, which `TZ` cannot influence, and fall back to `Intl`
+ * only where that file does not exist (non-Unix hosts). An explicit `--timezone` always wins: the point
+ * is that the value is CHOSEN and reviewable in the file, not inherited by accident.
+ */
+export function resolveSystemTimezone(explicit?: string): string {
+  const validate = (zone: string): string => {
+    // Throws RangeError on an invalid identifier, which is what we want: a bad zone should fail at
+    // generation time, loudly, rather than produce a daemon that silently falls back to UTC at runtime.
+    new Intl.DateTimeFormat('en-US', { timeZone: zone });
+    return zone;
+  };
+
+  if (explicit) return validate(explicit);
+
+  // /etc/localtime is a symlink into the zoneinfo database, e.g.
+  //   /etc/localtime -> /usr/share/zoneinfo/America/Chicago
+  // The zone name is everything after the zoneinfo directory component.
+  try {
+    const target = realpathSync('/etc/localtime');
+    const marker = '/zoneinfo/';
+    const idx = target.indexOf(marker);
+    if (idx !== -1) {
+      const zone = target.slice(idx + marker.length);
+      // Some systems interpose a "posix/" or "right/" subdirectory.
+      const cleaned = zone.replace(/^(posix|right)\//, '');
+      if (cleaned) return validate(cleaned);
+    }
+  } catch {
+    // fall through to Intl
+  }
+
+  return validate(Intl.DateTimeFormat().resolvedOptions().timeZone);
+}
 
 export const ecosystemCommand = new Command('ecosystem')
   .option('--instance <id>', 'Instance ID', 'default')
   .option('--org <name>', 'Organization name (auto-detected if not specified)')
   .option('--output <path>', 'Output file', 'ecosystem.config.js')
+  .option('--timezone <zone>', 'IANA timezone to bake into the daemon env as a literal (default: the system zone, read from /etc/localtime so an exported TZ cannot influence it)')
   .description('Generate PM2 ecosystem.config.js from agent configs')
-  .action(async (options: { instance: string; org?: string; output: string }) => {
+  .action(async (options: { instance: string; org?: string; output: string; timezone?: string }) => {
+    const timezone = resolveSystemTimezone(options.timezone);
     const ctxRoot = join(homedir(), '.cortextos', options.instance);
     // BUG-035 (companion fix): same project-root discovery as enable-agent.ts
     // so `cortextos ecosystem` works from outside ~/cortextos.
@@ -126,6 +186,10 @@ export const ecosystemCommand = new Command('ecosystem')
 // Note: env vars use process.env.X || 'default' so PM2 picks up the value
 // from the calling shell at startup time. This means \`CTX_INSTANCE_ID=foo
 // pm2 restart cortextos-daemon\` switches instances without regenerating.
+//
+// TZ is the deliberate exception: it is written as a LITERAL so the daemon's
+// clock cannot be changed by whoever happens to restart it. See the comment
+// on the TZ line itself.
 module.exports = {
   apps: [
     {
@@ -139,6 +203,18 @@ module.exports = {
         CTX_FRAMEWORK_ROOT: ${JSON.stringify(projectRoot)},
         CTX_PROJECT_ROOT: ${JSON.stringify(projectRoot)},
         CTX_ORG: process.env.CTX_ORG || ${JSON.stringify(detectedOrg)},
+        // TZ is a LITERAL, deliberately NOT \`process.env.TZ || ...\` like the vars above.
+        //
+        // Cron schedules are matched against process-LOCAL time, so the daemon's timezone IS the
+        // fleet's schedule. Reading TZ from the calling shell means any shell that ever restarts the
+        // daemon silently re-times every clock cron. That happened here: a daemon restarted from a
+        // terminal with TZ=UTC exported ran every \`m h * * *\` cron five hours early for nine days,
+        // while every status display stayed green.
+        //
+        // Baked at generation time from the SYSTEM zone (/etc/localtime), which an exported TZ cannot
+        // influence. Change it by re-running \`cortextos ecosystem --timezone <zone>\`, or by editing
+        // this line — both are visible and reviewable. Do not turn it back into a shell lookup.
+        TZ: ${JSON.stringify(timezone)},
       },
       max_restarts: 50,
       restart_delay: 5000,
@@ -150,6 +226,9 @@ module.exports = {
 
     writeFileSync(options.output, content, 'utf-8');
     console.log(`Generated ${options.output} with daemon (manages ${agents.length} agents)${hasDashboard ? ' + dashboard' : ''}`);
+    // Say the zone out loud. It is the one baked-in value a reader cannot change by exporting a
+    // variable, so it is the one worth seeing at generation time rather than discovering at 3am.
+    console.log(`Daemon timezone: ${timezone}${options.timezone ? ' (explicit --timezone)' : ' (system zone)'}`);
     console.log('\nStart with:');
     console.log(`  pm2 start ${options.output}`);
     console.log('  pm2 save');
