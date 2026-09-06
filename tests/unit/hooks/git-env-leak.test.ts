@@ -85,14 +85,40 @@ function resolveEffectiveHook(): { path: string; exists: boolean; hooksPath: str
   return { path, exists: existsSync(path), hooksPath };
 }
 
+/**
+ * Byte offset of the first line where the hook starts DOING WORK.
+ *
+ * ONE LOCATOR, USED BY BOTH VARIABLE FAMILIES. There were two — this one, and a plain
+ * `indexOf('if ! npm run build')` inside the CTX_ helper below — and the second broke the moment
+ * the hook stopped running the build inline. Two locators for one concept is the drift this file
+ * warns about everywhere else, committed inside the file that warns about it.
+ *
+ * This has now been wrong twice, for opposite reasons, which is why it is a function and not a
+ * string:
+ *   - `indexOf('npm run build')` matched the hook's own HEADER COMMENT on line 4 and sliced a
+ *     window that excluded the very unsets it was meant to inspect — a check that could only pass.
+ *   - Then the hook stopped building inline: it unsets, then `exec`s the not-worse gate, which
+ *     builds and tests in the exec'd process. `indexOf('if ! npm run build')` returned -1.
+ *
+ * `exec` is a legitimate boundary: it REPLACES the process, so a variable unset before it is unset
+ * for everything the gate then runs. Fail LOUDLY when no marker matches rather than slicing the
+ * whole file, which would make every assertion downstream pass over an empty question.
+ */
+function startOfWork(source: string, label: string): number {
+  const workMarkers = [/^\s*if ! npm run build/m, /^\s*exec\s+/m];
+  const positions = workMarkers.map((re) => source.search(re)).filter((i) => i > 0);
+  expect(
+    positions.length,
+    `${label}: found no line that runs the build or execs a gate — this test can no longer locate ` +
+      `where the hook starts doing work, so it cannot prove the unsets come first. Update the ` +
+      `markers deliberately; do NOT widen the slice to make this pass.`,
+  ).toBeGreaterThan(0);
+  return Math.min(...positions);
+}
+
 function assertUnsetsEveryVariable(source: string, label: string): void {
-  // Slice at the line that RUNS the build, not at the first mention of it: the hook's own
-  // header comment says "Runs npm run build && npm test", so indexOf('npm run build') lands
-  // on line 4 and the window excludes the very unsets it is meant to inspect. This caught
-  // exactly that on its first run.
-  const runsBuild = source.indexOf('if ! npm run build');
-  expect(runsBuild, `${label}: no longer runs the build the way this test locates it`).toBeGreaterThan(0);
-  const unsetBeforeWork = source.slice(0, runsBuild);
+  // The locator and its history now live in startOfWork() — one copy, used by both families.
+  const unsetBeforeWork = source.slice(0, startOfWork(source, label));
   for (const key of LEAKED_GIT_ENV) {
     expect(
       new RegExp(`unset(\\s+[A-Z_]+)*\\s+${key}\\b`).test(unsetBeforeWork),
@@ -198,9 +224,7 @@ describe('git plumbing env must not leak from the pre-push hook into the test su
 
 /** The hook text that runs BEFORE any build or test — the part that is supposed to be a scrub. */
 function preludeOf(source: string, label: string): string {
-  const runsBuild = source.indexOf('if ! npm run build');
-  expect(runsBuild, `${label}: no longer runs the build the way this test locates it`).toBeGreaterThan(0);
-  return source.slice(0, runsBuild);
+  return source.slice(0, startOfWork(source, label));
 }
 
 function assertStripsCtxDynamically(source: string, label: string): void {
