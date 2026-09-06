@@ -326,8 +326,23 @@ export function checkGoalStaleness(
         continue;
       }
 
-      // Parse ISO 8601 timestamp
-      const parsedDate = new Date(updatedLine);
+      // Parse ISO 8601 timestamp.
+      //
+      // The generator writes this line as `<iso> (by <who>)` when an author is
+      // known (src/cli/goals.ts) and as a bare `<iso>` otherwise. `new Date()`
+      // on the whole line returns Invalid Date for the first form, so every
+      // agent whose goals were set by a named author reported parse_error —
+      // the check has never returned a real reading on a live fleet.
+      //
+      // Take the leading whitespace-delimited token first, and fall back to the
+      // whole line. The fallback keeps every input that parsed before parsing
+      // now (e.g. formats whose first token alone is not a date), so this is
+      // strictly more permissive than the previous behaviour.
+      const leadingToken = updatedLine.split(/\s+/)[0] ?? '';
+      let parsedDate = new Date(leadingToken);
+      if (isNaN(parsedDate.getTime())) {
+        parsedDate = new Date(updatedLine);
+      }
       if (isNaN(parsedDate.getTime())) {
         agents.push({
           agent: agentName,
