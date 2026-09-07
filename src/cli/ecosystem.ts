@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { existsSync, readFileSync, readdirSync, writeFileSync, realpathSync } from 'fs';
+import { execFileSync } from 'child_process';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
@@ -19,7 +20,8 @@ import { fileURLToPath } from 'url';
  *
  * That is not hypothetical. On 2026-09-04 a daemon was restarted from an agent's terminal that had
  * `TZ=UTC` exported. The daemon inherited it, and every `m h * * *` cron in the fleet fired five hours
- * early for nine days before anyone noticed — the schedules were wrong while every status display was
+ * early for the ~45 hours between that restart and the next one (2026-09-04T22:58Z to
+ * 2026-09-06T20:17Z) — the schedules were wrong while every status display was
  * green, because each process was internally consistent about its own clock.
  *
  * WHY WE DO NOT JUST READ `Intl.DateTimeFormat().resolvedOptions().timeZone`
@@ -28,38 +30,120 @@ import { fileURLToPath } from 'url';
  * run `cortextos ecosystem` — reintroducing exactly the contamination this change exists to stop, just
  * one step earlier and far less visibly, because it would be baked in as a literal that LOOKS deliberate.
  *
- * So we read the SYSTEM zone from /etc/localtime, which `TZ` cannot influence, and fall back to `Intl`
- * only where that file does not exist (non-Unix hosts). An explicit `--timezone` always wins: the point
- * is that the value is CHOSEN and reviewable in the file, not inherited by accident.
+ * So we read the SYSTEM zone from /etc/localtime, which `TZ` cannot influence. An explicit
+ * `--timezone` always wins: the point is that the value is CHOSEN and reviewable in the file, not
+ * inherited by accident.
+ *
+ * THERE IS NO `Intl` FALLBACK. An earlier revision fell back to
+ * `Intl.DateTimeFormat().resolvedOptions().timeZone` when discovery did not work out. That call reads
+ * `process.env.TZ`, so the fallback baked the contaminated value in as a literal AND printed it as
+ * "(system zone)" — reproducing the exact defect this file exists to remove, in a form that looks
+ * deliberate. Discovery now STOPS and asks for `--timezone` instead. A generator that refuses is
+ * recoverable in one flag; a generator that guesses is a fleet-wide clock error nobody can see.
  */
-export function resolveSystemTimezone(explicit?: string): string {
-  const validate = (zone: string): string => {
-    // Throws RangeError on an invalid identifier, which is what we want: a bad zone should fail at
-    // generation time, loudly, rather than produce a daemon that silently falls back to UTC at runtime.
-    new Intl.DateTimeFormat('en-US', { timeZone: zone });
-    return zone;
-  };
 
-  if (explicit) return validate(explicit);
+/**
+ * Prove that a zone string is honoured by the PROCESS TZ contract — not merely accepted by `Intl`.
+ *
+ * `new Intl.DateTimeFormat('en-US', { timeZone: z })` is NOT a proxy for "node will run in z". Two
+ * measured counter-examples on node v22 (both accepted by Intl, both producing a wrong daemon clock):
+ *
+ *   --timezone "+01:00"           Intl accepts and canonicalises to "+01:00";
+ *                                 a fresh process with TZ=+01:00 runs in the SYSTEM zone.
+ *   --timezone "america/chicago"  Intl accepts and canonicalises to "America/Chicago";
+ *                                 a fresh process with TZ=america/chicago reports an UNDEFINED zone.
+ *
+ * The second is the reason this is not written as "reject offsets": the defect is not about offsets,
+ * it is about validating against the wrong contract. Only the process contract answers the question
+ * that matters, so we ask it directly — one short-lived child per generation.
+ *
+ * An allowlist was considered and rejected. `Intl.supportedValuesOf('timeZone')` omits `UTC`,
+ * `Etc/UTC`, `Etc/GMT+1` and `US/Central`, all of which a fresh process honours, so membership would
+ * reject valid input; and an allowlist is a proxy again, which is what produced this bug.
+ */
+export function proveProcessTimezone(zone: string, origin: string): string {
+  // Throws RangeError on an identifier Intl does not know at all. Cheap, and it keeps the clearest
+  // error for the commonest typo. It is a NECESSARY check, never a sufficient one.
+  const canonical = new Intl.DateTimeFormat('en-US', { timeZone: zone }).resolvedOptions().timeZone;
 
+  // `env` is set explicitly rather than spread from process.env: the child must not inherit an
+  // exported TZ, which is the whole hazard, and it needs nothing else to answer this question.
+  let observed: string;
+  try {
+    observed = execFileSync(
+      process.execPath,
+      ['-p', 'String(Intl.DateTimeFormat().resolvedOptions().timeZone)'],
+      { env: { PATH: process.env.PATH ?? '', TZ: zone }, encoding: 'utf-8', timeout: 15_000 },
+    ).trim();
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Could not verify the timezone "${zone}" (${origin}): the check process failed: ${detail}\n` +
+        'Refusing to bake an unverified zone into the daemon env.',
+    );
+  }
+
+  if (observed !== canonical) {
+    throw new Error(
+      `Timezone "${zone}" (${origin}) is accepted by Intl but is NOT honoured as a process TZ.\n` +
+        `  Intl canonicalises it to: ${canonical}\n` +
+        `  a fresh node with TZ="${zone}" actually runs in: ${observed || '<undefined>'}\n` +
+        'Baking this in would give the daemon a different clock from the one you asked for, and every\n' +
+        'clock cron in the fleet is matched against that clock. Pass an IANA zone name with exact\n' +
+        'casing, e.g. --timezone America/Chicago.',
+    );
+  }
+
+  // Bake exactly the string that was proved, not its canonicalisation: what ships is what was tested.
+  return zone;
+}
+
+/**
+ * Read the host zone from /etc/localtime. Throws — never guesses — when that cannot be done.
+ *
+ * Each failure gets its own message because they need different fixes, and because an earlier
+ * revision funnelled all three into one silent `catch`.
+ */
+function discoverSystemTimezone(): string {
   // /etc/localtime is a symlink into the zoneinfo database, e.g.
   //   /etc/localtime -> /usr/share/zoneinfo/America/Chicago
   // The zone name is everything after the zoneinfo directory component.
+  let target: string;
   try {
-    const target = realpathSync('/etc/localtime');
-    const marker = '/zoneinfo/';
-    const idx = target.indexOf(marker);
-    if (idx !== -1) {
-      const zone = target.slice(idx + marker.length);
-      // Some systems interpose a "posix/" or "right/" subdirectory.
-      const cleaned = zone.replace(/^(posix|right)\//, '');
-      if (cleaned) return validate(cleaned);
-    }
-  } catch {
-    // fall through to Intl
+    target = realpathSync('/etc/localtime');
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Could not read /etc/localtime to discover the system timezone: ${detail}\n` +
+        'This is expected on hosts without a zoneinfo symlink (including Windows).\n' +
+        'Pass the zone explicitly: cortextos ecosystem --timezone America/Chicago',
+    );
   }
 
-  return validate(Intl.DateTimeFormat().resolvedOptions().timeZone);
+  const marker = '/zoneinfo/';
+  const idx = target.indexOf(marker);
+  if (idx === -1) {
+    throw new Error(
+      `/etc/localtime resolves to "${target}", which is not inside a zoneinfo directory, so no zone\n` +
+        'name can be read from it.\n' +
+        'Pass the zone explicitly: cortextos ecosystem --timezone America/Chicago',
+    );
+  }
+
+  // Some systems interpose a "posix/" or "right/" subdirectory.
+  const cleaned = target.slice(idx + marker.length).replace(/^(posix|right)\//, '');
+  if (!cleaned) {
+    throw new Error(
+      `/etc/localtime resolves to "${target}", which yields an empty zone name.\n` +
+        'Pass the zone explicitly: cortextos ecosystem --timezone America/Chicago',
+    );
+  }
+  return cleaned;
+}
+
+export function resolveSystemTimezone(explicit?: string): string {
+  if (explicit) return proveProcessTimezone(explicit, 'explicit --timezone');
+  return proveProcessTimezone(discoverSystemTimezone(), '/etc/localtime');
 }
 
 export const ecosystemCommand = new Command('ecosystem')
@@ -208,8 +292,9 @@ module.exports = {
         // Cron schedules are matched against process-LOCAL time, so the daemon's timezone IS the
         // fleet's schedule. Reading TZ from the calling shell means any shell that ever restarts the
         // daemon silently re-times every clock cron. That happened here: a daemon restarted from a
-        // terminal with TZ=UTC exported ran every \`m h * * *\` cron five hours early for nine days,
-        // while every status display stayed green.
+        // terminal with TZ=UTC exported ran every \`m h * * *\` cron five hours early for the ~45 hours
+        // until the next restart (2026-09-04T22:58Z to 2026-09-06T20:17Z), while every status display
+        // stayed green.
         //
         // Baked at generation time from the SYSTEM zone (/etc/localtime), which an exported TZ cannot
         // influence. Change it by re-running \`cortextos ecosystem --timezone <zone>\`, or by editing
