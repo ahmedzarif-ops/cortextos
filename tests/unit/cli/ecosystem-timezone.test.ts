@@ -21,7 +21,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { resolveSystemTimezone, proveProcessTimezone, ecosystemCommand } from '../../../src/cli/ecosystem';
@@ -109,10 +109,43 @@ describe('resolveSystemTimezone', () => {
  * These assert BEHAVIOUR, not the shape of the check, so a future rewrite of the validator is free to
  * satisfy them any way it likes.
  */
+/**
+ * ⚠ THE REJECTION PATH FOR AN OFFSET STRING IS HOST-DEPENDENT, and three arms here once asserted
+ * the wrong half of that. `+01:00` is REJECTED on both hosts, by DIFFERENT mechanisms:
+ *
+ *   macOS ICU   ACCEPTS it at Intl, and a fresh process then does not honour it
+ *               → this module's own "NOT honoured as a process TZ" error.
+ *   ubuntu ICU  REJECTS it at Intl outright
+ *               → RangeError "Invalid time zone specified: +01:00", raised before this module speaks.
+ *
+ * The arms asserted the macOS MESSAGE — the mechanism, not the outcome — so they passed on every
+ * machine in the fleet and failed on CI. A test that pins which PATH a rejection took is testing the
+ * host as much as the code.
+ *
+ * ⇒ Assert the OUTCOME (rejected), and PRINT the path rather than skipping quietly, so a host
+ * difference stays visible instead of being smoothed into "it threw somehow".
+ */
+function rejectionPathFor(zone: string): 'intl' | 'process-contract' {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone });
+    return 'process-contract';
+  } catch {
+    return 'intl';
+  }
+}
+
 describe('proveProcessTimezone — the process TZ contract, not Intl acceptance', () => {
-  it('REJECTS a UTC-offset string, which Intl accepts and node does not honour', () => {
-    // Intl canonicalises "+01:00" to "+01:00"; a fresh process with TZ=+01:00 runs in the system zone.
-    expect(() => proveProcessTimezone('+01:00', 'test')).toThrow(/NOT honoured as a process TZ/);
+  it('REJECTS a UTC-offset string, whichever layer catches it', () => {
+    const path = rejectionPathFor('+01:00');
+    // Loud, never silent: the reader must be able to see which contract did the rejecting here.
+    console.log(`    [host] "+01:00" is rejected via: ${path}`);
+
+    expect(() => proveProcessTimezone('+01:00', 'test')).toThrow();
+
+    if (path === 'process-contract') {
+      // Only where Intl accepts it does this module get to speak. Where it does, hold it to its words.
+      expect(() => proveProcessTimezone('+01:00', 'test')).toThrow(/NOT honoured as a process TZ/);
+    }
   });
 
   it('REJECTS a lower-cased IANA name — the case Intl silently canonicalises and node does not', () => {
@@ -124,8 +157,15 @@ describe('proveProcessTimezone — the process TZ contract, not Intl acceptance'
   it('names both the requested and the actually-observed zone, so the error is diagnosable', () => {
     // An error that only says "invalid" sends the reader to the spelling. The failure here is not a
     // spelling error, so the message has to carry the discrepancy that makes it one.
-    expect(() => proveProcessTimezone('+01:00', 'test')).toThrow(/Intl canonicalises it to/);
-    expect(() => proveProcessTimezone('+01:00', 'test')).toThrow(/actually runs in/);
+    //
+    // ⚠ Asserted against the LOWER-CASED IANA name, not against "+01:00". Both hosts accept
+    // "america/chicago" at Intl and neither honours it as a process TZ, so this module always
+    // produces the message — whereas an offset is intercepted by Intl on some hosts and this
+    // module never speaks at all. Choosing the input that exercises the path on EVERY host keeps
+    // the coverage instead of skipping it on one, which a `path === 'intl'` guard would have done.
+    expect(rejectionPathFor('america/chicago')).toBe('process-contract');
+    expect(() => proveProcessTimezone('america/chicago', 'test')).toThrow(/Intl canonicalises it to/);
+    expect(() => proveProcessTimezone('america/chicago', 'test')).toThrow(/actually runs in/);
   });
 
   it('ACCEPTS a plain IANA zone', () => {
@@ -149,8 +189,13 @@ describe('proveProcessTimezone — the process TZ contract, not Intl acceptance'
   it('is not fooled by an exported TZ that happens to match the wrong answer', () => {
     // The child must not inherit the parent's TZ. With TZ=Europe/Berlin exported, a bad zone must
     // still be rejected rather than reading back the ambient value and calling it agreement.
+    // Uses the lower-cased IANA name for the same reason as the arm above: it reaches this module's
+    // own check on every host, so the assertion is about TZ inheritance and not about which ICU the
+    // runner shipped with.
     process.env.TZ = 'Europe/Berlin';
-    expect(() => proveProcessTimezone('+01:00', 'test')).toThrow(/NOT honoured as a process TZ/);
+    expect(() => proveProcessTimezone('america/chicago', 'test')).toThrow(/NOT honoured as a process TZ/);
+    // And the offset must still be rejected under the same contaminated environment, by some layer.
+    expect(() => proveProcessTimezone('+01:00', 'test')).toThrow();
   });
 });
 
@@ -190,12 +235,33 @@ describe('the emitted daemon env block', () => {
   it('carries TZ as a literal, not as a process.env lookup', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cortextos-eco-'));
     const out = join(dir, 'ecosystem.config.js');
+
+    // ⛔ THE GENERATOR RETURNS WITHOUT WRITING A FILE WHEN IT FINDS ZERO AGENTS
+    // (`if (agents.length === 0) { console.log('No agents found...'); return; }`), so this arm needs
+    // an agent to exist before it can assert anything about the emitted file.
+    //
+    // ⚠ IT USED TO GET ONE BY ACCIDENT. Project-root resolution falls back to `~/cortextos` when that
+    // directory has an `orgs/`, so on any machine with a live cortextOS install the generator
+    // silently scanned the DEVELOPER'S REAL FLEET and wrote a file. On a machine without one — every
+    // CI runner — it found nothing, returned early, and `existsSync(out)` was false. The arm was
+    // therefore green for everyone who ran it and red where nobody looked, and the failure message
+    // ("expected false to be true") says nothing about the cause.
+    //
+    // ⇒ Provide a fixture agent and pin CTX_FRAMEWORK_ROOT to it, so the test depends on nothing
+    // outside its own tmpdir. Reproduced before fixing: exporting CTX_FRAMEWORK_ROOT to an empty
+    // directory reproduces the CI failure exactly on a machine where the arm otherwise passes.
+    mkdirSync(join(dir, 'orgs', 'test-org', 'agents', 'test-agent'), { recursive: true });
+
+    const prevRoot = process.env.CTX_FRAMEWORK_ROOT;
     const prev = process.cwd();
     try {
+      process.env.CTX_FRAMEWORK_ROOT = dir;
       process.chdir(dir);
       await ecosystemCommand.parseAsync(['node', 'ecosystem', '--output', out, '--timezone', 'Europe/Berlin']);
     } finally {
       process.chdir(prev);
+      if (prevRoot === undefined) delete process.env.CTX_FRAMEWORK_ROOT;
+      else process.env.CTX_FRAMEWORK_ROOT = prevRoot;
     }
 
     expect(existsSync(out)).toBe(true);
