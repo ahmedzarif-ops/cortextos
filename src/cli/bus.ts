@@ -165,12 +165,56 @@ busCommand
   .command('send-message')
   .argument('<to>', 'Target agent')
   .argument('<priority>', 'Message priority (urgent, high, normal, low)')
-  .argument('<text>', 'Message text')
+  .argument('[text]', 'Message text (omit when using --text-file)')
   .argument('[reply-to]', 'Reply to message ID (optional positional form)')
   .option('--reply-to <id>', 'Reply to message ID')
-  .action((to: string, priority: string, text: string, replyToArg: string | undefined, opts: { replyTo?: string }) => {
+  .option('--text-file <path>', 'Read the message body from a file instead of the command line')
+  .action((to: string, priority: string, textArg: string | undefined, replyToArg: string | undefined, opts: { replyTo?: string; textFile?: string }) => {
     // Accept reply-to as either positional arg or --reply-to flag (P2 fix #9)
     const effectiveReplyTo = opts.replyTo ?? replyToArg;
+
+    // BODY SOURCE (2026-09-07). `text` is ONE POSITIONAL and `reply-to` is the NEXT, so a body
+    // that reaches the shell as an interpolated string can be SPLIT by the shell before this
+    // process ever sees it. Measured: a body carrying an EVEN number of apostrophes inside a
+    // single-quoted argument is split into separate words — fragment 1 arrives as the entire
+    // message, fragment 2 is bound to `reply-to` as a garbage id, the rest is discarded, and the
+    // command RETURNS A VALID MESSAGE ID AT EXIT 0. The sender sees complete success.
+    //
+    // An ODD number of quotes fails loudly at parse time, which is why that variant is the one
+    // people have found; the even case is the common one and it is silent.
+    //
+    // --text-file removes the body from the command line entirely: the shell never parses it, so
+    // apostrophes, quotes, $VARS and backticks cannot alter it.
+    let text: string;
+    if (opts.textFile !== undefined) {
+      if (textArg !== undefined) {
+        console.error('Pass the body EITHER as the <text> argument OR via --text-file, not both. Refusing to guess which one you meant.');
+        process.exit(1);
+      }
+      // Note for callers: with --text-file, reply-to must use the --reply-to FLAG. A bare
+      // positional would be parsed as <text> and rejected by the check above.
+      const { readFileSync: readBody } = require('fs');
+      try {
+        text = readBody(opts.textFile, 'utf-8');
+      } catch (err) {
+        console.error(`Could not read --text-file ${opts.textFile}: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      // An unreadable file already exited above. An EMPTY one is the dangerous case: it would
+      // send a valid, empty message and return an id, which is the same false success this flag
+      // exists to remove. Fail closed instead.
+      if (text!.length === 0) {
+        console.error(`--text-file ${opts.textFile} is EMPTY (0 bytes). Refusing to send an empty message; this is what a failed capture looks like.`);
+        process.exit(1);
+      }
+    } else {
+      if (textArg === undefined) {
+        console.error('Missing message body: pass it as the <text> argument or with --text-file <path>.');
+        process.exit(1);
+      }
+      text = textArg;
+    }
+
     const validPriorities: Priority[] = ['urgent', 'high', 'normal', 'low'];
     if (!validPriorities.includes(priority as Priority)) {
       console.error(`Invalid priority '${priority}'. Must be one of: ${validPriorities.join(', ')}`);
