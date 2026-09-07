@@ -31,7 +31,29 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+
+// ⛔ THE BUS IS MOCKED BEFORE THE COMMAND IS IMPORTED, AND THAT IS NOT A CONVENIENCE.
+//
+// These arms drive the REAL `send-message` action. They pass today only because each one exits
+// before reaching the send — which makes the SAFETY of the test depend on the CORRECTNESS of the
+// code under test. That dependency was not theoretical: while proving these arms can detect a
+// missing guard, the both-sources refusal was disabled and the run SENT THE FIXTURE BODY
+// ("from the file") to a real agent on the real bus, at 2026-09-07T18:03:11Z. The recipient found
+// it; the test reported four green arms either way.
+//
+// A test that is safe only while the code is correct is not a test, it is a tripwire pointed at
+// the fleet — and it fires at exactly the moment the test is most needed. So the transport is
+// removed outright: no arm can emit traffic regardless of which guard is broken.
+vi.mock('../../../src/bus/message.js', () => ({
+  sendMessage: vi.fn(() => {
+    throw new Error('sendMessage must never be reached by these tests: every arm is a refusal');
+  }),
+  checkInbox: vi.fn(() => []),
+  ackInbox: vi.fn(),
+}));
+
 import { busCommand } from '../../../src/cli/bus';
+import { sendMessage } from '../../../src/bus/message.js';
 
 function sendMessageCmd() {
   const cmd = busCommand.commands.find((c) => c.name() === 'send-message');
@@ -57,6 +79,10 @@ describe('send-message --text-file', () => {
   });
 
   afterEach(() => {
+    // THE ASSERTION THAT WOULD HAVE CAUGHT THE ESCAPED MESSAGE. Every arm is a refusal, so the
+    // transport must be untouched in ALL of them — including any future arm someone adds. Checked
+    // here rather than per-test so it cannot be forgotten by the next author.
+    expect(sendMessage).not.toHaveBeenCalled();
     exitSpy.mockRestore();
     errSpy.mockRestore();
     rmSync(dir, { recursive: true, force: true });
