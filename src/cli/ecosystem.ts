@@ -142,7 +142,11 @@ function discoverSystemTimezone(): string {
 }
 
 export function resolveSystemTimezone(explicit?: string): string {
-  if (explicit) return proveProcessTimezone(explicit, 'explicit --timezone');
+  // `!== undefined`, NOT truthiness. `--timezone ""` is a SUPPLIED value, not an absent one, and
+  // treating it as absent would discover a zone the operator never asked for — the same
+  // "wrong value that looks deliberate" this function exists to prevent, entering through its own
+  // escape hatch. An empty string reaches proveProcessTimezone and is rejected there.
+  if (explicit !== undefined) return proveProcessTimezone(explicit, 'explicit --timezone');
   return proveProcessTimezone(discoverSystemTimezone(), '/etc/localtime');
 }
 

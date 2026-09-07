@@ -75,6 +75,23 @@ describe('resolveSystemTimezone', () => {
     expect(() => resolveSystemTimezone('Not/AZone')).toThrow();
   });
 
+  it('THROWS on an EMPTY explicit zone instead of silently discovering one', () => {
+    // Review finding on this PR: `if (explicit)` is a TRUTHINESS test, so `--timezone ""` is read as
+    // "not supplied" and falls through to /etc/localtime discovery. The operator asked for a zone,
+    // passed a malformed one, and got a plausible literal they never chose — which is precisely the
+    // "wrong value that looks deliberate" failure this whole file exists to prevent, arriving through
+    // the argument that was supposed to be the escape hatch from it.
+    process.env.TZ = 'UTC';
+
+    // Discrimination guard. Prove discovery WOULD have succeeded on this host, so the throw below is
+    // attributable to the empty string. Without this, a host with no zoneinfo symlink makes the
+    // pre-fix code throw too, and this test passes for a reason that has nothing to do with the bug.
+    const discovered = resolveSystemTimezone();
+    expect(discovered).toBeTruthy();
+
+    expect(() => resolveSystemTimezone('')).toThrow();
+  });
+
   it('returns a zone that is actually usable by Intl', () => {
     const zone = resolveSystemTimezone();
     expect(() => new Intl.DateTimeFormat('en-US', { timeZone: zone })).not.toThrow();
