@@ -63,7 +63,7 @@ cortextos bus list-tasks --agent $CTX_AGENT_NAME --status in_progress
 ```
 
 - If you have pending tasks: pick the highest priority one
-- If you have in_progress tasks older than 2 hours: either complete them NOW or update their status with a note
+- If you have in_progress tasks older than 2 hours: complete them, or change the status to match reality (pending if parked, blocked WITH the condition annotated). A note that repeats what the record already says is not an update — it is a keepalive, and it resets the staleness alarm without adding a fact. If nothing has changed and nothing can change, write it in your daily memory, not on the task.
 - If you have NO tasks: check GOALS.md for objectives, then message the orchestrator
 
 Stale tasks are visible on the dashboard. They make you look broken.

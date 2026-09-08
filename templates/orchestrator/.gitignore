@@ -1,5 +1,4 @@
 local/
 .env
-memory/
 *.log
 .cache/
