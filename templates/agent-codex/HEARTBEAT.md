@@ -47,7 +47,7 @@ cortextos bus list-tasks --agent $CTX_AGENT_NAME --status in_progress
 ```
 
 - If you have pending tasks: pick the highest priority one
-- If you have in_progress tasks older than 2 hours: either complete them NOW or update their status with a note
+- If you have in_progress tasks older than 2 hours: complete them, or change the status to match reality (pending if parked, blocked WITH the condition annotated). A note that repeats what the record already says is not an update — it is a keepalive, and it resets the staleness alarm without adding a fact. If nothing has changed and nothing can change, write it in your daily memory, not on the task.
 - If you have NO tasks: check GOALS.md for objectives, then message the orchestrator
 
 ## Step 4: Log heartbeat event
@@ -134,8 +134,21 @@ Full reference: `plugins/cortextos-agent-skills/skills/knowledge-base/SKILL.md`
 Keep your memory collection searchable and current:
 
 ```bash
-cortextos bus kb-ingest ./MEMORY.md ./memory/$(date -u +%Y-%m-%d).md \
+# both-UTC-day-files AND all-or-nothing path set (task_1788799237155_49135842):
+#   (a) at a UTC boundary the daily holding the evening's work is no longer "today" — measured
+#       2026-09-08, 60 chunks left unsearchable after a fully compliant run;
+#   (b) kb-ingest ABORTS THE WHOLE PATH SET if any path is missing (rc=1, nothing ingested at all),
+#       and predecessor-absent days are real: 14 of 80 seat-days, ALL SIX seats on 2026-09-02.
+# So yesterday's daily is appended ONLY when it exists. BSD date first, GNU fallback.
+# Array form on purpose — an empty-string argument aborts the whole ingest (wrapper bug 00011630).
+Y="./memory/$(date -u -v-1d +%Y-%m-%d 2>/dev/null || date -u -d yesterday +%Y-%m-%d).md"
+# Handoff documents under memory/handoffs/ are EXCLUDED from the knowledge base by chief ruling 2026-09-08 (task 64087460): they restate dailies that are already indexed, and a vector store has no supersession model, so a retired handoff would return with the same confidence as the live one. Never add them to ARGS.
+ARGS=(./MEMORY.md "./memory/$(date -u +%Y-%m-%d).md")
+[ -f "$Y" ] && ARGS+=("$Y")
+cortextos bus kb-ingest "${ARGS[@]}" \
   --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private --force
+RC=$?; echo "kb-ingest rc=$RC"
+[ "$RC" -eq 0 ] || echo "KB INGEST FAILED rc=$RC — NOTHING LANDED; enumerate the collection before continuing"
 ```
 
 This runs automatically on every heartbeat cycle. It ensures past experiences, user preferences, and learned patterns are semantically searchable for future tasks. Skip if GEMINI_API_KEY is not configured.
