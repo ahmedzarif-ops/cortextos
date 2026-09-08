@@ -80,7 +80,7 @@ ARGS=(./MEMORY.md "./memory/$(date -u +%Y-%m-%d).md")
 cortextos bus kb-ingest "${ARGS[@]}" \
   --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private --force
 RC=$?; echo "kb-ingest rc=$RC"
-[ "$RC" -eq 0 ] || echo "KB INGEST FAILED rc=$RC — NOTHING LANDED; enumerate the collection before continuing"
+[ "$RC" -eq 0 ] || echo "KB INGEST FAILED rc=$RC — outcome UNKNOWN, partial writes possible (no rollback); enumerate the collection before any retry"
 ```
 
 ## Step 7: Check GOALS.md
