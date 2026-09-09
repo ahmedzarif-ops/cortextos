@@ -38,6 +38,30 @@ function runMmrag(args: string[], chromadbDir: string) {
       MMRAG_DIR: sandbox,
       MMRAG_CONFIG: configPath,
       MMRAG_CHROMADB_DIR: chromadbDir,
+      // ⛔ THESE TWO ARE THE FIX FOR A RED TEST THAT WAS ONLY EVER RED IN CI, AND THEY
+      // ARE SET FOR EVERY ARM RATHER THAN THE ONE THAT FAILED — SEE THE NOTE BELOW.
+      //
+      // `cmd_ingest` calls `get_api_key` and then `get_genai_client` BEFORE it reaches
+      // `get_chroma_collection`. Without a key, `get_api_key` prints to STDOUT and exits 1
+      // (mmrag.py). That is rc != 2 with an EMPTY STDERR, so the ingest arm's
+      // `expect(stderr).toContain('chromadb')` failed while every other assertion in it
+      // passed — a failure that names chromadb and has nothing to do with chromadb.
+      //
+      // The ambient key is what hid it. `...process.env` above forwards whatever
+      // GEMINI_API_KEY the shell happens to hold; an agent shell has one and a CI runner
+      // does not, so the SAME COMMIT was green locally and red in CI for eleven runs.
+      // Setting it here removes the coupling in BOTH directions: the test no longer passes
+      // because a developer has a key, and no longer fails because a runner has none.
+      GEMINI_API_KEY: 'test-key-never-used-no-network-call-is-made',
+      // And the key alone is not enough. `get_genai_client` falls through to
+      // `from google import genai`, which is not installed on a bare runner either — that
+      // would swap one environment coupling for another. `MMRAG_GEMINI_CLIENT_FACTORY` is
+      // the product's own documented seam for exactly this and RETURNS BEFORE that import
+      // (mmrag.py get_genai_client), so nothing outside the standard library is required.
+      // The stub raises if anything actually touches it: this test must die at
+      // `import chromadb`, and if it ever dies somewhere else we want to hear about it.
+      MMRAG_GEMINI_CLIENT_FACTORY: 'mmrag_test_stub:make_client',
+      PYTHONPATH: sandbox,
     },
   });
 }
@@ -49,6 +73,21 @@ beforeEach(() => {
   // without ever reaching the store guard.
   configPath = join(sandbox, 'config.json');
   writeFileSync(configPath, JSON.stringify({ default_collection: 'default' }));
+  // The injected Gemini client (see runMmrag). It imports nothing and is never used:
+  // every arm in this file stops at or before `import chromadb`, which sits after the
+  // client is constructed. Touching any attribute is a loud failure rather than a quiet
+  // network call.
+  writeFileSync(
+    join(sandbox, 'mmrag_test_stub.py'),
+    [
+      'def make_client(api_key):',
+      '    class _Never:',
+      '        def __getattr__(self, name):',
+      '            raise AssertionError("injected client must not be used in this test")',
+      '    return _Never()',
+      '',
+    ].join('\n'),
+  );
 });
 afterEach(() => rmSync(sandbox, { recursive: true, force: true }));
 
@@ -143,6 +182,13 @@ describe('mmrag: merging #9 must not make a first-ever ingest fail closed', () =
     // arm that would carry the guard's message.
     expect(err).not.toContain(GUARD);
     expect(r.status).not.toBe(2);
+    // ⛔ CHECKED BEFORE THE chromadb ASSERTION, BECAUSE THIS IS THE FAILURE THAT ACTUALLY
+    // HAPPENED AND IT ARRIVED DISGUISED AS THE ONE BELOW. With no GEMINI_API_KEY the run
+    // stops in `get_api_key` — on STDOUT, at rc 1 — long before the store guard, and the
+    // only symptom was `expected '' to contain 'chromadb'`: a chromadb-shaped error message
+    // for a credential-shaped cause. Asserted separately so the next reader is told WHICH
+    // gate stopped execution instead of inferring it from an empty string.
+    expect(r.stdout || '').not.toContain('No Gemini API key');
     // It got as far as the import, which sits AFTER the must_exist check in
     // get_chroma_collection. That is positive evidence of passage, not merely absence of refusal.
     expect(err).toContain('chromadb');
@@ -161,6 +207,13 @@ describe('mmrag: merging #9 must not make a first-ever ingest fail closed', () =
     const r = runMmrag(['ingest', doc, '--collection', 'brandnew'], existing);
     expect(r.stderr || '').not.toContain(GUARD);
     expect(r.status).not.toBe(2);
+    // ⭐ AND IT MUST REACH THE SAME PLACE. Without these two lines this control was VACUOUS
+    // in CI for exactly the reason it exists to exclude: with no key the run died in
+    // `get_api_key`, so "not refused" and "rc is not 2" were both true of a process that
+    // never went near the store. A control that passes when nothing under test ran is not
+    // a control — and this one said so in its own comment while being an instance of it.
+    expect(r.stdout || '').not.toContain('No Gemini API key');
+    expect(r.stderr || '').toContain('chromadb');
   });
 
   it('NEGATIVE CONTROL: `list` against that same missing store STILL fails closed', () => {
