@@ -32,6 +32,37 @@ cd "$REPO_ROOT"
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
 unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_PREFIX GIT_QUARANTINE_PATH
 
+# THE SAME DEFECT, A DIFFERENT VARIABLE FAMILY — AND THE ONE ABOVE ENUMERATED THE WRONG ONE.
+#
+# A push run from inside a live cortextOS agent shell leaks that agent's real CTX_ROOT,
+# CTX_AGENT_DIR, CTX_ORG, CTX_FRAMEWORK_ROOT and friends into `npm test`. A test that sandboxes
+# only SOME of them — CTX_FRAMEWORK_ROOT into a temp dir, say — then inherits the LIVE value for
+# the rest, and the framework's containment check refuses:
+#
+#   Resolved CTX_AGENT_DIR '…/orgs/ygs-cortex-fleet/agents/sentinel' is not under
+#   CTX_FRAMEWORK_ROOT '/tmp/…'. Refusing to proceed.
+#
+# Measured 2026-09-09 pushing PR #39, from this seat:
+#   with    CTX_*:  29 failed / 2754 passed / 3 skipped
+#   without CTX_*:   0 failed / 2783 passed / 3 skipped
+# Totals identical at 2786 both ways — 29 tests flipped by ENVIRONMENT, not by any code change.
+#
+# ⛔ THOSE 29 ARE A SAFETY GUARD FIRING CORRECTLY, NOT NOISE. The refusal is the framework
+# declining to let a sandboxed test touch a live seat's directory. The thing to preserve is the
+# REFUSAL; the thing to remove is the leak that provokes it. Anything that makes the 29 stop
+# being red WITHOUT removing the leak — a comparison that runs base and head in the same leaked
+# environment, for instance — keeps the hazard and hides the alarm, and reads identically from
+# the push receipt.
+#
+# UNSET DYNAMICALLY, never a hardcoded list (shape adopted from upstream #966): a CTX_ variable
+# added next month is covered here with no maintenance. A hardcoded list is a claim about the
+# members you happened to remember, which is exactly how the GIT_* line above came to be correct
+# and incomplete on the same day.
+for _leaked_ctx_var in $(compgen -v CTX_ || true); do
+  unset "$_leaked_ctx_var"
+done
+unset _leaked_ctx_var
+
 echo "[pre-push] Running build..."
 if ! npm run build --silent; then
   echo ""
