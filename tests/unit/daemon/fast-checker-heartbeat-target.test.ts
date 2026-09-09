@@ -83,7 +83,7 @@ describe('FastChecker watchdog heartbeat target through the real CLI', () => {
       analyticsDir: join(ctxRoot, 'analytics'),
     };
     const log = vi.fn();
-    const agent = { name: intendedAgent, isBootstrapped: () => true } as any;
+    const agent = { name: intendedAgent, hasEverBootstrapped: () => true } as any;
     const checker = new FastChecker(agent, paths, sandbox, { log });
     const childRuns: Promise<{ error: Error | null; stdout: string; stderr: string }>[] = [];
 

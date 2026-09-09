@@ -25,7 +25,7 @@ const mockOpencodePty = {
     capturedOnExit = cb;
   }),
   getOutputBuffer: vi.fn().mockReturnValue({
-    isBootstrapped: vi.fn().mockReturnValue(true),
+    isBootstrapped: vi.fn().mockReturnValue(true), hasEverBootstrapped: vi.fn().mockReturnValue(true),
     getRecent: vi.fn().mockReturnValue(''),
     push: vi.fn(),
   }),

@@ -25,7 +25,7 @@ import type { BusPaths } from '../../../src/types';
 function createMockAgent(name = 'test-agent') {
   return {
     name,
-    isBootstrapped: vi.fn().mockReturnValue(true),
+    hasEverBootstrapped: vi.fn().mockReturnValue(true),
     injectMessage: vi.fn(),
     write: vi.fn(),
     // The FRESH path continues into the threshold logic, which reads the PTY buffer.

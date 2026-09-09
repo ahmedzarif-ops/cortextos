@@ -12,7 +12,7 @@ const mockCodexAppServerPty = {
   onExit: vi.fn().mockImplementation((cb: (exitCode: number, signal?: number) => void) => {
     capturedOnExit = cb;
   }),
-  getOutputBuffer: vi.fn().mockReturnValue({ isBootstrapped: vi.fn().mockReturnValue(true) }),
+  getOutputBuffer: vi.fn().mockReturnValue({ isBootstrapped: vi.fn().mockReturnValue(true), hasEverBootstrapped: vi.fn().mockReturnValue(true) }),
   setTelegramHandle: vi.fn(),
 };
 

@@ -22,7 +22,7 @@ const mockPty = {
   getActualModel: vi.fn().mockReturnValue(undefined),
   isAlive: vi.fn().mockReturnValue(true),
   onExit: vi.fn(),
-  getOutputBuffer: vi.fn().mockReturnValue({ isBootstrapped: vi.fn().mockReturnValue(true) }),
+  getOutputBuffer: vi.fn().mockReturnValue({ isBootstrapped: vi.fn().mockReturnValue(true), hasEverBootstrapped: vi.fn().mockReturnValue(true) }),
   setTelegramHandle: vi.fn(),
 };
 

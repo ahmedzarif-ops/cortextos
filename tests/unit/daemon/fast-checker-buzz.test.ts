@@ -10,7 +10,7 @@ import type { BusPaths } from '../../../src/types';
 function createMockAgent(name = 'test-agent') {
   return {
     name,
-    isBootstrapped: vi.fn().mockReturnValue(true),
+    hasEverBootstrapped: vi.fn().mockReturnValue(true),
     injectMessage: vi.fn().mockReturnValue(true),
     write: vi.fn(),
   } as any;

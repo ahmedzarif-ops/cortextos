@@ -11,7 +11,7 @@ import type { BusPaths, TelegramCallbackQuery } from '../../../src/types';
 function createMockAgent(name = 'test-agent') {
   return {
     name,
-    isBootstrapped: vi.fn().mockReturnValue(true),
+    hasEverBootstrapped: vi.fn().mockReturnValue(true),
     injectMessage: vi.fn().mockReturnValue(true),
     write: vi.fn(),
   } as any;
@@ -860,7 +860,7 @@ describe('FastChecker', () => {
     it('does not fire before bootstrap completes', async () => {
       const { execFile } = await import('child_process');
       const agent = createMockAgent('my-agent');
-      agent.isBootstrapped.mockReturnValue(false);
+      agent.hasEverBootstrapped.mockReturnValue(false);
       const checker = new FastChecker(agent, paths, '/tmp/framework');
       checker.start();
       await vi.advanceTimersByTimeAsync(20 * 1000);
@@ -952,7 +952,7 @@ describe('FastChecker', () => {
       const config: any = {};
       return {
         name,
-        isBootstrapped: vi.fn().mockReturnValue(true),
+        hasEverBootstrapped: vi.fn().mockReturnValue(true),
         injectMessage: vi.fn().mockReturnValue(true),
         write: vi.fn(),
         getAgentDir: () => testDir,
@@ -1066,7 +1066,7 @@ describe('FastChecker', () => {
       const config: any = {};
       return {
         name,
-        isBootstrapped: vi.fn().mockReturnValue(true),
+        hasEverBootstrapped: vi.fn().mockReturnValue(true),
         injectMessage: vi.fn().mockReturnValue(true),
         write: vi.fn(),
         getAgentDir: () => agentDir,
@@ -1247,7 +1247,7 @@ describe('FastChecker', () => {
       const config: any = {};
       return {
         name,
-        isBootstrapped: vi.fn().mockReturnValue(true),
+        hasEverBootstrapped: vi.fn().mockReturnValue(true),
         injectMessage: vi.fn().mockReturnValue(true),
         write: vi.fn(),
         getAgentDir: () => agentDir,

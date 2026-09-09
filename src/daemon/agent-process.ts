@@ -491,10 +491,26 @@ export class AgentProcess {
   }
 
   /**
-   * Check if the agent has bootstrapped (ready for messages).
+   * Has this agent's session EVER been observed bootstrapped (ready for messages)?
+   *
+   * ⛔ THE MOMENTARY PREDICATE IS DELIBERATELY NOT EXPOSED ON THIS CLASS.
+   * This used to be `isBootstrapped()`, delegating to `OutputBuffer.isBootstrapped()` —
+   * a whole-window predicate over a RING THAT EVICTS, so it answers "is the bootstrap
+   * pattern on screen right now" and can go back to `false` after being `true`.
+   * Nothing at the AgentProcess layer asks that question: every caller here is asking
+   * "did this session start", which is monotonic and is what `hasEverBootstrapped()`
+   * answers. Delegating to the latch is strictly safer — `OutputBuffer.hasEverBootstrapped()`
+   * re-checks live while unlatched, so it can never answer worse than the momentary one.
+   *
+   * The RENAME is the point, not the delegation. Leaving a method named `isBootstrapped()`
+   * on this class that secretly answers "ever" would be a name that lies; leaving one that
+   * honestly answers "now" would leave the next caller one autocomplete away from the same
+   * defect this replaces. A caller that genuinely needs the momentary answer must reach
+   * through `getOutputBuffer()?.isBootstrapped()` — the only route out of this class to
+   * the buffer, since `pty` is private — and say so out loud at the call site.
    */
-  isBootstrapped(): boolean {
-    return this.pty?.getOutputBuffer().isBootstrapped() ?? false;
+  hasEverBootstrapped(): boolean {
+    return this.pty?.getOutputBuffer().hasEverBootstrapped() ?? false;
   }
 
   /**

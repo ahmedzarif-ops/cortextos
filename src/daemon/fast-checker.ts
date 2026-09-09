@@ -579,11 +579,19 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
   /**
    * Wait for the agent to finish bootstrapping.
+   *
+   * ⛔ THE PREDICATE IS `hasEverBootstrapped()`, NOT THE MOMENTARY ONE. The question here is
+   * "did this session start", which is monotonic — not "is the bootstrap pattern on screen at
+   * the instant this 2s poll happens". The momentary predicate reads a RING THAT EVICTS, so a
+   * session that bootstrapped can answer `false` on a later poll once enough output has pushed
+   * the pattern out of the window; this loop would then keep waiting and fall through the
+   * timeout below, logging a bootstrap failure for a session that had already bootstrapped.
+   * With the latch, `true` at any poll stays `true`.
    */
   private async waitForBootstrap(timeoutMs: number = 30000): Promise<void> {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      if (this.agent.isBootstrapped()) {
+      if (this.agent.hasEverBootstrapped()) {
         return;
       }
       await sleep(2000);
