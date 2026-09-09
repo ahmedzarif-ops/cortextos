@@ -666,13 +666,50 @@ export interface StaleTaskReport {
   idle_ages: TaskIdleAge[];
 }
 
-/** The two staleness clocks for one `in_progress` task. See StaleTaskReport.idle_ages. */
+/**
+ * The two staleness clocks for one `in_progress` task, plus what the read had to
+ * discard to produce them. See StaleTaskReport.idle_ages.
+ *
+ * ⛔ NEITHER AGE IS EVER `null`, `NaN`, OR NEGATIVE. Those are the three values a
+ * consumer reads as "no problem here" while meaning "this data is broken":
+ * `NaN > threshold` is false, `null` renders as an absent age, and a negative
+ * age reads as activity in the future. Malformed input is reported as MAXIMALLY
+ * STALE with the matching flag set, never as fresh.
+ */
 export interface TaskIdleAge {
   task_id: string;
-  /** now - updated_at, in seconds. Moves on ANY write, including a no-op. */
+  /**
+   * now - updated_at, in seconds. Moves on ANY write, including a no-op.
+   * When `clock_malformed` is true this is the maximally-stale sentinel
+   * (the age of a task stamped at the UNIX epoch), not a measured age.
+   */
   clock_age_seconds: number;
-  /** now - newest audit transition (else created_at), in seconds. */
+  /** now - newest valid PAST audit transition (else created_at), in seconds. Never negative. */
   true_idle_seconds: number;
+  /** `updated_at` did not parse. `clock_age_seconds` is the sentinel, and the row alarms. */
+  clock_malformed: boolean;
+  /** `true_idle_seconds` was negative and was clamped to 0 — a future-dated `created_at`. */
+  idle_clamped: boolean;
+  /**
+   * Audit lines that were valid JSON but not an entry object — the literal
+   * `null`, a bare number, a string, an array. Skipped AND counted: a filter
+   * that cannot say how much it excluded is indistinguishable from one that
+   * excluded nothing. Non-zero here means this task's history is partly
+   * unreadable, so a low idle age is weak evidence rather than reassurance.
+   */
+  audit_lines_malformed: number;
+  /** Audit lines that were not valid JSON at all (a write that crashed mid-line). */
+  audit_lines_unparseable: number;
+  /** Transitions whose `ts` did not parse: they cannot date an event, so they were ignored. */
+  audit_transitions_unparseable_ts: number;
+  /** Transitions dated in the FUTURE: ignored, because they cannot establish present activity. */
+  audit_transitions_future: number;
+  /**
+   * Audit lines carrying `from === to` — both ends written, nothing changed.
+   * `updateTask` emits these unconditionally, so `update-task <id> in_progress`
+   * on an already-`in_progress` task produces one. They are NOT transitions.
+   */
+  audit_transitions_no_op: number;
 }
 
 export interface ArchiveReport {

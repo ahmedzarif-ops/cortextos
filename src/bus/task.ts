@@ -427,16 +427,70 @@ export function readTaskAudit(
   paths: BusPaths,
   taskId: string,
 ): TaskAuditEntry[] {
+  return readTaskAuditDetailed(paths, taskId).entries;
+}
+
+/** One audit-log read, with the counts of what the read THREW AWAY. */
+export interface TaskAuditRead {
+  /** Lines that parsed AND were a usable entry object. */
+  entries: TaskAuditEntry[];
+  /**
+   * Lines that were valid JSON but NOT a usable entry object — the literal
+   * `null`, a bare number, a string, an array. THIS IS THE CRASH CLASS.
+   */
+  skipped_malformed: number;
+  /** Lines that were not valid JSON at all (a write that crashed mid-line). */
+  skipped_unparseable: number;
+}
+
+/**
+ * Read a task's audit log, returning the usable entries AND how many lines were
+ * discarded, by reason.
+ *
+ * WHY THE COUNTS EXIST. A filter that cannot say how much it excluded is
+ * indistinguishable from one that excluded nothing — and this file already had
+ * a filter with exactly that shape (`catch { /* skip corrupt *\/ }`). A silent
+ * skip is only safe while nothing ever goes wrong, which is not a property any
+ * log on disk has.
+ *
+ * WHY THE SHAPE CHECK EXISTS, and it is not defensive decoration.
+ * `JSON.parse('null')` SUCCEEDS. So does `'[]'`, `'3'`, `'"x"'`. The previous
+ * cast `JSON.parse(trimmed) as TaskAuditEntry` made the return type a LIE: one
+ * line reading exactly `null` in one task's log put a `null` into a
+ * `TaskAuditEntry[]`, and the first consumer to read `.from` or `.event` off it
+ * threw. That crashed `checkStaleTasks` ENTIRELY — all five buckets, not just
+ * the row with the bad line — and it would equally crash `bus task-history`
+ * (`src/cli/bus.ts`, which reads `e.event.padEnd`). Handling syntactically
+ * corrupt JSON does not cover valid JSON of the wrong shape; they are different
+ * failures and only one of them was handled.
+ */
+export function readTaskAuditDetailed(
+  paths: BusPaths,
+  taskId: string,
+): TaskAuditRead {
   validateTaskId(taskId);
   const path = join(paths.taskDir, 'audit', `${taskId}.jsonl`);
-  if (!existsSync(path)) return [];
+  if (!existsSync(path)) return { entries: [], skipped_malformed: 0, skipped_unparseable: 0 };
   const entries: TaskAuditEntry[] = [];
+  let skippedMalformed = 0;
+  let skippedUnparseable = 0;
   for (const line of readFileSync(path, 'utf-8').split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    try { entries.push(JSON.parse(trimmed) as TaskAuditEntry); } catch { /* skip corrupt */ }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      skippedUnparseable++;
+      continue;
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      skippedMalformed++;
+      continue;
+    }
+    entries.push(parsed as TaskAuditEntry);
   }
-  return entries;
+  return { entries, skipped_malformed: skippedMalformed, skipped_unparseable: skippedUnparseable };
 }
 
 /**
@@ -737,18 +791,108 @@ function readAllTasks(taskDir: string): Task[] {
  *          which reads as maximally stale — this check must fail LOUD.
  */
 export function lastTransitionEpoch(paths: BusPaths, task: Task): number {
-  const createdEpoch = Math.floor(new Date(task.created_at).getTime() / 1000);
-  const fallback = Number.isFinite(createdEpoch) ? createdEpoch : 0;
+  return lastTransition(paths, task).epoch;
+}
+
+/** What one `lastTransition` read found, and what it had to throw away to find it. */
+export interface TransitionReadout {
+  /** Epoch SECONDS of the newest valid PAST transition, else `created_at`, else 0. */
+  epoch: number;
+  /** Audit lines discarded as not-an-entry-object. See TaskAuditRead. */
+  skipped_malformed: number;
+  /** Audit lines discarded as not-valid-JSON. See TaskAuditRead. */
+  skipped_unparseable: number;
+  /** Transitions whose `ts` did not parse: cannot date the event, ignored and counted. */
+  transitions_unparseable_ts: number;
+  /** Transitions dated AFTER `nowEpoch`: cannot establish PRESENT activity, ignored and counted. */
+  transitions_future: number;
+  /** Transitions rejected because `from === to`: both ends written, nothing changed. */
+  transitions_no_op: number;
+}
+
+/**
+ * The full readout behind `lastTransitionEpoch`. Separate function so the
+ * DIAGNOSTICS reach the report: every rejection below is a line this check
+ * chose not to trust, and a check that cannot say what it ignored is
+ * indistinguishable from one that ignored nothing.
+ *
+ * `nowEpoch` is a parameter rather than a `Date.now()` call so the future-dated
+ * boundary is testable without moving the system clock.
+ */
+export function lastTransition(
+  paths: BusPaths,
+  task: Task,
+  nowEpoch: number = Math.floor(Date.now() / 1000),
+): TransitionReadout {
+  const fallback = epochSecondsOrNull(task.created_at) ?? 0;
+  const audit = readTaskAuditDetailed(paths, task.id);
 
   let newest = 0;
-  for (const entry of readTaskAudit(paths, task.id)) {
+  let unparseableTs = 0;
+  let future = 0;
+  let noOp = 0;
+
+  for (const entry of audit.entries) {
     // A transition carries BOTH ends. An annotation carries neither.
     if (entry.from === undefined || entry.to === undefined) continue;
-    const epoch = Math.floor(new Date(entry.ts).getTime() / 1000);
-    if (Number.isFinite(epoch) && epoch > newest) newest = epoch;
+
+    // ⛔ BOTH ENDS PRESENT IS NECESSARY AND NOT SUFFICIENT. A TRANSITION IS
+    // `from !== to`. `updateTask` writes `{ from, to }` UNCONDITIONALLY without
+    // checking that the status changed, so `update-task <id> in_progress` on a
+    // task that is ALREADY `in_progress` emits both ends having moved nothing —
+    // and the first version of this predicate counted that as activity. That
+    // replaced "any write resets the clock" with "any STATUS write resets the
+    // clock": the exact class this check exists to catch, reproduced inside the
+    // fix for it, and worse for wearing a receipt.
+    //
+    // The repair is here, in the READER, not in `updateTask`. The writer's
+    // no-op line is a separate question with its own blast radius (other
+    // consumers of the audit log), and this predicate has to be correct
+    // whatever the writer does.
+    if (entry.from === entry.to) {
+      noOp++;
+      continue;
+    }
+
+    const epoch = epochSecondsOrNull(entry.ts);
+    if (epoch === null) {
+      unparseableTs++;
+      continue;
+    }
+    // A FUTURE-DATED ENTRY CANNOT ESTABLISH PRESENT ACTIVITY. Ignore it and
+    // keep the newest valid PAST transition — a clock problem announcing itself
+    // must never read as "recently active".
+    if (epoch > nowEpoch) {
+      future++;
+      continue;
+    }
+    if (epoch > newest) newest = epoch;
   }
 
-  return newest > 0 ? newest : fallback;
+  return {
+    epoch: newest > 0 ? newest : fallback,
+    skipped_malformed: audit.skipped_malformed,
+    skipped_unparseable: audit.skipped_unparseable,
+    transitions_unparseable_ts: unparseableTs,
+    transitions_future: future,
+    transitions_no_op: noOp,
+  };
+}
+
+/**
+ * Epoch SECONDS for an ISO timestamp, or `null` when it does not parse.
+ *
+ * NaN IS NOT A TIME. `new Date('nonsense').getTime()` is `NaN`, `NaN` survives
+ * every arithmetic operation it enters, and then LOSES every comparison —
+ * `NaN > 7200` is `false`. So an unparseable timestamp did not fail loudly: it
+ * silently CLEARED the alarm and serialised as JSON `null` in the report. This
+ * helper exists so the choice about malformed time is made ONCE, explicitly, by
+ * every caller, instead of being made implicitly by IEEE-754.
+ */
+function epochSecondsOrNull(iso: string | undefined | null): number | null {
+  if (typeof iso !== 'string') return null;
+  const ms = new Date(iso).getTime();
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
 }
 
 export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
@@ -778,10 +922,29 @@ export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
     // Skip completed/done tasks
     if (task.status === 'completed' || task.status === 'cancelled') continue;
 
-    const updatedEpoch = Math.floor(new Date(task.updated_at).getTime() / 1000);
-    const createdEpoch = Math.floor(new Date(task.created_at).getTime() / 1000);
-    const age = nowEpoch - updatedEpoch;
-    const createdAge = nowEpoch - createdEpoch;
+    // ⛔ AN UNPARSEABLE TIMESTAMP READS AS MAXIMALLY STALE, NEVER AS FRESH.
+    //
+    // `new Date('invalid-date').getTime()` is NaN; `nowEpoch - NaN` is NaN; and
+    // `NaN > STALE_IN_PROGRESS` is FALSE. So malformed time did not fail loudly
+    // here, it CLEARED the row — and `clock_age_seconds` then serialised as JSON
+    // `null`, which reads to a consumer like "no age" rather than "bad data".
+    // This bucket exists to catch tasks nobody is looking at; a task whose own
+    // timestamps are corrupt is the last one that should be waved through.
+    //
+    // The sentinel is `nowEpoch` itself — the age of a task stamped at the UNIX
+    // epoch. It is a real number (so no consumer sees `null`), it is maximally
+    // stale (so every threshold in this function fires), and `clock_malformed`
+    // on the report row says WHY without a reader having to recognise the value.
+    //
+    // Applied to BOTH clocks, and this is wider than the `in_progress` bucket on
+    // purpose: `age` also drives `stale_blocked` and `createdAge` drives
+    // `stale_pending`/`stale_human`, all of which were silently cleared by the
+    // same NaN. It can only ever ADD rows.
+    const updatedEpoch = epochSecondsOrNull(task.updated_at);
+    const createdEpoch = epochSecondsOrNull(task.created_at);
+    const clockMalformed = updatedEpoch === null;
+    const age = updatedEpoch === null ? nowEpoch : nowEpoch - updatedEpoch;
+    const createdAge = createdEpoch === null ? nowEpoch : nowEpoch - createdEpoch;
 
     // Stale in_progress: alarm on MAX(clock, true idle).
     //
@@ -796,14 +959,33 @@ export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
     // ever ADD rows to the bucket, never remove one the shipped check caught.
     // That direction is deliberate and is what makes it safe to ship.
     if (task.status === 'in_progress') {
-      const idleAge = nowEpoch - lastTransitionEpoch(paths, task);
+      const transition = lastTransition(paths, task, nowEpoch);
+      const rawIdle = nowEpoch - transition.epoch;
+      // A NEGATIVE IDLE AGE IS A CLOCK PROBLEM, NOT RECENT ACTIVITY. Future-dated
+      // audit entries are already ignored inside lastTransition; this clamp
+      // covers the remaining route — a future-dated `created_at` reached through
+      // the fallback. Clamped AND reported: a silent clamp would turn one broken
+      // timestamp into a row that merely looks fresh.
+      const idleClamped = rawIdle < 0;
+      const idleAge = idleClamped ? 0 : rawIdle;
       // Both ages are reported for EVERY in_progress task, not only stale ones:
       // a reader has to be able to see the two clocks disagree while the row is
       // still being cleared, which is precisely the case that was invisible.
+      // The diagnostic counts ride along for the same reason — every one of them
+      // is a line this check decided not to trust, and a row that alarms because
+      // its audit log is unreadable must not look like a row that alarms because
+      // the work stopped.
       report.idle_ages.push({
         task_id: task.id,
         clock_age_seconds: age,
         true_idle_seconds: idleAge,
+        clock_malformed: clockMalformed,
+        idle_clamped: idleClamped,
+        audit_lines_malformed: transition.skipped_malformed,
+        audit_lines_unparseable: transition.skipped_unparseable,
+        audit_transitions_unparseable_ts: transition.transitions_unparseable_ts,
+        audit_transitions_future: transition.transitions_future,
+        audit_transitions_no_op: transition.transitions_no_op,
       });
       if (Math.max(age, idleAge) > STALE_IN_PROGRESS) {
         report.stale_in_progress.push(task);
