@@ -75,6 +75,33 @@ function changeKeyFor(c: CronDefinition): string {
  * @param referenceMs - Epoch ms to count forward from (usually now or lastFiredAt).
  */
 function computeNextFireAt(cron: CronDefinition, referenceMs: number): number {
+  // ONE-SHOT: a cron carrying `fire_at` fires exactly once, at or after that
+  // absolute instant, and never again. `referenceMs` is deliberately ignored —
+  // for a recurring cron the next slot is relative to the last fire, but a
+  // one-shot's time is an absolute point, not an offset from anything.
+  //
+  // NEVER-RE-FIRE IS A PERSISTENCE PROPERTY, NOT AN IN-MEMORY ONE. The fired
+  // state is read back from the same fields the scheduler writes to crons.json
+  // (`fire_count` / `last_fired_at`), so it survives a daemon restart. A
+  // one-shot that fired only in memory would re-fire on the next boot, and the
+  // past-due-at-boot case is exactly where that would happen unnoticed.
+  //
+  // `last_fire_attempted_at` COUNTS AS FIRED for a one-shot, deliberately. It is
+  // written before the dispatch is awaited, so its presence without
+  // `last_fired_at` means the daemon died mid-fire and the dispatch may well have
+  // landed. The asymmetry decides it: re-running a one-shot action is worse than
+  // missing an ambiguous one, and this is the same stance the recurring path
+  // already takes when it uses that field to avoid double-firing after a crash.
+  if (cron.fire_at) {
+    const at = Date.parse(cron.fire_at);
+    if (isNaN(at)) return NaN; // caller warns and skips, same as an unparseable schedule
+    const alreadyFired =
+      (cron.fire_count ?? 0) > 0 ||
+      Boolean(cron.last_fired_at) ||
+      Boolean(cron.last_fire_attempted_at);
+    return alreadyFired ? Number.POSITIVE_INFINITY : at;
+  }
+
   const durationMs = parseDurationMs(cron.schedule);
   if (!isNaN(durationMs)) {
     return referenceMs + durationMs;
@@ -480,11 +507,22 @@ export class CronScheduler {
           );
         }
 
-        // Advance in-memory nextFireAt
-        const next = computeNextFireAt(cron, now);
+        // Advance in-memory nextFireAt.
+        // ⛔ COMPUTE FROM THE POST-FIRE DEFINITION, NOT THE PRE-FIRE ONE. For a
+        // recurring cron the two give the same answer, so this read as a harmless
+        // simplification. For a ONE-SHOT it is the difference between "never
+        // again" and a busy-loop: computeNextFireAt decides by reading
+        // fire_count/last_fired_at, and the pre-fire object still has neither, so
+        // it would hand back the same past instant on every tick, forever.
+        const firedDef: CronDefinition = {
+          ...cron,
+          last_fired_at: nowIso,
+          fire_count: newFireCount,
+        };
+        const next = computeNextFireAt(firedDef, now);
         if (!isNaN(next)) {
           sc.nextFireAt = next;
-          sc.definition = { ...cron, last_fired_at: nowIso, fire_count: newFireCount };
+          sc.definition = firedDef;
         } else {
           // Unrecognised schedule after fire — remove from schedule to avoid infinite loops
           this.scheduled.delete(name);
@@ -496,7 +534,17 @@ export class CronScheduler {
         // we don't re-fire the same scheduled slot on every subsequent tick —
         // that produced a busy-loop when an agent was unreachable. Treat the
         // failed window as a missed slot and schedule the next normal fire.
-        const next = computeNextFireAt(cron, now);
+        // For a ONE-SHOT this resolves to "never again": last_fire_attempted_at
+        // was persisted before the dispatch, so computeNextFireAt returns
+        // Infinity. That is intended — the retries are already exhausted, and
+        // re-attempting a one-shot later is the duplicate-action risk this
+        // feature exists to avoid. The failure is recorded in the execution log.
+        const attemptedDef: CronDefinition = {
+          ...cron,
+          last_fire_attempted_at:
+            cron.last_fire_attempted_at ?? sc.definition.last_fire_attempted_at,
+        };
+        const next = computeNextFireAt(attemptedDef, now);
         if (!isNaN(next)) {
           sc.nextFireAt = next;
           this.logger(
