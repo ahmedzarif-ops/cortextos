@@ -2324,10 +2324,16 @@ busCommand
     const now = Date.now();
     const rows = crons.map(c => {
       const lastFire = mostRecent(c.last_fired_at, fireByName.get(c.name));
-      // ONE COMPUTATION, shared with the scheduler and the daemon's ipc surface —
-      // this block used to be a third, hand-rolled copy that agreed with neither.
+      // ONE COMPUTATION AND ONE ANCHOR, shared with the scheduler and the daemon's
+      // ipc surface. This block used to be a third hand-rolled copy that agreed with
+      // neither; sharing the function was necessary and not sufficient, because this
+      // surface still fed it the ACTUAL fire instant while the scheduler fed the
+      // scheduled slot. `last_slot_at` is the phase; `lastFire` remains the fallback
+      // for legacy rows that predate the field, and stays what the Last Fire column
+      // shows — that column is about when it ran, which is a different question.
       let nextFire = '-';
-      const refMs = lastFire ? new Date(lastFire).getTime() : now;
+      const anchor = c.last_slot_at ?? lastFire;
+      const refMs = anchor ? new Date(anchor).getTime() : now;
       const nf = computeNextFireMs({ schedule: c.schedule, referenceMs: refMs, nowMs: now });
       if (!isNaN(nf)) nextFire = fmtTs(new Date(nf).toISOString());
       const promptPreview = c.prompt.length > 60 ? c.prompt.slice(0, 57) + '...' : c.prompt;

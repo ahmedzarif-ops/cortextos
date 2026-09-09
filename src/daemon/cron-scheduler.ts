@@ -57,6 +57,12 @@ interface ScheduledCron {
   nextFireAt: number;
   /** Normalised key for detecting definition changes: name|schedule|fire_at */
   changeKey: string;
+  /**
+   * The scheduled slot the next fire will SERVE. Identical to `nextFireAt` except
+   * after a catch-up, where `nextFireAt` is pulled forward to `now` so the missed
+   * window fires promptly while this still names the slot that was missed.
+   */
+  dueSlotAt?: number;
   /** True while onFire (+ retries) is executing — prevents re-entry on the next tick. */
   firing?: boolean;
 }
@@ -403,7 +409,25 @@ export class CronScheduler {
       if (def.last_fired_at) candidates.push(new Date(def.last_fired_at).getTime());
       if (def.last_fire_attempted_at) candidates.push(new Date(def.last_fire_attempted_at).getTime());
       if (stateFire) candidates.push(new Date(stateFire).getTime());
-      const referenceMs = candidates.length > 0 ? Math.max(...candidates) : now;
+
+      // ⛔ THE PHASE ANCHOR IS THE PERSISTED SLOT, NOT THE ACTUAL FIRE.
+      // The candidates above are ACTUAL fire instants, `Math.max`ed so a crash
+      // mid-fire cannot re-fire a slot already served. That remains their job — but
+      // as a PHASE anchor they are wrong: a 15m30s-late fire persisted as
+      // `last_fired_at` moved the next slot forward by 15m30s at the next restart,
+      // so the in-memory phase fix died at every stop/start.
+      // (guard, PR41: "restart preserves the restored phase".)
+      //
+      // `last_slot_at` is the slot that fire SERVED, so `slot + interval` is on
+      // phase by construction. The crash guard is not weakened — the next slot is
+      // strictly after the one just served, so an attempted-but-unconfirmed fire
+      // for that slot is still never repeated.
+      //
+      // Absent on legacy crons.json: those fall back to the old behaviour exactly.
+      const slotMs = def.last_slot_at ? new Date(def.last_slot_at).getTime() : NaN;
+      const referenceMs = !isNaN(slotMs)
+        ? slotMs
+        : candidates.length > 0 ? Math.max(...candidates) : now;
 
       let nextFireAt = computeNextFireAt(def, referenceMs);
 
@@ -417,14 +441,21 @@ export class CronScheduler {
       // CATCH-UP POLICY: if nextFireAt is in the past (daemon was stopped),
       // fire once immediately for the missed window, then recompute from now.
       // We do NOT flood-fire all missed windows — one catch-up is sufficient.
+      // ⛔ KEEP THE ORIGINAL SLOT WHEN CATCHING UP. `nextFireAt` still becomes `now`
+      // so the fire happens on the next tick — unchanged — but the SCHEDULED instant
+      // is what `due_at` must record and what the post-fire advance must count from.
+      // Overwriting the only copy made startup catch-up log its own start time as the
+      // due instant: a fire an hour late reported 30 seconds of lateness.
+      // (guard, PR41: "startup catch-up log names the original due slot".)
+      let dueSlotAt = nextFireAt;
       if (nextFireAt <= now) {
         this.logger(
           `[cron-scheduler] catch-up: cron "${def.name}" missed fire at ${new Date(nextFireAt).toISOString()} — scheduling immediate fire`
         );
-        nextFireAt = now; // fire on the very next tick
+        nextFireAt = now; // when to fire; dueSlotAt keeps WHICH SLOT is being served
       }
 
-      nextScheduled.set(def.name, { definition: def, nextFireAt, changeKey: key });
+      nextScheduled.set(def.name, { definition: def, nextFireAt, dueSlotAt, changeKey: key });
     }
 
     // LAST-GOOD-SCHEDULE FALLBACK (corruption-only)
@@ -504,7 +535,10 @@ export class CronScheduler {
       // Read the due instant ONCE, here, before anything can advance it. The
       // post-fire advance below overwrites `sc.nextFireAt`, so a later read
       // would report the NEXT slot as the one this fire was due at.
-      const dueAtMs = sc.nextFireAt;
+      // The SLOT this fire serves. Equals `nextFireAt` on the normal path; differs
+      // only after a catch-up, where `nextFireAt` was moved to `now` to fire promptly
+      // while `dueSlotAt` still names the slot that was missed.
+      const dueAtMs = sc.dueSlotAt ?? sc.nextFireAt;
       this.logger(`[cron-scheduler] firing cron "${name}" (was due ${new Date(dueAtMs).toISOString()})`);
 
       // Persist last_fire_attempted_at to disk BEFORE awaiting the dispatch.
@@ -577,6 +611,9 @@ export class CronScheduler {
         try {
           updateCron(this.agentName, name, {
             last_fired_at: nowIso,
+            // THE PHASE, persisted. Without this the anchor dies at the next restart
+            // and every consumer falls back to the actual fire instant.
+            ...(dueAtIso ? { last_slot_at: dueAtIso } : {}),
             fire_count: newFireCount,
           });
         } catch (err) {
@@ -617,6 +654,9 @@ export class CronScheduler {
         const next = computeNextFireAt(firedDef, dueAtMs, { nowMs: now, skipMissed: true });
         if (!isNaN(next)) {
           sc.nextFireAt = next;
+          // The catch-up divergence is spent: from here the slot and the fire time
+          // are the same thing again until the next catch-up.
+          sc.dueSlotAt = next;
           sc.definition = firedDef;
         } else {
           // Unrecognised schedule after fire — remove from schedule to avoid infinite loops
@@ -644,6 +684,7 @@ export class CronScheduler {
         const next = computeNextFireAt(attemptedDef, dueAtMs, { nowMs: now, skipMissed: true });
         if (!isNaN(next)) {
           sc.nextFireAt = next;
+          sc.dueSlotAt = next;
           // ⛔ A TERMINAL ONE-SHOT HAS NO NEXT SLOT, AND Infinity IS NOT A DATE.
           // computeNextFireAt returns POSITIVE_INFINITY once the attempt marker
           // exists, which is correct — but `new Date(Infinity).toISOString()`

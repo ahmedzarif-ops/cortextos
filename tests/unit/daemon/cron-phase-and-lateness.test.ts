@@ -169,3 +169,101 @@ describe('cron phase preservation and fire lateness', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// GUARD'S PR41 SEAMS (2026-09-09). Three findings, each a claim in this change's
+// own title failing — not a test failing. Covered here so they are guarded by
+// THIS suite and not only by guard's proof directory.
+// ---------------------------------------------------------------------------
+
+describe('guard PR41 seams', () => {
+  let scheduler: CronScheduler;
+  let fired: { name: string; at: number }[];
+  const makeCron = (over: Record<string, unknown> = {}) => ({
+    name: 'lane-watch', schedule: '1h', prompt: 'p', enabled: true, ...over,
+  });
+
+  beforeEach(() => {
+    vi.useFakeTimers(); vi.setSystemTime(T0);
+    fired = []; logEntries.length = 0;
+    mockReadCrons.mockReset();
+    mockUpdateCron.mockReset().mockReturnValue(true);
+    mockReadCronsWithStatus.mockReset().mockImplementation((a: string) => ({ crons: mockReadCrons(a) ?? [], corrupt: false }));
+    mockCronsFileMtimeMs.mockReset().mockReturnValue(1000);
+    scheduler = new CronScheduler({
+      agentName: 'test-agent',
+      onFire: (c) => { fired.push({ name: c.name, at: Date.now() }); },
+      logger: () => {},
+    });
+  });
+  afterEach(() => { scheduler.stop(); vi.useRealTimers(); });
+
+  // F3 — the catch-up branch used to overwrite the only copy of the overdue slot
+  // with `now`, so a fire an hour late logged 30s of lateness.
+  it('F3: startup catch-up logs the ORIGINAL slot, not the start time', async () => {
+    mockReadCrons.mockReturnValue([makeCron({ last_fired_at: new Date(T0 - 2 * HOUR).toISOString(), fire_count: 1 })]);
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(TICK);
+
+    const entry = logEntries.find((e) => e.status === 'fired');
+    expect(entry?.due_at).toBe(new Date(T0 - HOUR).toISOString());
+    // The number the field exists to make derivable, and the one that read 30s.
+    expect(Date.parse(entry!.ts) - Date.parse(entry!.due_at!)).toBe(HOUR + TICK);
+  });
+
+  // F2 — the phase lived only in memory, so it died at the next stop/start.
+  it('F2: the restored phase SURVIVES a restart', async () => {
+    const persisted: Record<string, unknown> = {};
+    mockUpdateCron.mockImplementation((_a: string, _n: string, patch: Record<string, unknown>) => {
+      Object.assign(persisted, patch); return true;
+    });
+    mockReadCrons.mockImplementation(() => [makeCron(persisted)]);
+
+    scheduler.start();
+    vi.setSystemTime(T0 + HOUR + 15 * 60_000);   // 15m30s-late fire
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(fired).toHaveLength(1);
+
+    // ⭐ THE ASSERTION IS ON THE PERSISTED ANCHOR, because that is what a restart
+    // reads. Checking only in-memory state is what let this ship.
+    expect(persisted.last_slot_at).toBe(new Date(T0 + HOUR).toISOString());
+    expect(persisted.last_fired_at).not.toBe(persisted.last_slot_at); // they are genuinely different
+
+    scheduler.stop();
+    scheduler = new CronScheduler({
+      agentName: 'test-agent',
+      onFire: (c) => { fired.push({ name: c.name, at: Date.now() }); },
+      logger: () => {},
+    });
+    scheduler.start();
+
+    // Behavioural: after the restart the next fire is still on the ORIGINAL phase.
+    vi.setSystemTime(T0 + 2 * HOUR - 2 * TICK);
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(fired).toHaveLength(1);
+    vi.setSystemTime(T0 + 2 * HOUR + TICK);
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(fired).toHaveLength(2);
+  });
+
+  it('F2 control: a legacy cron with no last_slot_at still schedules', async () => {
+    // Negative control for the fallback. Without it, making the anchor mandatory
+    // would silently stop every cron whose file predates the field.
+    mockReadCrons.mockReturnValue([makeCron({ last_fired_at: new Date(T0 - 30 * 60_000).toISOString(), fire_count: 1 })]);
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(30 * 60_000 + TICK);
+    expect(fired.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // M4 — guard's independent control, adopted BY NAME. The rewritten (f) test
+  // passed a mutant that made an unchanged-definition reload set nextFireAt=now;
+  // this one fails it, which is the coverage gap guard measured.
+  it('reload before due cannot create an early fire', async () => {
+    mockReadCrons.mockReturnValue([makeCron()]);
+    scheduler.start();
+    mockCronsFileMtimeMs.mockReturnValue(2000); // force a reload
+    scheduler.reload();
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(fired).toHaveLength(0);
+  });
+});

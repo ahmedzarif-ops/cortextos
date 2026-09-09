@@ -119,15 +119,24 @@ export function handleFireCron(
  * without duplicating the parser.
  *
  * @param schedule    - Interval shorthand or 5-field cron expression.
- * @param lastFiredAt - ISO 8601 of last fire; if absent uses `now`.
+ * @param anchorIso - ISO 8601 PHASE ANCHOR: the scheduled slot the last fire served
+ *                   (`last_slot_at`), falling back to the actual fire instant on
+ *                   legacy rows. If absent, uses `now`.
  * @param now         - Epoch ms for "now" (injectable for testing).
  */
 export function computeNextFire(
   schedule: string,
-  lastFiredAt: string | undefined,
+  anchorIso: string | undefined,
   now = Date.now(),
 ): string {
-  const referenceMs = lastFiredAt ? new Date(lastFiredAt).getTime() : now;
+  // ⛔ THE ANCHOR MUST BE THE SCHEDULED SLOT, NOT THE ACTUAL FIRE.
+  // Sharing `computeNextFireMs` with the scheduler reconciled the FUNCTION and not
+  // the INPUT: this surface passed the actual last-fired instant while the scheduler
+  // advanced from the slot, so after a 15m30s-late fire the display read 14:15:30
+  // and the scheduler meant 14:00. Two answers to one question, again, one layer
+  // down from where it was fixed. (guard, PR41: "display agrees with scheduler
+  // after late fire".) Callers pass `last_slot_at ?? last_fired_at`.
+  const referenceMs = anchorIso ? new Date(anchorIso).getTime() : now;
 
   // ⛔ THE CLAMP THAT USED TO LIVE HERE IS GONE, DELIBERATELY.
   // It read `next <= now ? now + durationMs : next`, so a cron that was overdue was
@@ -183,7 +192,7 @@ function listAllCrons(): CronSummaryRow[] {
         cron,
         lastFire: lastEntry?.ts ?? null,
         lastStatus: lastEntry?.status ?? null,
-        nextFire: computeNextFire(cron.schedule, cron.last_fired_at, now),
+        nextFire: computeNextFire(cron.schedule, cron.last_slot_at ?? cron.last_fired_at, now),
       });
     }
   }

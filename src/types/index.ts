@@ -444,6 +444,23 @@ export interface CronDefinition {
    * @example "2026-04-28T13:00:01.042Z"
    */
   last_fired_at?: string;
+  /**
+   * ISO 8601 UTC instant of the SCHEDULED SLOT the last fire served — not when it
+   * actually ran. This is the cron's PHASE, persisted because the phase has to
+   * survive a restart and has to be readable by every consumer, not just by the
+   * scheduler's in-memory advance.
+   *
+   * ⛔ WHY IT EXISTS (guard, PR41 review, 2026-09-09). Keeping the phase only in
+   * memory was not keeping it:
+   *   - a stop/start reloaded `last_fired_at` — the ACTUAL fire — so a 15m30s-late
+   *     fire moved the next slot 14:00 -> 14:15:30 at the next restart;
+   *   - the CLI and the ipc display anchored on the actual fire too, so the
+   *     dashboard read 14:15:30 while the scheduler meant 14:00. Sharing one
+   *     next-fire FUNCTION did not reconcile two different INPUTS.
+   * ⭐ ONE PERSISTED ANCHOR, READ BY ALL THREE CONSUMERS. Absent on legacy files,
+   * where every reader falls back to `last_fired_at` and behaves exactly as before.
+   */
+  last_slot_at?: string;
 
   /**
    * ISO 8601 UTC timestamp set by the scheduler IMMEDIATELY before it awaits
