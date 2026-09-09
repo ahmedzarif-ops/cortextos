@@ -209,6 +209,55 @@ function expandField(field: string, min: number, max: number): number[] {
   return [...result].sort((a, b) => a - b);
 }
 
+/** The expanded value sets of a 5-field cron expression. */
+interface CronFieldSets {
+  minutes: number[];
+  hours: number[];
+  doms: number[];
+  months: number[];
+  dows: number[];
+}
+
+/**
+ * Expand a whole expression, or `null` if it is not a parseable 5-field cron.
+ *
+ * ONE PARSE AND ONE MATCHER, shared by the forward and backward walkers below.
+ * They ask the same question in opposite directions, and two copies of "does
+ * this minute match" is exactly the shape that lets a next-fire and a
+ * previous-fire disagree about which instants are occurrences at all.
+ */
+function parseCronFieldSets(expr: string): CronFieldSets | null {
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [minuteStr, hourStr, domStr, monthStr, dowStr] = parts;
+  try {
+    return {
+      minutes: expandField(minuteStr, 0, 59),
+      hours:   expandField(hourStr,   0, 23),
+      doms:    expandField(domStr,    1, 31),
+      months:  expandField(monthStr,  1, 12),
+      dows:    expandField(dowStr,    0, 6),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Does the whole minute containing `ms` match the expanded expression? */
+function matchesCronFieldSets(f: CronFieldSets, ms: number): boolean {
+  const d = new Date(ms);
+  return (
+    f.months.includes(d.getMonth() + 1) &&
+    f.doms.includes(d.getDate()) &&
+    f.dows.includes(d.getDay()) &&
+    f.hours.includes(d.getHours()) &&
+    f.minutes.includes(d.getMinutes())
+  );
+}
+
+/** Walk capped at one year so an unsatisfiable expression terminates. */
+const CRON_WALK_MAX_MINUTES = 366 * 24 * 60;
+
 /**
  * Compute the next fire timestamp (ms since epoch) for a 5-field cron
  * expression, starting from `fromMs` (exclusive — the next fire must be
@@ -219,51 +268,53 @@ function expandField(field: string, min: number, max: number): number[] {
  * @returns      Epoch ms of the next matching minute, or NaN if unparseable.
  */
 export function nextFireFromCron(expr: string, fromMs: number): number {
-  const parts = expr.trim().split(/\s+/);
-  if (parts.length !== 5) return NaN;
-
-  let [minuteStr, hourStr, domStr, monthStr, dowStr] = parts;
-
-  let minutes: number[], hours: number[], doms: number[], months: number[], dows: number[];
-  try {
-    minutes = expandField(minuteStr, 0, 59);
-    hours   = expandField(hourStr,   0, 23);
-    doms    = expandField(domStr,    1, 31);
-    months  = expandField(monthStr,  1, 12);
-    dows    = expandField(dowStr,    0, 6);
-  } catch {
-    return NaN;
-  }
+  const fields = parseCronFieldSets(expr);
+  if (!fields) return NaN;
 
   // Start from the next whole minute after fromMs
-  const startMs = Math.floor(fromMs / 60_000) * 60_000 + 60_000;
+  let candidate = Math.floor(fromMs / 60_000) * 60_000 + 60_000;
 
-  // Walk forward minute-by-minute (capped at 1 year to avoid infinite loops).
-  const MAX_MINUTES = 366 * 24 * 60;
-  let candidate = startMs;
-
-  for (let i = 0; i < MAX_MINUTES; i++) {
-    const d = new Date(candidate);
-    const m  = d.getMinutes();
-    const h  = d.getHours();
-    const dy = d.getDate();
-    const mo = d.getMonth() + 1; // 1-12
-    const dw = d.getDay();       // 0-6
-
-    if (
-      months.includes(mo) &&
-      doms.includes(dy) &&
-      dows.includes(dw) &&
-      hours.includes(h) &&
-      minutes.includes(m)
-    ) {
-      return candidate;
-    }
-
+  for (let i = 0; i < CRON_WALK_MAX_MINUTES; i++) {
+    if (matchesCronFieldSets(fields, candidate)) return candidate;
     candidate += 60_000;
   }
 
   return NaN; // should never reach here for valid expressions
+}
+
+/**
+ * The latest occurrence STRICTLY BEFORE `fromMs` — the exact mirror of
+ * {@link nextFireFromCron}, and the reason it exists is narrow:
+ *
+ * ⭐ A CRON EXPRESSION HAS NO INTERVAL TO SUBTRACT. An interval schedule can name
+ * its own previous slot arithmetically (`next - duration`), which is how the
+ * scheduler persists a phase anchor that reproduces the next fire exactly. A cron
+ * expression cannot, and the code that assumed the served occurrence would do
+ * instead was wrong after a multi-slot skip: it named an occurrence the live
+ * scheduler had already advanced past, so the display and a restart both walked
+ * forward from a slot that was already spent.
+ *
+ * The contract that makes it usable as an anchor, and the only one worth
+ * asserting: `nextFireFromCron(expr, prevFireFromCron(expr, t)) === t` for any `t`
+ * that is itself an occurrence.
+ *
+ * @returns Epoch ms of the latest matching minute before `fromMs`, or NaN.
+ */
+export function prevFireFromCron(expr: string, fromMs: number): number {
+  const fields = parseCronFieldSets(expr);
+  if (!fields) return NaN;
+
+  // The last whole minute strictly before fromMs. `ceil` rather than `floor` so
+  // an instant that sits exactly on a minute boundary — which every occurrence
+  // does — steps back one minute rather than returning itself.
+  let candidate = Math.ceil(fromMs / 60_000) * 60_000 - 60_000;
+
+  for (let i = 0; i < CRON_WALK_MAX_MINUTES; i++) {
+    if (matchesCronFieldSets(fields, candidate)) return candidate;
+    candidate -= 60_000;
+  }
+
+  return NaN;
 }
 
 // ---------------------------------------------------------------------------

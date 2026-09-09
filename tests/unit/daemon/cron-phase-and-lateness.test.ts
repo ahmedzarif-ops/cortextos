@@ -338,4 +338,207 @@ describe('guard PR41 seams', () => {
     await vi.advanceTimersByTimeAsync(TICK);
     expect(fired).toHaveLength(2);
   });
+
+  // -------------------------------------------------------------------------
+  // ROUND 4 — guard's P1 and P2.
+  //
+  // ⭐ WHAT MAKES THESE DIFFERENT FROM R1/R2 ABOVE, and it is the whole point of
+  // the round: R1 and R2 are the SINGLE-SLOT and the SUCCESS cases of one rule.
+  // Every round of this fix closed an instance and left the next one open, because
+  // `crons.json` and the in-memory schedule are two descriptions of one thing and
+  // nothing forced them to agree. The rule is now stated once —
+  //
+  //     PERSIST THE ACCOUNTED SLOT, ON EVERY EXIT FROM A FIRE, FOR BOTH SCHEDULE
+  //     FORMS. Accounted = the slot the skip policy actually landed on.
+  //
+  // — and these four tests are its remaining corners: interrupted, exhausted, and
+  // the cron-expression form of each question. A fifth special case here would mean
+  // the rule is still wrong.
+  // -------------------------------------------------------------------------
+
+  // P1a — the INTERRUPTED multi-slot dispatch. R1 proved the single-slot case: the
+  // marker and the slot go down together, so there is no window where disk is older
+  // than memory. That closed the WINDOW and left the VALUE stale — the slot written
+  // was the one this fire SERVED, and after a six-slot sleep the live scheduler has
+  // already advanced past it. A restart then read an anchor the scheduler had
+  // abandoned and dispatched again.
+  it('P1a: an interrupted multi-slot dispatch leaves the ACCOUNTED slot on disk', async () => {
+    const persisted: Record<string, unknown> = {};
+    mockUpdateCron.mockImplementation((_a: string, _n: string, patch: Record<string, unknown>) => {
+      Object.assign(persisted, patch); return true;
+    });
+    mockReadCrons.mockImplementation(() => [makeCron(persisted)]);
+
+    scheduler.stop();
+    const first: number[] = [];
+    scheduler = new CronScheduler({
+      agentName: 'test-agent',
+      // Never resolves: the dispatch is in flight when the process dies.
+      onFire: () => { first.push(Date.now()); return new Promise<void>(() => {}); },
+      logger: () => {},
+    });
+    scheduler.start();
+    vi.setSystemTime(T0 + 6 * HOUR + 30 * 60_000);
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(first).toHaveLength(1);
+
+    // The claim is about DISK, because disk is all a restart can see. T0+6h — the
+    // slot the live scheduler landed on — not T0+1h, the slot this fire served.
+    expect(persisted.last_slot_at).toBe(new Date(T0 + 6 * HOUR).toISOString());
+    expect(persisted.last_fire_attempted_at).toBe(new Date(T0 + 6 * HOUR + 30 * 60_000 + TICK).toISOString());
+    expect(persisted.last_fired_at).toBeUndefined();
+
+    scheduler.stop();
+    const after: number[] = [];
+    scheduler = new CronScheduler({
+      agentName: 'test-agent', onFire: () => { after.push(Date.now()); }, logger: () => {},
+    });
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(after).toHaveLength(0); // ⛔ no second dispatch of an accounted window
+  });
+
+  // P1b — the EXHAUSTED multi-slot dispatch, and it is the path that persisted
+  // NOTHING. The failed branch advanced memory to the accounted slot and wrote no
+  // file at all, which reads as harmless (there is no successful fire to record)
+  // and is not: disk kept a slot six hours stale, so a restart re-opened a window
+  // whose four attempts were already spent — a FIFTH callback.
+  it('P1b: an exhausted multi-slot failure persists the accounted slot and stays closed', async () => {
+    const persisted: Record<string, unknown> = {};
+    mockUpdateCron.mockImplementation((_a: string, _n: string, patch: Record<string, unknown>) => {
+      Object.assign(persisted, patch); return true;
+    });
+    mockReadCrons.mockImplementation(() => [makeCron(persisted)]);
+
+    scheduler.stop();
+    const attempts: number[] = [];
+    scheduler = new CronScheduler({
+      agentName: 'test-agent',
+      onFire: () => { attempts.push(Date.now()); throw new Error('dispatch failure'); },
+      logger: () => {},
+    });
+    scheduler.start();
+    vi.setSystemTime(T0 + 6 * HOUR + 30 * 60_000);
+    await vi.advanceTimersByTimeAsync(TICK + 21_000); // tick + the 1s/4s/16s retries
+    expect(attempts).toHaveLength(4);                 // the 4-attempt boundary is intact
+    expect(persisted.last_fired_at).toBeUndefined();  // nothing succeeded
+
+    expect(persisted.last_slot_at).toBe(new Date(T0 + 6 * HOUR).toISOString());
+
+    scheduler.stop();
+    scheduler = new CronScheduler({
+      agentName: 'test-agent', onFire: () => { attempts.push(Date.now()); }, logger: () => {},
+    });
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(attempts).toHaveLength(4); // ⛔ no fifth callback
+  });
+
+  // P2 — the CRON-EXPRESSION form. An interval names its own previous slot by
+  // subtracting its duration; an expression cannot, and the old code fell back to
+  // the served occurrence with a comment asserting that was exact. True for one
+  // slot, false after a skip: `0 * * * *` slept 12:00 -> 18:30 persisted 13:00 while
+  // the scheduler held 19:00.
+  // ⚠ TZ is stubbed because the expression parser resolves fields in LOCAL time;
+  // without it this test asserts UTC instants against a runner-dependent calendar.
+  it('P2: a cron expression persists the accounted OCCURRENCE, not the served one', async () => {
+    vi.stubEnv('TZ', 'UTC');
+    const persisted: Record<string, unknown> = {};
+    mockUpdateCron.mockImplementation((_a: string, _n: string, patch: Record<string, unknown>) => {
+      Object.assign(persisted, patch); return true;
+    });
+    mockReadCrons.mockImplementation(() => [makeCron({ schedule: '0 * * * *', ...persisted })]);
+
+    scheduler.start();
+    vi.setSystemTime(T0 + 6 * HOUR + 30 * 60_000);
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(fired).toHaveLength(1);
+
+    // 18:00Z — the occurrence immediately before the live next fire of 19:00Z — so
+    // that anchor walked forward one occurrence reproduces the live value exactly.
+    expect(persisted.last_slot_at).toBe(new Date(T0 + 6 * HOUR).toISOString());
+
+    scheduler.stop();
+    scheduler = new CronScheduler({
+      agentName: 'test-agent',
+      onFire: (c) => { fired.push({ name: c.name, at: Date.now() }); },
+      logger: () => {},
+    });
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(fired).toHaveLength(1);      // ⛔ 19:00 has not arrived; nothing re-fires
+    vi.setSystemTime(T0 + 7 * HOUR + TICK);
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(fired).toHaveLength(2);      // and the real occurrence still fires
+    vi.unstubAllEnvs();
+  });
+
+  // P1c — THE FAILURE-PATH WRITE, ISOLATED. Found by an UNKILLED MUTANT, and the
+  // finding is worth more than the test: removing the failed-dispatch persistence
+  // entirely broke NOTHING in P1a/P1b, because the pre-dispatch marker had already
+  // written the same value. Two writes independently defended one property, so no
+  // single mutation could reach it — a defence with two providers is invisible to a
+  // one-at-a-time grid exactly the way a symmetric loss is invisible to a diff.
+  //
+  // ⭐ The one case where the marker is NOT there to help is the case the code comment
+  // already claimed: the marker write FAILED (updateCron returns false — the cron was
+  // renamed or deleted between load and fire) and a RECURRING cron dispatches anyway.
+  // Then disk still holds the stale anchor, all four attempts are spent, and only the
+  // failure branch can close the window. The comment asserted it; nothing tested it.
+  it('P1c: a failed dispatch persists the accounted slot even when the attempt marker did not land', async () => {
+    // Disk starts on a real, OLD anchor — without one the fallback would be "now" and
+    // a restart would not re-dispatch for unrelated reasons, hiding the defect.
+    const persisted: Record<string, unknown> = {
+      last_slot_at: new Date(T0).toISOString(),
+      last_fired_at: new Date(T0).toISOString(),
+    };
+    let call = 0;
+    mockUpdateCron.mockImplementation((_a: string, _n: string, patch: Record<string, unknown>) => {
+      call += 1;
+      if (call === 1) return false;          // the pre-dispatch marker fails to land
+      Object.assign(persisted, patch); return true;
+    });
+    mockReadCrons.mockImplementation(() => [makeCron(persisted)]);
+
+    scheduler.stop();
+    const attempts: number[] = [];
+    scheduler = new CronScheduler({
+      agentName: 'test-agent',
+      onFire: () => { attempts.push(Date.now()); throw new Error('dispatch failure'); },
+      logger: () => {},
+    });
+    scheduler.start();
+    vi.setSystemTime(T0 + 6 * HOUR + 30 * 60_000);
+    await vi.advanceTimersByTimeAsync(TICK + 21_000);
+    expect(attempts).toHaveLength(4);
+    expect(persisted.last_fire_attempted_at).toBeUndefined(); // the marker genuinely did not land
+    expect(persisted.last_slot_at).toBe(new Date(T0 + 6 * HOUR).toISOString());
+
+    scheduler.stop();
+    scheduler = new CronScheduler({
+      agentName: 'test-agent', onFire: () => { attempts.push(Date.now()); }, logger: () => {},
+    });
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(attempts).toHaveLength(4); // ⛔ the spent window stays closed
+  });
+
+  // P2 control — the SINGLE-slot expression case, which the old code got right.
+  // Without this, P2 above could be satisfied by any change that moves the anchor
+  // forward, including one that skips an occurrence that was never accounted for.
+  it('P2 control: a single-slot cron expression still persists the slot it served', async () => {
+    vi.stubEnv('TZ', 'UTC');
+    const persisted: Record<string, unknown> = {};
+    mockUpdateCron.mockImplementation((_a: string, _n: string, patch: Record<string, unknown>) => {
+      Object.assign(persisted, patch); return true;
+    });
+    mockReadCrons.mockImplementation(() => [makeCron({ schedule: '0 * * * *', ...persisted })]);
+
+    scheduler.start();
+    vi.setSystemTime(T0 + HOUR);       // 13:00Z exactly — one slot, no skipping
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(fired).toHaveLength(1);
+    expect(persisted.last_slot_at).toBe(new Date(T0 + HOUR).toISOString());
+    vi.unstubAllEnvs();
+  });
 });

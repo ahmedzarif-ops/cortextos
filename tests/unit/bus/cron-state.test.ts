@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { updateCronFire, readCronState, parseDurationMs,
-  computeNextFireMs,
+  computeNextFireMs, nextFireFromCron, prevFireFromCron,
 } from '../../../src/bus/cron-state';
 
 let tmpDir: string;
@@ -188,5 +188,56 @@ describe('computeNextFireMs', () => {
 
   it('returns NaN for a schedule that is neither an interval nor a cron expression', () => {
     expect(Number.isNaN(computeNextFireMs({ schedule: 'not-a-schedule', referenceMs: T0, nowMs: T0 }))).toBe(true);
+  });
+});
+
+describe('prevFireFromCron', () => {
+  const HOUR = 3_600_000;
+  const T = (iso: string) => Date.parse(iso);
+
+  // ⭐ THE CONTRACT, and it is the only property that makes this usable as a phase
+  // anchor: walking back one occurrence and then forward one occurrence is the
+  // identity. Everything the scheduler persists for a cron-expression schedule
+  // rests on this and on nothing else about the value.
+  it('round-trips with nextFireFromCron for every occurrence it names', () => {
+    process.env.TZ = 'UTC';
+    for (const expr of ['0 * * * *', '*/15 * * * *', '30 4 * * *', '0 7 * * 1', '41 11 1 * *']) {
+      const t = nextFireFromCron(expr, T('2026-09-09T12:00:00Z'));
+      expect(Number.isNaN(t)).toBe(false);
+      const prev = prevFireFromCron(expr, t);
+      expect(Number.isNaN(prev)).toBe(false);
+      expect(prev).toBeLessThan(t);
+      expect(nextFireFromCron(expr, prev)).toBe(t);
+    }
+  });
+
+  it('steps back from an instant that sits exactly on an occurrence', () => {
+    process.env.TZ = 'UTC';
+    // An anchor IS an occurrence, so `<=` here would return the instant itself and
+    // the round-trip above would then hand back the same slot forever.
+    expect(prevFireFromCron('0 * * * *', T('2026-09-09T18:00:00Z'))).toBe(T('2026-09-09T17:00:00Z'));
+  });
+
+  it('returns the latest occurrence strictly before a mid-minute instant', () => {
+    process.env.TZ = 'UTC';
+    expect(prevFireFromCron('0 * * * *', T('2026-09-09T18:00:30Z'))).toBe(T('2026-09-09T18:00:00Z'));
+  });
+
+  it('crosses a weekly gap rather than stopping at the nearest day', () => {
+    process.env.TZ = 'UTC';
+    // 2026-09-14 is a Monday; the previous `0 7 * * 1` is seven days earlier.
+    expect(prevFireFromCron('0 7 * * 1', T('2026-09-14T07:00:00Z')))
+      .toBe(T('2026-09-07T07:00:00Z'));
+  });
+
+  it('returns NaN for a schedule that is not a cron expression', () => {
+    expect(Number.isNaN(prevFireFromCron('4h', Date.now()))).toBe(true);
+    expect(Number.isNaN(prevFireFromCron('0 * * *', Date.now()))).toBe(true);
+  });
+
+  it('does not spin forever on an unsatisfiable expression', () => {
+    // 30 February never occurs. The walk is capped, so this must terminate in NaN
+    // rather than hang the suite — the same cap nextFireFromCron carries.
+    expect(Number.isNaN(prevFireFromCron('0 0 30 2 *', Date.parse('2026-09-09T12:00:00Z')))).toBe(true);
   });
 });

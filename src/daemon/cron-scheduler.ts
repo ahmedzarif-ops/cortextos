@@ -27,7 +27,7 @@
 
 import { homedir } from 'os';
 import { join } from 'path';
-import { parseDurationMs, readCronState, nextFireFromCron, computeNextFireMs } from '../bus/cron-state.js';
+import { parseDurationMs, readCronState, nextFireFromCron, prevFireFromCron, computeNextFireMs } from '../bus/cron-state.js';
 import { readCronsWithStatus, updateCron, cronsFileMtimeMs } from '../bus/crons.js';
 import type { CronDefinition } from '../types/index.js';
 import { appendExecutionLog } from './cron-execution-log.js';
@@ -146,27 +146,40 @@ function computeNextFireAt(
 /**
  * The latest slot that has been ACCOUNTED FOR — served, or deliberately skipped.
  *
- * ⭐ THIS IS THE FIELD'S WHOLE CONTRACT, and getting it wrong is what guard's R2
- * caught: `computeNextFireAt(def, last_slot_at)` must reproduce EXACTLY the
- * `nextFireAt` the running scheduler holds. Persisting "the slot this fire served"
- * did not satisfy that. After a multi-slot catch-up the in-memory advance jumps
- * every missed interval (`skipMissed`) while the persisted slot named the OLDEST
- * one, so a restart — and the IPC and CLI displays — advanced a single interval
- * from a slot the live scheduler had already skipped past. Sleep 12:00 -> 18:30
- * gave scheduler 19:00, display 14:00, and a restart re-dispatching at 18:31.
+ * ⭐ THIS IS THE FIELD'S WHOLE CONTRACT: `computeNextFireAt(def, last_slot_at)` must
+ * reproduce EXACTLY the `nextFireAt` the running scheduler holds. Nothing else about
+ * the value matters, and every round of this fix that persisted something *else* —
+ * "the slot this fire served", "the instant it actually fired" — described a world
+ * the live scheduler was not in. `crons.json` and the in-memory schedule are two
+ * descriptions of one thing, so the persisted value is DERIVED BACKWARDS FROM THE
+ * NEXT FIRE and never computed on its own terms.
  *
- * ⇒ Derive it BACKWARDS FROM THE NEXT FIRE, so the persisted state and the
- * in-memory policy cannot describe different worlds. For a cron expression there
- * is no interval to subtract and no phase to drift, so the served slot is exact.
+ * ⛔ BOTH SCHEDULE FORMS, and the second one is where round 3 was still wrong. An
+ * interval names its previous slot arithmetically (`next - duration`). A cron
+ * expression has no interval to subtract, and the old code fell back to the SERVED
+ * occurrence with a comment asserting that was exact — true for a single slot, false
+ * after a multi-slot skip. `0 * * * *` slept 12:00 -> 18:30 persisted 13:00 while the
+ * scheduler held 19:00, so the display read 14:00 and a restart re-fired.
+ * `prevFireFromCron` answers the same question for the expression form.
+ *
+ * Returns undefined only when no finite slot can be named — a terminal one-shot,
+ * whose next fire is Infinity — in which case the caller omits the field rather
+ * than writing a guess.
  */
 function accountedSlotIso(
   cron: CronDefinition,
   nextFireMs: number,
   dueAtMs: number,
 ): string | undefined {
-  const durationMs = parseDurationMs(cron.schedule);
-  if (!isNaN(durationMs) && Number.isFinite(nextFireMs)) {
-    return new Date(nextFireMs - durationMs).toISOString();
+  if (Number.isFinite(nextFireMs)) {
+    const durationMs = parseDurationMs(cron.schedule);
+    if (!isNaN(durationMs)) {
+      return new Date(nextFireMs - durationMs).toISOString();
+    }
+    const prevMs = prevFireFromCron(cron.schedule, nextFireMs);
+    if (!isNaN(prevMs)) {
+      return new Date(prevMs).toISOString();
+    }
   }
   return Number.isFinite(dueAtMs) ? new Date(dueAtMs).toISOString() : undefined;
 }
@@ -573,6 +586,29 @@ export class CronScheduler {
       const dueAtIso = Number.isFinite(dueAtMs) ? new Date(dueAtMs).toISOString() : undefined;
       this.logger(`[cron-scheduler] firing cron "${name}" (was due ${new Date(dueAtMs).toISOString()})`);
 
+      const attemptIso = new Date(now).toISOString();
+
+      // ⛔ ONE ADVANCE, COMPUTED ONCE, BEFORE THE DISPATCH — AND EVERY EXIT FROM THIS
+      // FIRE WRITES AND HOLDS THAT SAME VALUE.
+      // Rounds 1-3 of this fix each narrowed WHAT gets persisted and each left a path
+      // where the file and the live schedule still described different worlds:
+      // success wrote one thing, the pre-dispatch marker an older thing, and the
+      // failed-dispatch branch advanced memory and wrote nothing at all. Three
+      // computations of "the next slot" is how they diverged; three write sites with
+      // different payloads is how it survived being fixed twice.
+      //
+      // `claimedDef` is the definition AS OF THE MOMENT THE SLOT IS CLAIMED. It carries
+      // the attempt marker deliberately: for a ONE-SHOT that marker is what makes
+      // `computeNextFireAt` return Infinity, so this single computation gives the same
+      // terminal answer the success and failure branches used to reach separately.
+      // For a recurring cron the marker is not read at all and the value is unchanged.
+      const claimedDef: CronDefinition = { ...cron, last_fire_attempted_at: attemptIso };
+      const nextAfterFire = computeNextFireAt(claimedDef, dueAtMs, { nowMs: now, skipMissed: true });
+      // THE ACCOUNTED SLOT: derived backwards from that advance, so `slot -> next fire`
+      // reproduces it exactly on reload, for an interval AND for a cron expression.
+      const accountedIso = accountedSlotIso(claimedDef, nextAfterFire, dueAtMs);
+      const accountedPatch = accountedIso ? { last_slot_at: accountedIso } : {};
+
       // Persist last_fire_attempted_at to disk BEFORE awaiting the dispatch.
       // If the daemon crashes between this point and the post-success
       // updateCron below, loadCrons() on restart will see this attempt
@@ -592,12 +628,19 @@ export class CronScheduler {
       // fire, or renamed. A try/catch alone reads that as success. The RETURN
       // VALUE and the throw are two different failure channels and both have to
       // be closed.
-      const attemptIso = new Date(now).toISOString();
       const isOneShot = Boolean(cron.fire_at);
       let markerPersisted = false;
       let markerError = '';
       try {
-        // ⛔ THE SLOT GOES DOWN WITH THE MARKER, NOT AFTER THE DISPATCH.
+        // ⛔ THE SLOT GOES DOWN WITH THE MARKER, NOT AFTER THE DISPATCH — AND IT IS THE
+        // ACCOUNTED SLOT, NOT THE SERVED ONE.
+        // ⚠ The paragraph below was written about the SINGLE-SLOT case and is true only
+        // there. Co-writing removed the ordering window; it did NOT make the value
+        // right. After a multi-slot skip the served slot is one the live scheduler has
+        // already advanced past, so an interrupted or exhausted dispatch left a stale
+        // anchor on disk and a restart dispatched a slot that was already accounted for
+        // (guard round 3, P1). The window and the value are two defects, and closing the
+        // first is what made the second easy to miss.
         // guard's R1, a REGRESSION my own previous head introduced: the attempt
         // marker was written here (pre-dispatch) but `last_slot_at` only on success,
         // so a fire interrupted between the two left an OLDER slot on disk. On the
@@ -611,14 +654,10 @@ export class CronScheduler {
         // needed cannot be got wrong later.
         markerPersisted = updateCron(this.agentName, name, {
           last_fire_attempted_at: attemptIso,
-          ...(dueAtIso ? { last_slot_at: dueAtIso } : {}),
+          ...accountedPatch,
         });
         if (markerPersisted) {
-          sc.definition = {
-            ...cron,
-            last_fire_attempted_at: attemptIso,
-            ...(dueAtIso ? { last_slot_at: dueAtIso } : {}),
-          };
+          sc.definition = { ...claimedDef, ...accountedPatch };
         } else {
           markerError = 'no cron of that name in crons.json (deleted or renamed since load)';
         }
@@ -656,24 +695,14 @@ export class CronScheduler {
         const nowIso = new Date(now).toISOString();
         const newFireCount = (cron.fire_count ?? 0) + 1;
 
-        // ⛔ THE ADVANCE IS COMPUTED BEFORE THE WRITE, DELIBERATELY, so the slot that
-        // goes to disk is derived from the very value the scheduler is about to hold.
-        // Persisting first and advancing afterwards is what let the two drift: the
-        // file said one thing, memory said another, and nothing compared them.
-        const firedDefForNext: CronDefinition = {
-          ...cron,
-          last_fired_at: nowIso,
-          fire_count: newFireCount,
-        };
-        const nextAfterFire = computeNextFireAt(firedDefForNext, dueAtMs, { nowMs: now, skipMissed: true });
-        const accountedIso = accountedSlotIso(firedDefForNext, nextAfterFire, dueAtMs);
-
         try {
           updateCron(this.agentName, name, {
             last_fired_at: nowIso,
-            // THE PHASE, persisted — and it is the slot the LIVE SCHEDULER is anchored
-            // on after skipping missed slots, not the oldest slot this fire served.
-            ...(accountedIso ? { last_slot_at: accountedIso } : {}),
+            // THE PHASE, persisted — THE SAME VALUE the attempt marker already wrote and
+            // the same one `sc.nextFireAt` is about to hold. Re-derived here it would be
+            // a second computation of one thing, which is exactly how the file and the
+            // schedule came to disagree in the first place.
+            ...accountedPatch,
             fire_count: newFireCount,
           });
         } catch (err) {
@@ -737,17 +766,36 @@ export class CronScheduler {
         // Infinity. That is intended — the retries are already exhausted, and
         // re-attempting a one-shot later is the duplicate-action risk this
         // feature exists to avoid. The failure is recorded in the execution log.
-        const attemptedDef: CronDefinition = {
-          ...cron,
-          last_fire_attempted_at:
-            cron.last_fire_attempted_at ?? sc.definition.last_fire_attempted_at,
-        };
-        // Same anchoring as the success path: a failed window is a MISSED SLOT, and a
-        // missed slot must not re-phase the cron any more than a late one does.
-        const next = computeNextFireAt(attemptedDef, dueAtMs, { nowMs: now, skipMissed: true });
+        // ⛔ THE FAILED PATH PERSISTS THE ACCOUNTED SLOT TOO. It used to advance MEMORY
+        // ONLY, which reads as harmless — the fire failed, so there is no `last_fired_at`
+        // to write — and is not: the scheduler moved past the whole skipped run of slots
+        // while disk still named an older one, so a restart re-dispatched a window whose
+        // four attempts were already spent (guard round 3, P1, the fifth callback).
+        // ⭐ A path that writes NOTHING is a path that disagrees with memory, and it is
+        // the easiest of the three to overlook precisely because it has no success state
+        // to record. The write is attempted even when the pre-dispatch marker failed,
+        // which is the one case where disk does not already hold this value.
+        try {
+          if (accountedIso) {
+            updateCron(this.agentName, name, { last_slot_at: accountedIso });
+          }
+        } catch (err) {
+          this.logger(
+            `[cron-scheduler] WARNING: failed to persist accounted slot for "${name}" after a failed ` +
+            `dispatch — ${err instanceof Error ? err.message : String(err)}. In-memory schedule retained; ` +
+            `a restart may re-dispatch this window.`
+          );
+        }
+
+        // ⭐ THE SAME ADVANCE THE SUCCESS PATH TAKES AND THE SAME ONE THAT WAS PERSISTED.
+        // A failed window is a MISSED SLOT, and a missed slot must not re-phase the cron
+        // any more than a late one does. Recomputing it here with a differently-shaped
+        // definition object was a second answer to a question that already had one.
+        const next = nextAfterFire;
         if (!isNaN(next)) {
           sc.nextFireAt = next;
           sc.dueSlotAt = next;
+          sc.definition = { ...claimedDef, ...accountedPatch };
           // ⛔ A TERMINAL ONE-SHOT HAS NO NEXT SLOT, AND Infinity IS NOT A DATE.
           // computeNextFireAt returns POSITIVE_INFINITY once the attempt marker
           // exists, which is correct — but `new Date(Infinity).toISOString()`

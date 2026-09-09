@@ -312,15 +312,30 @@ describe('CronScheduler', () => {
     // Scheduler must NOT crash — the log should contain a give-up message
     expect(retryLogs.some(l => l.includes('giving up'))).toBe(true);
 
-    // updateCron is called exactly once with last_fire_attempted_at (iter 11
-    // pre-fire persist), but NEVER with last_fired_at because all attempts
-    // failed.  This matches the iter 11 invariant: attempted_at is recorded
-    // even on failed dispatches so a crash mid-fire cannot double-fire.
-    expect(mockUpdateCron).toHaveBeenCalledTimes(1);
+    // ⚡ THE COUNT CHANGED FROM 1 TO 2 ON 2026-09-09, DELIBERATELY. The superseded
+    // expectation, kept visible rather than quietly edited:
+    //     expect(mockUpdateCron).toHaveBeenCalledTimes(1);
+    //     // "updateCron is called exactly once with last_fire_attempted_at (iter 11
+    //     //  pre-fire persist), but NEVER with last_fired_at because all attempts failed."
+    // ⭐ THE INVARIANT THAT TEST WAS PROTECTING IS UNCHANGED AND STILL ASSERTED BELOW:
+    // a wholly failed dispatch never writes `last_fired_at`. The COUNT was incidental
+    // to it — it happened to be 1 because the failed path persisted nothing at all,
+    // which is the very defect guard's round-3 P1 found (memory advanced past the
+    // skipped slots while disk kept an older anchor, so a restart re-opened a window
+    // whose four attempts were spent).
+    // ⇒ The failed path now persists the ACCOUNTED SLOT, so there are two writes: the
+    // pre-dispatch marker and this one. Both are asserted by CONTENT below, which is
+    // what the test actually cares about; a bare count would pass on the wrong pair.
+    expect(mockUpdateCron).toHaveBeenCalledTimes(2);
     expect(mockUpdateCron).toHaveBeenCalledWith(
       'test-agent',
       'test-cron',
       expect.objectContaining({ last_fire_attempted_at: expect.any(String) })
+    );
+    expect(mockUpdateCron).toHaveBeenCalledWith(
+      'test-agent',
+      'test-cron',
+      expect.objectContaining({ last_slot_at: expect.any(String) })
     );
     expect(mockUpdateCron).not.toHaveBeenCalledWith(
       'test-agent',
