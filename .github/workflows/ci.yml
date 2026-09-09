@@ -56,6 +56,17 @@ jobs:
       - name: Install dashboard dependencies
         run: npm ci --prefix dashboard
 
+      # ⛔ BUILD BEFORE THE UNIT TESTS, AND IT IS NOT A CONVENIENCE.
+      # Two integration suites are `describe.skipIf(!existsSync(DIST_CLI))`. Without a
+      # build, `dist/cli.js` does not exist in this job and those SEVEN tests SELF-SKIP —
+      # they have never executed in CI. Measured on the run for the previous merge:
+      # `2820 passed | 12 skipped (2832)` here against `2829 passed | 3 skipped (2832)`
+      # locally with a build. The TOTAL is identical on both sides, which is why nobody
+      # saw it: the suite did not shrink, it went quiet.
+      # A test that has never executed is not coverage.
+      - name: Build (dist/ is a prerequisite for the CLI integration suites)
+        run: npm run build
+
       - name: Run unit tests
         run: npm test
 
