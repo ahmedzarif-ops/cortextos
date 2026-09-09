@@ -427,9 +427,108 @@ describe('stale in_progress: TRUE IDLE beside the clock', () => {
     expect(readout.transitions_unparseable_ts).toBe(1);
     expect(readout.skipped_malformed).toBe(1);
     expect(readout.skipped_unparseable).toBe(1);
+    expect(readout.transitions_invalid_endpoint).toBe(0);
     // the one good transition still wins
     const nineHoursAgo = Math.floor((Date.now() - 9 * 3600 * 1000) / 1000);
     expect(Math.abs(readout.epoch - nineHoursAgo)).toBeLessThan(60);
     expect(lastTransitionEpoch(paths, t)).toBe(readout.epoch);
+  });
+
+  /**
+   * C5 — AN ENDPOINT THAT IS NOT A STATUS IS NOT A TRANSITION.
+   *
+   * INPUT:    a 9h-idle in_progress task with a valid `pending -> in_progress` claim,
+   *           plus a recent line `{from: null, to: 'in_progress'}`.
+   * OBSERVED: the row CLEARED. CLOCK 360 / TRUE_IDLE 360, every rejection count 0 —
+   *           the invalid endpoint was read as fresh state-change evidence.
+   * EXPECTED: rejected AND counted, the 9h transition retained, TRUE_IDLE ~32400, alarm.
+   *
+   * ⛔ WHY EVERY EARLIER GUARD LET IT THROUGH, and it is the lesson of this arm: the line
+   * is a plain OBJECT, so the JSON-shape filter passes it; `null !== undefined`, so the
+   * presence check passes it; `null !== 'in_progress'`, so the difference check passes it.
+   * Three guards, all asking about the CONTAINER, none about the CONTENTS. A line can be
+   * malformed data inside a well-formed object.
+   *
+   * Written with raw `appendFileSync` on purpose: `null` is a value the TypeScript type
+   * says cannot be there, and the whole point is that data read off disk does not obey it.
+   */
+  it('C5: an audit line with a null endpoint is rejected and counted, not a transition', () => {
+    writeTask(paths, { id: 'task_ti_c5', status: 'in_progress', updated_at: hoursAgo(0.1), created_at: hoursAgo(20) });
+    audit(paths, 'task_ti_c5', { ts: hoursAgo(9), event: 'claim', agent: 'a', from: 'pending', to: 'in_progress' });
+    appendFileSync(
+      join(paths.taskDir, 'audit', 'task_ti_c5.jsonl'),
+      JSON.stringify({ ts: hoursAgo(0.1), event: 'update', agent: 'a', from: null, to: 'in_progress' }) + '\n',
+    );
+
+    const report = checkStaleTasks(paths);
+    const row = report.idle_ages.find((r) => r.task_id === 'task_ti_c5')!;
+
+    expect(row.audit_transitions_invalid_endpoint).toBe(1);
+    // the 9h claim survived rather than being discarded alongside the bad line
+    expect(row.true_idle_seconds).toBeGreaterThan(8 * 3600);
+    expect(report.stale_in_progress.map((t) => t.id)).toContain('task_ti_c5');
+    // and it is NOT miscounted as one of the other rejection reasons
+    expect(row.audit_lines_malformed).toBe(0);
+    expect(row.audit_transitions_no_op).toBe(0);
+  });
+
+  /**
+   * C5 MUST-STAY-GREEN, and it has TWO jobs. A real transition between real statuses is
+   * still accepted — without it, "reject every line" passes C5. And an ANNOTATION and a
+   * CREATE, which legitimately carry neither/one end, must NOT be counted as invalid
+   * endpoints: a diagnostic that fires on every healthy log tells a reader nothing.
+   */
+  it('C5-green: real endpoints are accepted, and annotations/creates are not counted invalid', () => {
+    writeTask(paths, { id: 'task_ti_c5g', status: 'in_progress', updated_at: hoursAgo(0.1), created_at: hoursAgo(20) });
+    audit(paths, 'task_ti_c5g', { ts: hoursAgo(20), event: 'create', agent: 'a', to: 'pending' });
+    audit(paths, 'task_ti_c5g', { ts: hoursAgo(0.1), event: 'claim', agent: 'a', from: 'pending', to: 'in_progress' });
+    audit(paths, 'task_ti_c5g', { ts: hoursAgo(0.05), event: 'update', agent: 'a', note: 'annotated: a note' });
+
+    const report = checkStaleTasks(paths);
+    const row = report.idle_ages.find((r) => r.task_id === 'task_ti_c5g')!;
+    expect(row.audit_transitions_invalid_endpoint).toBe(0);
+    // the 6-minute claim was ACCEPTED, so the row is well inside the 2h threshold
+    expect(row.true_idle_seconds).toBeLessThan(7200);
+    expect(report.stale_in_progress.map((t) => t.id)).not.toContain('task_ti_c5g');
+  });
+
+  /**
+   * C6 — THE DECLARED CONTRACT AND THE BEHAVIOUR MUST AGREE ABOUT NEGATIVE AGES.
+   *
+   * INPUT:    `updated_at` 3h in the FUTURE, a valid transition 6m ago.
+   * OBSERVED: `clock_age_seconds` -10800 while the type comment promised no age is ever
+   *           negative — only the IDLE clock was clamped.
+   * EXPECTED: clamped at 0 like the idle clock, and FLAGGED, because 0 reads as
+   *           "just written" and that is the reassuring direction.
+   *
+   * ⚠ The flag is the load-bearing half. For `in_progress` the clamp is covered — the idle
+   * clock is the other half of `max()`. For `blocked`/`pending`/`human` there is no second
+   * clock, so a future `updated_at` clears those rows; it did so at -10800 too, so the
+   * clamp changes the number and not that outcome. `clock_future` is how a reader sees it.
+   */
+  it('C6: a future updated_at clamps the clock at 0 and is flagged, never negative', () => {
+    writeTask(paths, { id: 'task_ti_c6', status: 'in_progress', updated_at: hoursAgo(-3), created_at: hoursAgo(20) });
+    audit(paths, 'task_ti_c6', { ts: hoursAgo(0.1), event: 'claim', agent: 'a', from: 'pending', to: 'in_progress' });
+
+    const row = checkStaleTasks(paths).idle_ages.find((r) => r.task_id === 'task_ti_c6')!;
+    expect(row.clock_age_seconds).toBe(0);
+    expect(row.clock_future).toBe(true);
+    expect(row.clock_malformed).toBe(false); // a future time PARSES — a different fault
+    // the contract, asserted directly and through the serialisation the CLI performs
+    expect(row.clock_age_seconds).toBeGreaterThanOrEqual(0);
+    expect(row.true_idle_seconds).toBeGreaterThanOrEqual(0);
+    const round = JSON.parse(JSON.stringify(row));
+    expect(round.clock_age_seconds).toBeGreaterThanOrEqual(0);
+    expect(round.true_idle_seconds).toBeGreaterThanOrEqual(0);
+  });
+
+  /** C6 MUST-STAY-GREEN: an ordinary past `updated_at` is neither clamped nor flagged. */
+  it('C6-green: a past updated_at keeps its real age and is not flagged future', () => {
+    writeTask(paths, { id: 'task_ti_c6g', status: 'in_progress', updated_at: hoursAgo(5), created_at: hoursAgo(20) });
+    audit(paths, 'task_ti_c6g', { ts: hoursAgo(0.1), event: 'claim', agent: 'a', from: 'pending', to: 'in_progress' });
+
+    const row = checkStaleTasks(paths).idle_ages.find((r) => r.task_id === 'task_ti_c6g')!;
+    expect(row.clock_future).toBe(false);
+    expect(row.clock_age_seconds).toBeGreaterThan(4 * 3600);
   });
 });

@@ -27,7 +27,30 @@ export interface InboxMessage {
 
 // Task Types
 
-export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'blocked' | 'cancelled';
+/**
+ * Every task status, as a RUNTIME value.
+ *
+ * `TaskStatus` is derived FROM this rather than declared beside it, so the list a
+ * validator iterates and the type the compiler checks cannot drift apart. They
+ * already had: `src/cli/bus.ts` carries a hand-written copy of these five, and a
+ * sixth status added to the type would have left that copy silently short.
+ */
+export const TASK_STATUSES = ['pending', 'in_progress', 'completed', 'blocked', 'cancelled'] as const;
+
+export type TaskStatus = (typeof TASK_STATUSES)[number];
+
+/**
+ * Runtime check that a value is a real task status.
+ *
+ * Needed because data read off DISK is `unknown` no matter what the type says.
+ * An audit line reading `{ from: null, to: 'in_progress' }` is a plain object, so
+ * it survives a JSON shape check, and `null !== undefined` and `null !== 'in_progress'`,
+ * so it survives a presence check and a difference check too — and is then counted
+ * as a state change that never happened.
+ */
+export function isTaskStatus(value: unknown): value is TaskStatus {
+  return typeof value === 'string' && (TASK_STATUSES as readonly string[]).includes(value);
+}
 
 export interface TaskOutput {
   /** Output kind. "file" links to a saved deliverable; other shapes reserved. */
@@ -688,6 +711,18 @@ export interface TaskIdleAge {
   true_idle_seconds: number;
   /** `updated_at` did not parse. `clock_age_seconds` is the sentinel, and the row alarms. */
   clock_malformed: boolean;
+  /**
+   * `updated_at` is in the FUTURE, so `clock_age_seconds` was negative and was clamped to 0.
+   *
+   * ⚠ READ THIS BEFORE TRUSTING A CLEARED ROW THAT CARRIES IT. Clamping honours the
+   * no-negative-age contract above, and it points the REASSURING way: a clamped clock
+   * reads as "just written". For `in_progress` that is harmless, because the idle clock
+   * is the other half of `max()` and still decides. For `blocked`, `pending` and `human`
+   * there IS no second clock, so a future `updated_at` clears those rows — exactly as a
+   * negative age already did before the clamp. The clamp changes the number, not that
+   * outcome. Recorded here rather than fixed silently.
+   */
+  clock_future: boolean;
   /** `true_idle_seconds` was negative and was clamped to 0 — a future-dated `created_at`. */
   idle_clamped: boolean;
   /**
@@ -704,6 +739,18 @@ export interface TaskIdleAge {
   audit_transitions_unparseable_ts: number;
   /** Transitions dated in the FUTURE: ignored, because they cannot establish present activity. */
   audit_transitions_future: number;
+  /**
+   * Audit lines carrying BOTH ends where at least one is NOT a real `TaskStatus` —
+   * `null`, a number, an unknown string. Rejected and counted.
+   *
+   * ⛔ THE SHAPE CHECK ON THE LINE DOES NOT COVER THIS, and that is why it needed its own
+   * field. `{ from: null, to: 'in_progress' }` is a plain object, so it passes the
+   * JSON-shape filter; `null !== undefined`, so it passes the presence check; and
+   * `null !== 'in_progress'`, so it passes the difference check. A line can be malformed
+   * DATA inside a well-formed OBJECT, and every guard before this one asked about the
+   * container.
+   */
+  audit_transitions_invalid_endpoint: number;
   /**
    * Audit lines carrying `from === to` — both ends written, nothing changed.
    * `updateTask` emits these unconditionally, so `update-task <id> in_progress`

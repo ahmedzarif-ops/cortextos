@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync, unlinkSync, appendFileSync } from 'fs';
 import { join } from 'path';
 import type { Task, TaskAnnotation, Priority, TaskStatus, BusPaths, StaleTaskReport, ArchiveReport } from '../types/index.js';
+import { isTaskStatus } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { randomDigits } from '../utils/random.js';
 import { validatePriority, validateTaskId } from '../utils/validate.js';
@@ -808,6 +809,8 @@ export interface TransitionReadout {
   transitions_future: number;
   /** Transitions rejected because `from === to`: both ends written, nothing changed. */
   transitions_no_op: number;
+  /** Transitions rejected because an endpoint was not a real `TaskStatus` (e.g. `null`). */
+  transitions_invalid_endpoint: number;
 }
 
 /**
@@ -831,10 +834,28 @@ export function lastTransition(
   let unparseableTs = 0;
   let future = 0;
   let noOp = 0;
+  let invalidEndpoint = 0;
 
   for (const entry of audit.entries) {
-    // A transition carries BOTH ends. An annotation carries neither.
+    // Not a transition at all, and not malformed either: an annotation carries
+    // NEITHER end, a `create` carries only `to`. Both are ordinary lines, so they
+    // are skipped silently and NOT counted as rejections — a diagnostic that fires
+    // on every healthy log tells a reader nothing.
     if (entry.from === undefined || entry.to === undefined) continue;
+
+    // ⛔ FROM HERE THE LINE CLAIMS TO BE A TRANSITION, SO IT MUST BE A WELL-FORMED ONE:
+    // both endpoints REAL STATUSES, and different. Presence was never the question.
+    //
+    // `{ from: null, to: 'in_progress' }` is the case that got through everything else:
+    // it is a plain object, so the JSON-shape filter passes it; `null !== undefined`, so
+    // the presence check passes it; `null !== 'in_progress'`, so the difference check
+    // passes it — and a 9h-idle row was then CLEARED on a state change that never
+    // happened. A LINE CAN BE MALFORMED DATA INSIDE A WELL-FORMED OBJECT, and every
+    // guard written before this one asked about the container instead of the contents.
+    if (!isTaskStatus(entry.from) || !isTaskStatus(entry.to)) {
+      invalidEndpoint++;
+      continue;
+    }
 
     // ⛔ BOTH ENDS PRESENT IS NECESSARY AND NOT SUFFICIENT. A TRANSITION IS
     // `from !== to`. `updateTask` writes `{ from, to }` UNCONDITIONALLY without
@@ -876,6 +897,7 @@ export function lastTransition(
     transitions_unparseable_ts: unparseableTs,
     transitions_future: future,
     transitions_no_op: noOp,
+    transitions_invalid_endpoint: invalidEndpoint,
   };
 }
 
@@ -943,8 +965,17 @@ export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
     const updatedEpoch = epochSecondsOrNull(task.updated_at);
     const createdEpoch = epochSecondsOrNull(task.created_at);
     const clockMalformed = updatedEpoch === null;
-    const age = updatedEpoch === null ? nowEpoch : nowEpoch - updatedEpoch;
-    const createdAge = createdEpoch === null ? nowEpoch : nowEpoch - createdEpoch;
+    const rawAge = updatedEpoch === null ? nowEpoch : nowEpoch - updatedEpoch;
+    // A FUTURE `updated_at` GIVES A NEGATIVE AGE. Clamped at 0 so both clocks obey the
+    // same no-negative-age contract the type declares, and FLAGGED, because the clamp
+    // points the reassuring way: 0 reads as "just written". For `in_progress` that is
+    // covered — the idle clock is the other half of `max()` and still decides. For
+    // `blocked`, `pending` and `human` there is no second clock, so a future `updated_at`
+    // clears those rows; it already did that at -10800, and the clamp changes the number
+    // rather than the outcome. Flagged rather than widened into those buckets here.
+    const clockFuture = rawAge < 0;
+    const age = clockFuture ? 0 : rawAge;
+    const createdAge = createdEpoch === null ? nowEpoch : Math.max(0, nowEpoch - createdEpoch);
 
     // Stale in_progress: alarm on MAX(clock, true idle).
     //
@@ -980,12 +1011,14 @@ export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
         clock_age_seconds: age,
         true_idle_seconds: idleAge,
         clock_malformed: clockMalformed,
+        clock_future: clockFuture,
         idle_clamped: idleClamped,
         audit_lines_malformed: transition.skipped_malformed,
         audit_lines_unparseable: transition.skipped_unparseable,
         audit_transitions_unparseable_ts: transition.transitions_unparseable_ts,
         audit_transitions_future: transition.transitions_future,
         audit_transitions_no_op: transition.transitions_no_op,
+        audit_transitions_invalid_endpoint: transition.transitions_invalid_endpoint,
       });
       if (Math.max(age, idleAge) > STALE_IN_PROGRESS) {
         report.stale_in_progress.push(task);
