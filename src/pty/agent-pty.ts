@@ -423,10 +423,36 @@ export class AgentPTY {
     return this.outputBuffer;
   }
 
-  // first-run observability fix: true only while genuinely wedged — AND-gated with
-  // !isBootstrapped so a late recovery auto-reports healthy without extra clearing.
+  // True only while genuinely wedged.
+  //
+  // ⛔ THE PREVIOUS AND-GATE WAS `!this.outputBuffer.isBootstrapped()`, and its comment
+  // claimed "a late recovery auto-reports healthy without extra clearing". IT DOES NOT.
+  // `isBootstrapped()` inspects the RECENT output window, so it answers "is the bootstrap
+  // pattern on screen right now", not "did this session ever start". Hours later the
+  // pattern has scrolled out of that window and the gate reads false again — so a seat
+  // that bootstrapped fine stays latched as `unhealthy*` for the life of the process.
+  // Measured on a live seat: 20h38m uptime, a heartbeat 60s old, a context file written
+  // that minute and three bus messages exchanged, still printed
+  // "awaiting interactive confirmation (first-run prompt not accepted)".
+  //
+  // ⭐ A MOMENTARY OBSERVATION CANNOT CARRY A PERMANENT FACT. "Ever bootstrapped" is
+  // monotonic; a scrolling buffer is not.
+  //
+  // ⛔ AND LATCHING AT THE OBSERVATION SITES WAS STILL NOT ENOUGH — the first version of
+  // this fix latched at the prompt poll, the backstop and this getter, and moved the
+  // failure later instead of removing it. Reproduced on the real ring: bootstrap arrives
+  // LATE, after the backstop has already raised the flag; ~1050 further chunks arrive
+  // before anything calls this getter; by the time it looks, the pattern has been evicted
+  // and it latches nothing. A healthy seat stays 'awaiting' forever, exactly as before.
+  //
+  // ⭐ OBSERVATION SITES ARE SAMPLED; INGRESS IS CONTINUOUS. A fact that must be captured
+  // cannot be captured by a sampler, because between any two samples the evidence expires.
+  // So the latch now lives in OutputBuffer and is set on push — where the bytes arrive —
+  // and this getter only READS it. There is exactly one latch, owned by the object that
+  // sees every chunk.
   isAwaitingInteractiveConfirmation(): boolean {
-    return this._awaitingInteractiveConfirmation && !this.outputBuffer.isBootstrapped();
+    if (this.outputBuffer.hasEverBootstrapped()) return false;
+    return this._awaitingInteractiveConfirmation;
   }
 
   /**

@@ -22,6 +22,17 @@ export class OutputBuffer {
   private maxChunks: number;
   private logPath: string | null;
   private bootstrapPattern: string;
+  /**
+   * LATCH: has the bootstrap pattern EVER been in this buffer?
+   *
+   * ⛔ THIS LIVES HERE, NOT IN A CALLER, BECAUSE THIS IS WHERE THE FACT ARRIVES.
+   * `isBootstrapped()` answers "is the pattern on screen right now" — a momentary
+   * observation over a ring that evicts. "Ever bootstrapped" is monotonic. A caller
+   * that latches at its own observation site can only latch what it happens to be
+   * looking at: OBSERVATION SITES ARE SAMPLED, INGRESS IS CONTINUOUS, and between
+   * any two samples the evidence can be evicted. Set on push, never unset.
+   */
+  private _everBootstrapped = false;
 
   constructor(maxChunks: number = 1000, logPath?: string, bootstrapPattern?: string) {
     this.maxChunks = maxChunks;
@@ -46,6 +57,24 @@ export class OutputBuffer {
     this.chunks.push(safe);
     if (this.chunks.length > this.maxChunks) {
       this.chunks.shift();
+    }
+
+    // OBSERVE THE BOOTSTRAP PATTERN AT INGRESS, while the chunk that carries it is
+    // guaranteed to still be in the ring. A caller asking later may be asking after
+    // a thousand chunks have evicted it.
+    //
+    // ⚠ COST, STATED RATHER THAN GLOSSED: this is a full-ring scan per chunk, and it
+    // runs ONLY until the latch is set — the `!this._everBootstrapped` short-circuit
+    // means a bootstrapped session pays nothing at all, which is every session after
+    // its first seconds. A cheaper incremental scan of just the new chunk would NOT be
+    // equivalent: `isBootstrapped()` is a whole-window predicate (for the 'permissions'
+    // pattern it excludes the trust prompt by looking for 'trust' and '> ' anywhere in
+    // the window) and the ring EVICTS, so its answer can change without the new chunk
+    // containing anything relevant. An incremental accumulator cannot reproduce that,
+    // and a wrong-but-fast latch here is the exact class of bug this change exists to
+    // remove.
+    if (!this._everBootstrapped && this.isBootstrapped()) {
+      this._everBootstrapped = true;
     }
 
     // Stream to log file (replaces tmux pipe-pane)
@@ -114,6 +143,29 @@ export class OutputBuffer {
   }
 
   /**
+   * Has this session EVER been observed bootstrapped?
+   *
+   * Monotonic: once true, always true for the life of this buffer. Use this — never
+   * `isBootstrapped()` — for any question of the form "did this session start",
+   * "is this seat live", "has it got past first-run". `isBootstrapped()` answers the
+   * different question "is the pattern visible right now", and the two agree only
+   * during the window before eviction.
+   *
+   * The live re-check below is a floor, not the mechanism: ingress already latched
+   * anything that arrived through `push()`. It costs one scan per call while
+   * unlatched and nothing once latched, and it means this getter can never answer
+   * worse than `isBootstrapped()` would have.
+   */
+  hasEverBootstrapped(): boolean {
+    if (this._everBootstrapped) return true;
+    if (this.isBootstrapped()) {
+      this._everBootstrapped = true;
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Get the total size of buffered output in bytes.
    * Useful for activity detection (typing indicator).
    */
@@ -127,6 +179,12 @@ export class OutputBuffer {
 
   /**
    * Clear the buffer.
+   *
+   * ⛔ DELIBERATELY DOES NOT CLEAR `_everBootstrapped`. Emptying the ring discards
+   * the EVIDENCE; it does not un-happen the event. Resetting the latch here would
+   * reintroduce the whole defect through a second door — a caller that clears the
+   * buffer would silently make a live session report as never-started. A new
+   * session gets a new OutputBuffer, which is where the latch is meant to reset.
    */
   clear(): void {
     this.chunks = [];
