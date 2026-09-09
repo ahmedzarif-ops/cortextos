@@ -12,7 +12,7 @@ const mockPty = {
   onExit: vi.fn().mockImplementation((cb: (exitCode: number, signal?: number) => void) => {
     capturedOnExit = cb;
   }),
-  getOutputBuffer: vi.fn().mockReturnValue({ isBootstrapped: vi.fn().mockReturnValue(false) }),
+  getOutputBuffer: vi.fn().mockReturnValue({ isBootstrapped: vi.fn().mockReturnValue(false), hasEverBootstrapped: vi.fn().mockReturnValue(false) }),
 };
 
 vi.mock('../../../src/pty/agent-pty.js', () => ({
