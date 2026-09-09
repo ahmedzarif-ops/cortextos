@@ -649,6 +649,30 @@ export interface StaleTaskReport {
   stale_blocked: Task[];
   stale_human: Task[];
   overdue: Task[];
+  /**
+   * Both staleness clocks for EVERY `in_progress` task, stale or not.
+   *
+   * `clock_age_seconds` is `now - updated_at` — the field the check has always
+   * read. `true_idle_seconds` is `now - <newest audit transition>`, falling back
+   * to `created_at`. They diverge exactly when a write moved `updated_at`
+   * without changing anything, which is how a genuinely idle task was being
+   * cleared: measured 2026-09-08, the shipped check cleared 5 of 10 in_progress
+   * tasks and all 5 were idle 4.2h-20.9h.
+   *
+   * Emitted for every row rather than only stale ones ON PURPOSE: a consumer
+   * has to be able to see the two clocks disagree on a row that is being
+   * CLEARED, since a cleared row is the case that produced no output at all.
+   */
+  idle_ages: TaskIdleAge[];
+}
+
+/** The two staleness clocks for one `in_progress` task. See StaleTaskReport.idle_ages. */
+export interface TaskIdleAge {
+  task_id: string;
+  /** now - updated_at, in seconds. Moves on ANY write, including a no-op. */
+  clock_age_seconds: number;
+  /** now - newest audit transition (else created_at), in seconds. */
+  true_idle_seconds: number;
 }
 
 export interface ArchiveReport {

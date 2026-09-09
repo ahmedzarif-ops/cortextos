@@ -700,6 +700,57 @@ function readAllTasks(taskDir: string): Task[] {
 /**
  * Check for stale tasks. Matches bash check-stale-tasks.sh behavior.
  */
+/**
+ * Epoch seconds of the newest AUDIT TRANSITION for a task — the last moment
+ * the task demonstrably CHANGED STATE — falling back to `created_at` when the
+ * audit log holds no transition (or no log exists at all).
+ *
+ * WHY THIS EXISTS, and it is not a second opinion about `updated_at`.
+ * `updated_at` moves on ANY write, including a write that does no work.
+ * `annotateTask` is exactly that write: it appends a note and refreshes
+ * `updated_at`, so a scheduled sweep that annotates every open task RESETS THE
+ * CLOCK `checkStaleTasks` READS — including when the annotation's own text says
+ * nothing happened. Measured 2026-09-08 across 727 task files: of the 10
+ * `in_progress` tasks, the shipped check CLEARED 5, and all 5 were genuinely
+ * idle 4.2h-20.9h. The false-clear rate on what it passes was 5 of 5.
+ *
+ * The failure is not degradation, it is INVERSION: the seats that annotate most
+ * diligently look healthiest. `updated_at` is not merely silent about idleness,
+ * it ASSERTS a recency that a no-op write manufactured.
+ *
+ * THE DISCRIMINATOR IS STRUCTURAL, NOT TEXTUAL. An annotation is written as
+ * `{ event: 'update' }` with NO `from` and NO `to`; every genuine lifecycle
+ * event (`create`, `claim`, status-changing `update`, `complete`) carries both.
+ * So a transition can be told from a self-report mechanically, with no judgement
+ * about what the note SAYS.
+ *
+ * A TEXT-CLASSIFYING PREDICATE WAS SPECIFIED FIRST AND MEASURED DEAD, and the
+ * reason is worth keeping: "byte-identical annotation AND no resume condition"
+ * flagged 0 of the 9 byte-identical groups on the live corpus, because all nine
+ * DO state a resume condition ("resume only on a new Chief instruction",
+ * "nothing further before 13:00Z brief"). Negative control: the same condition
+ * regex fires on 150 of 249 annotations and not on 99, so it detects conditions
+ * rather than English and that zero is real. There is no lexical line between a
+ * keepalive and a substantive hold note. Do not reintroduce one.
+ *
+ * @returns epoch SECONDS. Never NaN: an unparseable `created_at` yields 0,
+ *          which reads as maximally stale — this check must fail LOUD.
+ */
+export function lastTransitionEpoch(paths: BusPaths, task: Task): number {
+  const createdEpoch = Math.floor(new Date(task.created_at).getTime() / 1000);
+  const fallback = Number.isFinite(createdEpoch) ? createdEpoch : 0;
+
+  let newest = 0;
+  for (const entry of readTaskAudit(paths, task.id)) {
+    // A transition carries BOTH ends. An annotation carries neither.
+    if (entry.from === undefined || entry.to === undefined) continue;
+    const epoch = Math.floor(new Date(entry.ts).getTime() / 1000);
+    if (Number.isFinite(epoch) && epoch > newest) newest = epoch;
+  }
+
+  return newest > 0 ? newest : fallback;
+}
+
 export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
   const nowEpoch = Math.floor(Date.now() / 1000);
   const STALE_IN_PROGRESS = 7200;   // 2 hours
@@ -718,6 +769,7 @@ export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
     stale_blocked: [],
     stale_human: [],
     overdue: [],
+    idle_ages: [],
   };
 
   const tasks = readAllTasks(paths.taskDir);
@@ -731,9 +783,31 @@ export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
     const age = nowEpoch - updatedEpoch;
     const createdAge = nowEpoch - createdEpoch;
 
-    // Stale in_progress: updated_at > 2 hours ago
-    if (task.status === 'in_progress' && age > STALE_IN_PROGRESS) {
-      report.stale_in_progress.push(task);
+    // Stale in_progress: alarm on MAX(clock, true idle).
+    //
+    // `age` (from updated_at) is the CLOCK. `idleAge` (from the newest audit
+    // TRANSITION) is how long the task has not actually moved. They differ
+    // exactly when a no-op write refreshed updated_at, which is the defect
+    // this bucket was silently losing rows to — see lastTransitionEpoch.
+    //
+    // MAX, not replace: the clock is still the right answer whenever it is the
+    // larger of the two (a task whose audit log is missing or lost a write
+    // still alarms on its clock), and taking the max means this change can only
+    // ever ADD rows to the bucket, never remove one the shipped check caught.
+    // That direction is deliberate and is what makes it safe to ship.
+    if (task.status === 'in_progress') {
+      const idleAge = nowEpoch - lastTransitionEpoch(paths, task);
+      // Both ages are reported for EVERY in_progress task, not only stale ones:
+      // a reader has to be able to see the two clocks disagree while the row is
+      // still being cleared, which is precisely the case that was invisible.
+      report.idle_ages.push({
+        task_id: task.id,
+        clock_age_seconds: age,
+        true_idle_seconds: idleAge,
+      });
+      if (Math.max(age, idleAge) > STALE_IN_PROGRESS) {
+        report.stale_in_progress.push(task);
+      }
     }
 
     // Stale pending: created_at > 24 hours ago
