@@ -19,9 +19,18 @@
 // Which is why the isolation unit for provoking this is a SEPARATE CLONE, never a worktree:
 // a linked worktree shares .git/config with the parent.
 //
-// Three tests, because the defect has three halves and any one alone leaves it live: the hook
-// SOURCE must not leak, the hook THAT ACTUALLY RUNS must not leak, and a test must not depend
-// on its caller having been careful.
+// The defect has three halves and any one alone leaves it live: the hook SOURCE must not leak,
+// the hook THAT ACTUALLY RUNS must not leak, and a test must not depend on its caller having
+// been careful. (This sentence used to open "Three tests, because…". A second variable family
+// was added below and the number went stale in the same commit that made it wrong — so it is
+// stated without a count, which cannot go stale, rather than bumped to a number that can.)
+//
+// ⛔ TWO FAMILIES NOW, AND THE SECOND ONE IS THE POINT OF THE FIRST BEING INCOMPLETE.
+// `GIT_*` was the family somebody enumerated. `CTX_*` leaks through the same hook, by the same
+// mechanism, and was not covered: a push from a live agent shell hands the suite that agent's
+// real CTX_ROOT / CTX_AGENT_DIR / CTX_ORG. Measured 2026-09-09 on PR #39 from a live seat:
+// 29 failed with them, 0 failed without, totals identical at 2786 — the environment flipping
+// tests, not any code. See the CTX_ block at the bottom of this file.
 import { strict as assert } from 'node:assert';
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -172,5 +181,122 @@ describe('git plumbing env must not leak from the pre-push hook into the test su
       rmSync(target, { recursive: true, force: true });
     }
     assert.ok(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// THE SECOND FAMILY: CTX_*
+//
+// Same hook, same mechanism, different variables — and the reason it needs its own block rather
+// than another entry in LEAKED_GIT_ENV is that the correct fix here is NOT a list. `GIT_*` is a
+// closed set that git defines; `CTX_*` is an open set this project keeps adding to, so a
+// hardcoded list would be correct on the day it was written and quietly incomplete afterwards,
+// which is precisely how the GIT_* line above came to be right and insufficient at the same
+// time. The hook therefore unsets DYNAMICALLY (`compgen -v CTX_`), and these tests assert the
+// dynamic form, not merely that some CTX_ variable is mentioned.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** The hook text that runs BEFORE any build or test — the part that is supposed to be a scrub. */
+function preludeOf(source: string, label: string): string {
+  const runsBuild = source.indexOf('if ! npm run build');
+  expect(runsBuild, `${label}: no longer runs the build the way this test locates it`).toBeGreaterThan(0);
+  return source.slice(0, runsBuild);
+}
+
+function assertStripsCtxDynamically(source: string, label: string): void {
+  const prelude = preludeOf(source, label);
+  expect(
+    /compgen\s+-v\s+CTX_/.test(prelude),
+    `${label}: CTX_* is not stripped dynamically before the hook runs the build and the suite. ` +
+      `A hardcoded list is not an acceptable substitute here — it is a claim about the variables ` +
+      `someone remembered on one day, and CTX_* is an open set.`,
+  ).toBe(true);
+  expect(
+    /unset\s+"?\$/.test(prelude),
+    `${label}: the CTX_ names are enumerated but never unset`,
+  ).toBe(true);
+}
+
+describe('cortextOS CTX_* env must not leak from the pre-push hook into the test suite', () => {
+  it('the hook SOURCE strips CTX_* dynamically before it does any work', () => {
+    assertStripsCtxDynamically(
+      readFileSync(join(REPO, 'scripts', 'hooks', 'pre-push'), 'utf-8'),
+      'hook source',
+    );
+  });
+
+  // Same F2 reasoning as above, and absence is LOUD for the same reason: a merge fixes the
+  // source, not whatever copy git actually executes.
+  it('the EFFECTIVE hook strips them too', (ctx) => {
+    const hook = resolveEffectiveHook();
+    if (!hook.exists) {
+      ctx.skip(
+        `SKIPPED, NOT PASSED — no pre-push hook is installed for this clone. ` +
+          `Looked at: ${hook.path} (core.hooksPath=${hook.hooksPath ?? '<unset>'}). ` +
+          `Run: bash scripts/setup-hooks.sh`,
+      );
+      return;
+    }
+    assertStripsCtxDynamically(
+      readFileSync(hook.path, 'utf-8'),
+      `EFFECTIVE hook (${hook.path}, core.hooksPath=${hook.hooksPath ?? '<unset>'})`,
+    );
+  });
+
+  // THE BEHAVIOURAL HALF, and it EXECUTES THE HOOK'S OWN TEXT rather than describing it.
+  //
+  // The two assertions above read a file and would keep passing if the loop were syntactically
+  // broken, or if `set -euo pipefail` made an empty `compgen` abort the hook before it ever
+  // reached the build. This one runs the real prelude, sliced out of the real file, in bash.
+  it('running the hook prelude actually removes CTX_* — including a name nobody hardcoded', () => {
+    const source = readFileSync(join(REPO, 'scripts', 'hooks', 'pre-push'), 'utf-8');
+    const prelude = preludeOf(source, 'hook source');
+
+    // A variable no list in this repo contains. If the hook ever regresses to a hardcoded
+    // enumeration, this one survives it and the test goes red.
+    const planted = {
+      CTX_ROOT: '/live/seat/root',
+      CTX_AGENT_DIR: '/live/seat/agents/sentinel',
+      CTX_FUTURE_VARIABLE_NOBODY_HARDCODED: 'planted',
+    };
+    // ⚠ READ THE LAST LINE, NOT THE WHOLE OUTPUT. The prelude ends with the hook's own
+    // `echo "[pre-push] Running build..."`, so the raw output is two lines and `Number(...)` of
+    // it is NaN. The first run of this test failed with "the planted variables did not survive"
+    // — an accusation against the CONTROL for what was a parsing bug in the READER. A count
+    // that arrives as NaN is not a small number, and a message that blames the subject for the
+    // instrument's defect is the most expensive kind of red.
+    const run = (script: string) => {
+      const out = execFileSync('bash', ['-c', `${script}\nenv | grep -c '^CTX_' || true`], {
+        cwd: REPO,
+        encoding: 'utf-8',
+        env: { ...process.env, ...planted },
+      }).trim();
+      const last = out.split('\n').pop() ?? '';
+      const n = Number(last);
+      expect(Number.isFinite(n), `could not read a count from the prelude output: ${JSON.stringify(out)}`).toBe(true);
+      return n;
+    };
+
+    // NEGATIVE CONTROL — the planted variables must actually REACH a bash child. Without this,
+    // a zero below could mean "the scrub works" or "there was nothing to remove", and those are
+    // different facts that look identical.
+    //
+    // ⚠ THE CONTROL IS AN EMPTY SCRIPT, NOT "THE PRELUDE WITH THE SCRUB CUT OUT". The first
+    // version did the latter, by regex. It worked against a mutant that DELETED the loop and
+    // fell over against the one that matters — a mutant replacing the dynamic loop with a
+    // HARDCODED list — because the regex could no longer find anything to cut, so the test
+    // failed with "the scrub was not located" instead of demonstrating that the planted future
+    // variable survived. A control that is derived from the subject stops working exactly when
+    // the subject changes shape, which is the moment you need it.
+    expect(
+      run(':'),
+      'the planted CTX_ variables did not reach a bash child at all — the control cannot fail, so the assertion below proves nothing',
+    ).toBeGreaterThanOrEqual(Object.keys(planted).length);
+
+    // THE ASSERTION.
+    expect(
+      run(prelude),
+      'CTX_* survived the hook prelude — a push from a live agent shell will hand the suite that seat\'s real directories',
+    ).toBe(0);
   });
 });
