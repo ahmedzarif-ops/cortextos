@@ -520,6 +520,23 @@ export interface CronDefinition {
 export interface CronExecutionLogEntry {
   /** ISO 8601 UTC timestamp of the fire attempt. */
   ts: string;
+  /**
+   * ISO 8601 UTC instant this fire was SCHEDULED for, when the scheduler knows
+   * it. `ts - due_at` is the lateness, and it is the only way to tell a fire
+   * that happened on time from one that happened fifteen minutes late.
+   *
+   * ⛔ WHY IT WAS ADDED (2026-09-09). A host sleep from 15:25:02Z left the
+   * daemon suspended; it ran only inside ~2s macOS DarkWake windows ~16 min
+   * apart, and fires landed up to 15m29s late against a 30s tick. Every one of
+   * them was logged `{"status":"fired"}` with a `ts` and nothing else, so a late
+   * fire and an on-time fire were written in identical words. The lateness was
+   * recoverable only by matching timestamps against `pmset`, a log this system
+   * does not own and never reads.
+   *
+   * OPTIONAL, and it stays optional: every line already on disk lacks it, and a
+   * reader that requires it would refuse the entire existing history.
+   */
+  due_at?: string;
   /** Cron name (matches CronDefinition.name). */
   cron: string;
   /** Outcome of this attempt. */

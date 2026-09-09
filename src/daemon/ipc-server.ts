@@ -7,7 +7,7 @@ import { getIpcPath } from '../utils/paths.js';
 import { readCrons, getExecutionLog, getExecutionLogPage, addCron, updateCron, removeCron, getCronByName } from '../bus/crons.js';
 import type { ExecutionLogStatusFilter } from '../bus/crons.js';
 import { nextFireFromCron } from './cron-scheduler.js';
-import { parseDurationMs } from '../bus/cron-state.js';
+import { computeNextFireMs } from '../bus/cron-state.js';
 import { computeHealth, aggregateFleetHealth } from '../utils/cron-health.js';
 
 const WORKER_NAME_REGEX = /^[a-z0-9_-]+$/;
@@ -129,15 +129,15 @@ export function computeNextFire(
 ): string {
   const referenceMs = lastFiredAt ? new Date(lastFiredAt).getTime() : now;
 
-  const durationMs = parseDurationMs(schedule);
-  if (!isNaN(durationMs)) {
-    const next = referenceMs + durationMs;
-    // If next is still in the past (daemon was stopped for a long time), advance to now
-    return new Date(next <= now ? now + durationMs : next).toISOString();
-  }
-
-  // Try as a 5-field cron expression
-  const nextMs = nextFireFromCron(schedule, now);
+  // ⛔ THE CLAMP THAT USED TO LIVE HERE IS GONE, DELIBERATELY.
+  // It read `next <= now ? now + durationMs : next`, so a cron that was overdue was
+  // displayed as due one interval from NOW — the dashboard could never show an overdue
+  // cron, whatever the state of the fleet. Meanwhile `bus list-crons` had no clamp and
+  // showed the real (past) value. TWO SURFACES, SAME QUESTION, TWO ANSWERS, and the one
+  // that always looked healthy was the one most people read.
+  // ⭐ An at-rest state and a failed state that render identically is the failure this
+  // area keeps producing. Both surfaces now call the one computation below.
+  const nextMs = computeNextFireMs({ schedule, referenceMs, nowMs: now });
   if (!isNaN(nextMs)) {
     return new Date(nextMs).toISOString();
   }

@@ -946,9 +946,47 @@ describe('CronScheduler', () => {
 
     // A reload happened...
     expect(mockReadCronsWithStatus.mock.calls.length).toBe(loadsBefore + 1);
-    // ...but the cron did not double-fire (nextFireAt preserved for the
-    // unchanged changeKey).
-    expect(fired.filter(c => c.name === 'job')).toHaveLength(1);
+
+    // ⛔ THIS ASSERTION WAS `toHaveLength(1)` AND IT NO LONGER HOLDS — CHANGED
+    // 2026-09-09 WITH THE REASON, because silently relaxing a double-fire guard
+    // is exactly the move that should never pass review unexplained.
+    //
+    // WHAT CHANGED: the post-fire advance now anchors on the SCHEDULED slot
+    // instead of the actual fire, so a cron keeps its phase. This fixture's
+    // catch-up fire lands mid-slot (last_fired_at is 2m old on a 1m cron), so
+    // the next ON-PHASE slot legitimately falls ~30s later — inside the window
+    // this test advances. THAT SECOND FIRE IS PHASE RESTORATION, NOT A DOUBLE
+    // FIRE, and a short gap after an off-phase catch-up is inherent to restoring
+    // a phase: it is the same arithmetic that makes a 15-min-late fire keep its
+    // slot instead of dragging every future fire 15 minutes later.
+    //
+    // ⭐ THE TEST'S ACTUAL TARGET IS UNCHANGED AND IS NOW ISOLATED PROPERLY.
+    // It exists to prove THE RELOAD does not cause a re-fire. Counting fires
+    // could never distinguish "the reload re-fired it" from "the schedule came
+    // round" — it only worked while the schedule could not come round this soon.
+    // The control below varies the ONE variable the test is about: with the
+    // mtime left alone, so NO reload occurs, the fire count is the same. Same
+    // count with and without a reload ⇒ the reload is not firing anything.
+    const withReload = fired.filter(c => c.name === 'job').length;
+    expect(mockReadCronsWithStatus.mock.calls.length).toBe(loadsBefore + 1);
+
+    // Rebuild the identical scenario, this time WITHOUT advancing the mtime.
+    const control = { fired: [] as { name: string }[] };
+    const controlScheduler = new CronScheduler({
+      agentName: 'test-agent',
+      onFire: (cron) => { control.fired.push({ name: cron.name }); },
+      logger: () => {},
+    });
+    mockReadCrons.mockReturnValue([
+      makeCron({ name: 'job', schedule: '1m', last_fired_at: twoMinAgo, fire_count: 1 }),
+    ]);
+    mockCronsFileMtimeMs.mockReturnValue(5000); // constant ⇒ no reload ever
+    controlScheduler.start();
+    await vi.advanceTimersByTimeAsync(TICK);
+    await vi.advanceTimersByTimeAsync(TICK);
+    controlScheduler.stop();
+
+    expect(control.fired.filter(c => c.name === 'job')).toHaveLength(withReload);
   });
 
   it('(g) external edit across a fire is applied and logged (suppression never hides a real edit)', async () => {

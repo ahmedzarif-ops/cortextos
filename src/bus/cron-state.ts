@@ -265,3 +265,73 @@ export function nextFireFromCron(expr: string, fromMs: number): number {
 
   return NaN; // should never reach here for valid expressions
 }
+
+// ---------------------------------------------------------------------------
+// THE ONE NEXT-FIRE COMPUTATION (2026-09-09)
+// ---------------------------------------------------------------------------
+
+/** Inputs to {@link computeNextFireMs}. */
+export interface NextFireInput {
+  /** Interval shorthand ("4h", "30m") or a 5-field cron expression. */
+  schedule: string;
+  /**
+   * The instant to count forward FROM. For a post-fire advance this is the
+   * SCHEDULED slot, not the actual fire — see `skipMissed`.
+   */
+  referenceMs: number;
+  /** "Now". Used only to decide which slots are already in the past. */
+  nowMs: number;
+  /**
+   * Advance past slots that are already in the past, landing on the first one
+   * strictly in the future. One jump, never a burst of catch-up fires.
+   *
+   * `false` (the default) returns the very next slot after `referenceMs` even
+   * if that instant has already passed — which is what a DISPLAY wants (an
+   * overdue cron should look overdue) and what the existing catch-up policy in
+   * the scheduler's load path relies on.
+   */
+  skipMissed?: boolean;
+}
+
+/**
+ * The next fire instant for a schedule, in epoch ms. `NaN` if the schedule
+ * parses as neither an interval nor a cron expression.
+ *
+ * ⭐ THIS EXISTS BECAUSE THERE WERE THREE OF IT. Measured 2026-09-09 on
+ * `91a1bec0`: `cron-scheduler.computeNextFireAt`, `ipc-server.computeNextFire`
+ * and an inline block in `cli/bus.ts` each computed "next fire" differently, and
+ * the differences were invisible until they disagreed in front of an operator —
+ * the ipc copy clamps a past instant up to `now + interval`, so the dashboard
+ * could NEVER show an overdue cron, while the CLI showed one seven days stale.
+ * Two surfaces, same question, two answers, and no way to tell which was lying
+ * without reading both.
+ *
+ * ⛔ THE CLAMP IS DELIBERATELY NOT CARRIED OVER. It made every schedule look
+ * healthy, which is the failure this whole area keeps producing: an at-rest
+ * state and a failed state that are indistinguishable from outside. A caller
+ * that genuinely wants "the next slot from now" says so with `skipMissed`.
+ */
+export function computeNextFireMs(input: NextFireInput): number {
+  const { schedule, referenceMs, nowMs, skipMissed = false } = input;
+
+  const durationMs = parseDurationMs(schedule);
+  if (!isNaN(durationMs)) {
+    const base = referenceMs + durationMs;
+    if (!skipMissed || base > nowMs) return base;
+    // ⛔ WHOLE INTERVALS FROM THE ORIGINAL SLOT — this is what keeps the PHASE.
+    // Adding `durationMs` to `nowMs` instead would silently re-anchor the cron
+    // to whenever the daemon happened to notice, which is the drift this change
+    // exists to stop. Ceil, then a guard for the exact-boundary case so the
+    // result is always strictly in the future.
+    const missed = Math.ceil((nowMs - base) / durationMs);
+    const next = base + missed * durationMs;
+    return next > nowMs ? next : next + durationMs;
+  }
+
+  const fromCron = nextFireFromCron(schedule, referenceMs);
+  if (isNaN(fromCron)) return NaN;
+  // A cron expression names absolute instants, so its phase cannot drift and
+  // there is nothing to preserve — just skip what is already past.
+  if (!skipMissed || fromCron > nowMs) return fromCron;
+  return nextFireFromCron(schedule, nowMs);
+}

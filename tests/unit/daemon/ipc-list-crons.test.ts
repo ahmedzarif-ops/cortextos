@@ -118,16 +118,45 @@ describe('computeNextFire', () => {
     expect(result).toBe('2026-04-28T13:00:00.000Z');
   });
 
-  it('advances past-due interval to future', async () => {
+  // ⛔ THIS TEST WAS INVERTED ON 2026-09-09, AND THE OLD EXPECTATION IS KEPT
+  // BELOW SO THE CHANGE IS LEGIBLE. It used to read:
+  //
+  //   ~~it('advances past-due interval to future') … expect(result).toBe('…T16:00:00.000Z')~~
+  //   ~~// referenceMs=00:00, next=06:00, but 06:00 < now=10:00, so returns now+6h=16:00~~
+  //
+  // That was a test OF the clamp, and the clamp was the defect. Because a past
+  // result was rewritten to `now + interval`, THE DASHBOARD COULD NEVER DISPLAY
+  // AN OVERDUE CRON — every schedule rendered healthy no matter what the fleet
+  // was doing. `bus list-crons`, which had no clamp, showed the real past value
+  // for the same cron, so the two surfaces answered the same question
+  // differently and the one that always looked fine was the one on screen.
+  //
+  // ⭐ A TEST CAN CONVERT A DEFECT INTO A REQUIREMENT, and it does so with every
+  // appearance of increasing rigour. This one had pinned "next fire is always in
+  // the future" for months. Inverting it is the point of the change, not a
+  // casualty of it — but it is a test being changed to match new code, which is
+  // the move that always deserves an explanation rather than a diff.
+  it('reports a past-due interval as PAST — the display must not flatter the fleet', async () => {
     const { computeNextFire } = await import('../../../src/daemon/ipc-server.js');
 
-    // last fired 10h ago, interval is 6h → next is 4h ago → should advance to now+6h
-    const lastFiredAt = '2026-04-28T00:00:00.000Z'; // 10h before now
+    // Last fired 10h ago on a 6h interval: the slot at 06:00 is 4h overdue.
+    const lastFiredAt = '2026-04-28T00:00:00.000Z';
     const now = new Date('2026-04-28T10:00:00.000Z').getTime();
     const result = computeNextFire('6h', lastFiredAt, now);
 
-    // referenceMs=00:00, next=06:00, but 06:00 < now=10:00, so returns now+6h=16:00
-    expect(result).toBe('2026-04-28T16:00:00.000Z');
+    expect(result).toBe('2026-04-28T06:00:00.000Z');
+    expect(Date.parse(result)).toBeLessThan(now); // says the quiet part: it is overdue
+    expect(result).not.toBe('2026-04-28T16:00:00.000Z'); // the clamped answer, named so a revert is unambiguous
+  });
+
+  it('still reports a not-yet-due interval as FUTURE — the negative control', async () => {
+    // Without this, returning the reference unchanged would satisfy the test
+    // above while breaking every healthy cron on the dashboard.
+    const { computeNextFire } = await import('../../../src/daemon/ipc-server.js');
+
+    const lastFiredAt = '2026-04-28T09:00:00.000Z';
+    const now = new Date('2026-04-28T10:00:00.000Z').getTime();
+    expect(computeNextFire('6h', lastFiredAt, now)).toBe('2026-04-28T15:00:00.000Z');
   });
 
   it('handles 30m interval', async () => {
