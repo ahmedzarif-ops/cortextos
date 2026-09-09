@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, appendFileSync } from 'fs';
+import { mkdtempSync, rmSync, mkdirSync, appendFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { checkStaleTasks, lastTransitionEpoch, lastTransition, readTaskAudit, updateTask, annotateTask } from '../../../src/bus/task';
+import { CLOCK_SKEW_TOLERANCE_SECONDS } from '../../../src/types';
 import { atomicWriteSync } from '../../../src/utils/atomic';
 import type { BusPaths, Task, TaskStatus } from '../../../src/types';
 
@@ -511,7 +512,14 @@ describe('stale in_progress: TRUE IDLE beside the clock', () => {
     audit(paths, 'task_ti_c6', { ts: hoursAgo(0.1), event: 'claim', agent: 'a', from: 'pending', to: 'in_progress' });
 
     const row = checkStaleTasks(paths).idle_ages.find((r) => r.task_id === 'task_ti_c6')!;
-    expect(row.clock_age_seconds).toBe(0);
+    // ⛔ BEHAVIOUR CHANGED HERE, DELIBERATELY, AND THE OLD EXPECTATION IS RECORDED SO THE CHANGE IS
+    // LEGIBLE: this arm used to assert `clock_age_seconds === 0` — the clamp. Three hours ahead is
+    // FAR beyond CLOCK_SKEW_TOLERANCE_SECONDS, so it is no longer treated as skew: it is broken
+    // time, and broken time reads as MAXIMALLY STALE, the same rule an unparseable timestamp gets.
+    // The clamp survives, but only for genuine skew — see C10, which asserts it at 299s.
+    // ⭐ The contract the type declares is unchanged and is what this arm really guards: never
+    // null, never NaN, never negative.
+    expect(row.clock_age_seconds).toBeGreaterThan(7200);
     expect(row.clock_future).toBe(true);
     expect(row.clock_malformed).toBe(false); // a future time PARSES — a different fault
     // the contract, asserted directly and through the serialisation the CLI performs
@@ -530,5 +538,135 @@ describe('stale in_progress: TRUE IDLE beside the clock', () => {
     const row = checkStaleTasks(paths).idle_ages.find((r) => r.task_id === 'task_ti_c6g')!;
     expect(row.clock_future).toBe(false);
     expect(row.clock_age_seconds).toBeGreaterThan(4 * 3600);
+  });
+
+  // ==========================================================================
+  // BROKEN CLOCKS ARE A FACT ABOUT THE TASK, NOT ABOUT THE BUCKET.
+  //
+  // The earlier `clock_future` flag lived on the `in_progress`-only `idle_ages` row — the ONE
+  // bucket that does not need it, because `in_progress` alarms on `max(clock, idle)` and the idle
+  // clock still decides. `blocked` reads `updated_at` alone; `pending` and `human` read
+  // `created_at` alone; all three were cleared by a broken value with nothing to say so.
+  //
+  // Derived per bucket from source, because the original description of this defect was too broad:
+  //   blocked  -> updated_at   pending -> created_at   human -> created_at   overdue -> due_date
+  // ==========================================================================
+
+  const secondsAhead = (sec: number) => iso(new Date(Date.now() + sec * 1000));
+
+  /** C7 — `blocked` reads `updated_at`, and a badly-future value used to clear it silently. */
+  it('C7: blocked with a far-future updated_at is MAXIMALLY STALE and is reported', () => {
+    writeTask(paths, { id: 'task_ti_c7', status: 'blocked', updated_at: secondsAhead(3 * 3600), created_at: hoursAgo(20) });
+
+    const report = checkStaleTasks(paths);
+    expect(report.stale_blocked.map((t) => t.id)).toContain('task_ti_c7');
+    const anomaly = report.clock_anomalies.find((a) => a.task_id === 'task_ti_c7')!;
+    expect(anomaly).toBeDefined();
+    expect(anomaly.status).toBe('blocked');
+    expect(anomaly.updated_at_verdict).toBe('future');
+    expect(anomaly.updated_at_future_by_seconds).toBeGreaterThan(2 * 3600);
+  });
+
+  /** C8 — `pending` reads `created_at`, NOT `updated_at`. The original prose had this wrong. */
+  it('C8: pending with a far-future created_at is MAXIMALLY STALE and is reported', () => {
+    writeTask(paths, { id: 'task_ti_c8', status: 'pending', updated_at: hoursAgo(0.1), created_at: secondsAhead(3 * 3600) });
+
+    const report = checkStaleTasks(paths);
+    expect(report.stale_pending.map((t) => t.id)).toContain('task_ti_c8');
+    const anomaly = report.clock_anomalies.find((a) => a.task_id === 'task_ti_c8')!;
+    expect(anomaly.created_at_verdict).toBe('future');
+    expect(anomaly.updated_at_verdict).toBe('ok');
+  });
+
+  /** C9 — `human` also reads `created_at`. Same repair, different bucket, asserted separately. */
+  it('C9: a human task with a far-future created_at is MAXIMALLY STALE and is reported', () => {
+    writeTask(paths, { id: 'task_ti_c9', status: 'pending', updated_at: hoursAgo(0.1), created_at: secondsAhead(3 * 3600) });
+    const f = join(paths.taskDir, 'task_ti_c9.json');
+    const t = JSON.parse(readFileSync(f, 'utf-8'));
+    t.assigned_to = 'human';
+    atomicWriteSync(f, JSON.stringify(t));
+
+    const report = checkStaleTasks(paths);
+    expect(report.stale_human.map((x) => x.id)).toContain('task_ti_c9');
+    expect(report.clock_anomalies.find((a) => a.task_id === 'task_ti_c9')!.created_at_verdict).toBe('future');
+  });
+
+  /**
+   * THE BOUNDARY, MEASURED ON BOTH SIDES RATHER THAN ASSUMED. A few seconds of NTP or
+   * multi-process skew must NOT read as ~45,000 hours idle — an alarm generator is the same
+   * failure as a false clear, pointing the other way, and it is the one that teaches an operator
+   * to stop reading alarms.
+   */
+  it(`C10: ${CLOCK_SKEW_TOLERANCE_SECONDS - 1}s ahead is SKEW — clamped to 0, flagged, NOT stale`, () => {
+    writeTask(paths, {
+      id: 'task_ti_c10',
+      status: 'blocked',
+      updated_at: secondsAhead(CLOCK_SKEW_TOLERANCE_SECONDS - 1),
+      created_at: hoursAgo(20),
+    });
+
+    const report = checkStaleTasks(paths);
+    expect(report.stale_blocked.map((t) => t.id)).not.toContain('task_ti_c10');
+    const anomaly = report.clock_anomalies.find((a) => a.task_id === 'task_ti_c10')!;
+    expect(anomaly.updated_at_verdict).toBe('skew');
+  });
+
+  it(`C10b: ${CLOCK_SKEW_TOLERANCE_SECONDS + 1}s ahead is BROKEN — maximally stale and it alarms`, () => {
+    writeTask(paths, {
+      id: 'task_ti_c10b',
+      status: 'blocked',
+      updated_at: secondsAhead(CLOCK_SKEW_TOLERANCE_SECONDS + 1),
+      created_at: hoursAgo(20),
+    });
+
+    const report = checkStaleTasks(paths);
+    expect(report.stale_blocked.map((t) => t.id)).toContain('task_ti_c10b');
+    expect(report.clock_anomalies.find((a) => a.task_id === 'task_ti_c10b')!.updated_at_verdict).toBe('future');
+  });
+
+  /**
+   * ⛔ `overdue` IS DELIBERATELY UNTOUCHED. It reads `due_date`, where a value in the future is
+   * exactly what "not overdue yet" MEANS. Asserted so a later change does not sweep it in by
+   * symmetry with the three buckets above — the symmetry is superficial and the semantics differ.
+   */
+  it('C11: a future due_date is NOT overdue and is NOT a clock anomaly', () => {
+    writeTask(paths, { id: 'task_ti_c11', status: 'pending', updated_at: hoursAgo(0.1), created_at: hoursAgo(0.2) });
+    const f = join(paths.taskDir, 'task_ti_c11.json');
+    const t = JSON.parse(readFileSync(f, 'utf-8'));
+    t.due_date = secondsAhead(48 * 3600);
+    atomicWriteSync(f, JSON.stringify(t));
+
+    const report = checkStaleTasks(paths);
+    expect(report.overdue.map((x) => x.id)).not.toContain('task_ti_c11');
+    expect(report.clock_anomalies.find((a) => a.task_id === 'task_ti_c11')).toBeUndefined();
+  });
+
+  /**
+   * MUST-STAY-GREEN. Ordinary timestamps produce NO anomalies at all. Without this, "record an
+   * anomaly for everything" passes C7-C10b, and a diagnostic that fires on every healthy task is
+   * indistinguishable from one that fires on none.
+   */
+  it('C7-green: well-formed past timestamps produce an EMPTY clock_anomalies array', () => {
+    writeTask(paths, { id: 'task_ti_c7g1', status: 'blocked', updated_at: hoursAgo(5), created_at: hoursAgo(20) });
+    writeTask(paths, { id: 'task_ti_c7g2', status: 'pending', updated_at: hoursAgo(1), created_at: hoursAgo(30) });
+    writeTask(paths, { id: 'task_ti_c7g3', status: 'in_progress', updated_at: hoursAgo(1), created_at: hoursAgo(3) });
+
+    const report = checkStaleTasks(paths);
+    expect(report.clock_anomalies).toHaveLength(0);
+    // and the buckets still work — the fix must not have disabled what it guards
+    expect(report.stale_blocked.map((t) => t.id)).toContain('task_ti_c7g1');
+    expect(report.stale_pending.map((t) => t.id)).toContain('task_ti_c7g2');
+  });
+
+  /**
+   * A malformed timestamp lands in the SAME array with its own verdict — the two unusable-time
+   * cases are now reported through one channel instead of one being flagged and one not.
+   */
+  it('C12: a malformed updated_at is reported as an anomaly, not only as a stale row', () => {
+    writeTask(paths, { id: 'task_ti_c12', status: 'blocked', updated_at: 'invalid-date', created_at: hoursAgo(20) });
+
+    const report = checkStaleTasks(paths);
+    expect(report.stale_blocked.map((t) => t.id)).toContain('task_ti_c12');
+    expect(report.clock_anomalies.find((a) => a.task_id === 'task_ti_c12')!.updated_at_verdict).toBe('malformed');
   });
 });

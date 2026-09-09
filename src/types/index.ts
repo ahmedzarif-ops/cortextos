@@ -687,6 +687,58 @@ export interface StaleTaskReport {
    * CLEARED, since a cleared row is the case that produced no output at all.
    */
   idle_ages: TaskIdleAge[];
+  /**
+   * Every non-completed task whose OWN timestamps are unusable, whatever bucket it lands in.
+   *
+   * ⛔ THIS ARRAY EXISTS BECAUSE THE FIRST VERSION OF THE DIAGNOSTIC WAS PUT IN THE WRONG HOME.
+   * `clock_future` was added to `idle_ages`, and `idle_ages` is an `in_progress`-ONLY array — so
+   * the flag sat in the one bucket that does NOT need it (`in_progress` alarms on
+   * `max(clock, idle)`, and the idle clock still decides when the clock is unusable) and was
+   * ABSENT from the three that do: `blocked` reads `updated_at` alone, `pending` and `human` read
+   * `created_at` alone, and a broken value there cleared the row with nothing to say so.
+   * ⭐ A BROKEN CLOCK IS A FACT ABOUT THE TASK, NOT ABOUT THE BUCKET IT HAPPENS TO SORT INTO.
+   *
+   * `overdue` is deliberately NOT covered: it reads `due_date`, and a due date in the future is
+   * exactly what "not overdue yet" means. That is semantics, not a broken clock.
+   */
+  clock_anomalies: TaskClockAnomaly[];
+}
+
+/** How one timestamp read. See TaskClockAnomaly. */
+export type ClockVerdict = 'ok' | 'skew' | 'future' | 'malformed';
+
+/**
+ * How far into the future a timestamp may sit before it stops being clock skew and starts being
+ * broken data.
+ *
+ * ⚠ THE TOLERANCE IS THE WHOLE REASON THIS IS SAFE TO SHIP. Treating "future" as "maximally stale"
+ * with NO tolerance would turn a few seconds of NTP or multi-process skew — which this fleet
+ * produces routinely, since several writers stamp these files — into a task reading as ~45,000
+ * hours idle, and every one of those would alarm. An alarm generator is not an improvement on a
+ * false clear; it is the same failure pointing the other way, and it is the failure that teaches an
+ * operator to stop reading alarms.
+ *
+ * 300s is generous against real skew on one machine and negligible against the thresholds it feeds
+ * (2h in_progress, 4h blocked, 24h pending/human).
+ */
+export const CLOCK_SKEW_TOLERANCE_SECONDS = 300;
+
+/** One task whose timestamps could not be trusted, and what was wrong with each. */
+export interface TaskClockAnomaly {
+  task_id: string;
+  /** The task's status, so a reader can see WHICH bucket the broken clock was feeding. */
+  status: TaskStatus;
+  /** Verdict on `updated_at`. Drives `stale_in_progress` and `stale_blocked`. */
+  updated_at_verdict: ClockVerdict;
+  /** Verdict on `created_at`. Drives `stale_pending` and `stale_human`. */
+  created_at_verdict: ClockVerdict;
+  /**
+   * Seconds each timestamp sits in the FUTURE, or 0. Reported so the SIZE is visible: two seconds
+   * of skew and three hours of a wrong clock are different problems wearing the same verdict when
+   * only the verdict is printed.
+   */
+  updated_at_future_by_seconds: number;
+  created_at_future_by_seconds: number;
 }
 
 /**

@@ -1,7 +1,8 @@
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync, unlinkSync, appendFileSync } from 'fs';
 import { join } from 'path';
 import type { Task, TaskAnnotation, Priority, TaskStatus, BusPaths, StaleTaskReport, ArchiveReport } from '../types/index.js';
-import { isTaskStatus } from '../types/index.js';
+import { isTaskStatus, CLOCK_SKEW_TOLERANCE_SECONDS } from '../types/index.js';
+import type { ClockVerdict } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { randomDigits } from '../utils/random.js';
 import { validatePriority, validateTaskId } from '../utils/validate.js';
@@ -911,6 +912,41 @@ export function lastTransition(
  * helper exists so the choice about malformed time is made ONCE, explicitly, by
  * every caller, instead of being made implicitly by IEEE-754.
  */
+/**
+ * Read one timestamp into a VERDICT and an AGE, so that every consumer makes the same decision
+ * about unusable time instead of each one improvising.
+ *
+ * ⛔ THE FOUR VERDICTS EXIST BECAUSE "BROKEN" IS NOT ONE THING, AND THE TWO HALVES PULL OPPOSITE
+ * WAYS. An unparseable timestamp and a timestamp three hours in the future are both unusable as a
+ * measurement of elapsed time, and both must read as MAXIMALLY STALE — `NaN > threshold` and
+ * `negative > threshold` are each FALSE, so both silently CLEARED the row before this. But a
+ * timestamp two seconds ahead is not broken data, it is clock skew, and treating it as maximally
+ * stale would alarm on a healthy task. `skew` and `future` are therefore separate verdicts with
+ * separate behaviour, divided at CLOCK_SKEW_TOLERANCE_SECONDS.
+ *
+ * ⭐ AND THE AGE IS RETURNED BESIDE THE VERDICT ON PURPOSE: the caller must not be able to take one
+ * without the other. Previously the age was computed in one place and the flag in another, which is
+ * exactly how `clock_future` ended up describing a row whose age had already been clamped somewhere
+ * else.
+ *
+ * @returns `ageSeconds` is NEVER NaN, NEVER null, and NEVER negative. `malformed` and `future` both
+ *          yield `nowEpoch` — the age of a task stamped at the UNIX epoch, i.e. maximally stale.
+ */
+function readClock(iso: string | undefined | null, nowEpoch: number): { verdict: ClockVerdict; ageSeconds: number; futureBySeconds: number } {
+  const epoch = epochSecondsOrNull(iso);
+  if (epoch === null) return { verdict: 'malformed', ageSeconds: nowEpoch, futureBySeconds: 0 };
+  const age = nowEpoch - epoch;
+  if (age >= 0) return { verdict: 'ok', ageSeconds: age, futureBySeconds: 0 };
+  const futureBy = -age;
+  // Within tolerance: ordinary skew. Clamp to 0 (it is not stale) and SAY SO, because 0 reads as
+  // "just written" and a reader must be able to tell a real write from a clamped one.
+  if (futureBy <= CLOCK_SKEW_TOLERANCE_SECONDS) {
+    return { verdict: 'skew', ageSeconds: 0, futureBySeconds: futureBy };
+  }
+  // Beyond tolerance: this is not skew, it is a wrong clock. Same rule as unparseable — fail LOUD.
+  return { verdict: 'future', ageSeconds: nowEpoch, futureBySeconds: futureBy };
+}
+
 function epochSecondsOrNull(iso: string | undefined | null): number | null {
   if (typeof iso !== 'string') return null;
   const ms = new Date(iso).getTime();
@@ -936,6 +972,7 @@ export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
     stale_human: [],
     overdue: [],
     idle_ages: [],
+    clock_anomalies: [],
   };
 
   const tasks = readAllTasks(paths.taskDir);
@@ -962,10 +999,10 @@ export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
     // purpose: `age` also drives `stale_blocked` and `createdAge` drives
     // `stale_pending`/`stale_human`, all of which were silently cleared by the
     // same NaN. It can only ever ADD rows.
-    const updatedEpoch = epochSecondsOrNull(task.updated_at);
-    const createdEpoch = epochSecondsOrNull(task.created_at);
-    const clockMalformed = updatedEpoch === null;
-    const rawAge = updatedEpoch === null ? nowEpoch : nowEpoch - updatedEpoch;
+    const updatedClock = readClock(task.updated_at, nowEpoch);
+    const createdClock = readClock(task.created_at, nowEpoch);
+    const clockMalformed = updatedClock.verdict === 'malformed';
+    const rawAge = updatedClock.ageSeconds;
     // A FUTURE `updated_at` GIVES A NEGATIVE AGE. Clamped at 0 so both clocks obey the
     // same no-negative-age contract the type declares, and FLAGGED, because the clamp
     // points the reassuring way: 0 reads as "just written". For `in_progress` that is
@@ -973,9 +1010,29 @@ export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
     // `blocked`, `pending` and `human` there is no second clock, so a future `updated_at`
     // clears those rows; it already did that at -10800, and the clamp changes the number
     // rather than the outcome. Flagged rather than widened into those buckets here.
-    const clockFuture = rawAge < 0;
-    const age = clockFuture ? 0 : rawAge;
-    const createdAge = createdEpoch === null ? nowEpoch : Math.max(0, nowEpoch - createdEpoch);
+    // Derived from the SAME reading that produced the age, so the flag and the number cannot
+    // disagree — the previous version computed them separately and they could.
+    const clockFuture = updatedClock.verdict === 'skew' || updatedClock.verdict === 'future';
+    const age = rawAge;
+    const createdAge = createdClock.ageSeconds;
+
+    // ⛔ THE DIAGNOSTIC IS PER TASK, NOT PER BUCKET. Recorded for EVERY non-completed task whose own
+    // timestamps are unusable, whichever bucket it sorts into — because a broken clock is a fact
+    // about the task. The first version of this flag lived on the `in_progress`-only `idle_ages`
+    // row, which put it in the one bucket that did not need it (`in_progress` alarms on
+    // `max(clock, idle)`) and left `blocked`, `pending` and `human` with no diagnostic at all.
+    // `overdue` is not covered: it reads `due_date`, where a future value legitimately means
+    // "not overdue yet".
+    if (updatedClock.verdict !== 'ok' || createdClock.verdict !== 'ok') {
+      report.clock_anomalies.push({
+        task_id: task.id,
+        status: task.status,
+        updated_at_verdict: updatedClock.verdict,
+        created_at_verdict: createdClock.verdict,
+        updated_at_future_by_seconds: updatedClock.futureBySeconds,
+        created_at_future_by_seconds: createdClock.futureBySeconds,
+      });
+    }
 
     // Stale in_progress: alarm on MAX(clock, true idle).
     //

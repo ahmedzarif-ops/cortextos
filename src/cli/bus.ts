@@ -26,6 +26,7 @@ import { describeSchedulerClock, schedulerClockNotes } from '../utils/scheduler-
 import { TelegramAPI } from '../telegram/api.js';
 import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
 import type { Priority, Task, TaskStatus, EventCategory, EventSeverity, ApprovalCategory, ApprovalStatus, OrgContext, CronDefinition } from '../types/index.js';
+import { TASK_STATUSES } from '../types/index.js';
 
 /**
  * Resolve the timezone and day-mode window for day/night detection.
@@ -361,7 +362,11 @@ busCommand
   .argument('<id>', 'Task ID')
   .argument('<status>', 'New status (pending, in_progress, completed, blocked, cancelled)')
   .action((id: string, status: string) => {
-    const validStatuses: TaskStatus[] = ['pending', 'in_progress', 'completed', 'blocked', 'cancelled'];
+    // ⛔ NOT A SECOND HAND-WRITTEN LIST. `TASK_STATUSES` is the runtime tuple `TaskStatus` is
+    // DERIVED from, so the set this validator accepts and the set the compiler enforces cannot
+    // drift. This line used to repeat the five literals, which a sixth status would have left
+    // silently short — the validator would have rejected a status the type considered valid.
+    const validStatuses: readonly TaskStatus[] = TASK_STATUSES;
     if (!validStatuses.includes(status as TaskStatus)) {
       console.error(`Invalid status '${status}'. Must be one of: ${validStatuses.join(', ')}`);
       process.exit(1);
