@@ -55,20 +55,100 @@ die() { printf '[not-worse] %s\n' "$*" >&2; exit 1; }
 #   "FAIL  path/to/file.test.ts [ path/to/file.test.ts ]" — the file failed to load at all
 # The second has no test names, so a comparison keyed only on test names would silently ignore a whole
 # file failing to import. Keying on the raw line covers both.
+# ⛔ TWO KINDS OF ROW, BECAUSE THE RUNNER CAN FAIL WITHOUT ANY TEST FAILING.
+#
+# Matching only `FAIL` meant an unhandled rejection extracted ZERO rows while npm exited 1, and
+# the caller read that empty set as "clean". `UNHANDLED` rows close that: the run now produces a
+# row that must be compared like any other.
+#
+# ⚠ WHAT AN `UNHANDLED` ROW'S IDENTITY IS, STATED RATHER THAN IMPLIED: the error headline. Two
+# different rejections carrying the same message compare EQUAL — exactly as two different failures
+# of the same test name already do. That is a property of comparing rendered text, not something
+# this change introduces, but it is now true of a second row kind so it is written down.
 extract_failures() {
-  grep -E '^[[:space:]]*FAIL' "$1" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | sort -u
+  {
+    grep -E '^[[:space:]]*FAIL' "$1" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+    awk '
+      /Unhandled (Errors|Error|Rejection)/ { inblk = 1; next }
+      # ⚠ THE PREFIX IS OPTIONAL. The first version required at least one character before
+      # `Error`, so it matched `TypeError:` and MISSED the plain `Error:` that Vitest actually
+      # prints — the exact line this whole change exists to catch. The cardinality control in
+      # assert_nameable() caught it within minutes: the summary declared 1 error and the
+      # extractor produced 0 rows, so the gate failed CLOSED instead of passing. That is the
+      # control working on its author, which is the only test of a control that counts.
+      inblk && /^[A-Za-z0-9_$]*(Error|Exception):/ { print "UNHANDLED " $0; inblk = 0 }
+    ' "$1" | sed -E 's/[[:space:]]+$//'
+  } | sort -u
 }
 
+# How many errors the runner SAYS it had, read off its own summary line. This is the cardinality
+# control for the extractor above.
+declared_errors() {
+  sed -nE 's/^[[:space:]]*Errors[[:space:]]+([0-9]+)[[:space:]]+error.*/\1/p' "$1" | head -1
+}
+
+# ⛔ THE EXIT STATUS IS EVIDENCE AND IS NEVER DISCARDED.
+#
+# THE COMMENT THAT USED TO SIT HERE IS THE DEFECT, WRITTEN DOWN AS A DESIGN NOTE:
+#   "Returns 0 whether or not tests fail; the CALLER reads the failure set.
+#    A non-zero suite exit is the expected case here, not an error condition."
+# The first sentence is true of ASSERTION failures and false of everything else the runner can do.
+# Vitest exits 1 with every assertion passing when it catches an unhandled rejection — the report
+# says `Errors  1 error` and prints an Unhandled Errors block with NO `FAIL` line — so the caller
+# read an empty failure set and the gate answered "no failures — PASS" without fetching a baseline
+# at all. Measured by guard 2026-09-09 against real Vitest in an isolated fixture: npm exit 1,
+# gate exit 0. That is MORE permissive than the not-worse policy this gate advertises.
+#
+# Structured outcome, both halves, because they answer different questions:
+#   SUITE_RC       — what the runner said about ITSELF
+#   SUITE_SUMMARY  — whether a result can be READ at all
+# A caller that reads one without the other is back where this started.
+SUITE_RC=0
+SUITE_SUMMARY=0
 run_suite() {
-  # $1 = directory, $2 = output file. Returns 0 whether or not tests fail; the CALLER reads the
-  # failure set. A non-zero suite exit is the expected case here, not an error condition.
+  # $1 = directory, $2 = output file.
   ( cd "$1" && npm test ) > "$2" 2>&1
-  # Guard against an output file that contains no recognisable vitest summary at all — that means the
-  # run did not happen (missing deps, crash), and an EMPTY failure set from it would read as "green".
-  if ! grep -qE '^[[:space:]]*(Test Files|Tests)[[:space:]]' "$2"; then
-    return 1
+  SUITE_RC=$?
+  # No recognisable summary means the run did not happen (missing deps, crash) — and an EMPTY
+  # failure set from it would read as "green".
+  if grep -qE '^[[:space:]]*(Test Files|Tests)[[:space:]]' "$2"; then
+    SUITE_SUMMARY=1
+  else
+    SUITE_SUMMARY=0
   fi
-  return 0
+}
+
+# ⛔ FAIL CLOSED ON ANYTHING THIS GATE CANNOT NAME.
+#
+# The contract is "compare the failures HERE against the failures THERE", and it is meaningful
+# only over failures this gate can IDENTIFY. A non-zero runner exit with nothing extractable is
+# not a clean run — it is a run whose failures this parser cannot name, and the only honest answer
+# is to refuse.
+#
+# Four refusals, separate because they mean different things:
+#   no summary                          -> the run did not complete, or its output is unreadable
+#   rc != 0 and zero rows               -> it failed and this parser cannot say why
+#   declared errors but no UNHANDLED row-> the reporter changed shape; the extractor is behind it
+#   rc == 0 but rows extracted          -> status and output disagree
+# The third is a CARDINALITY CONTROL between the extractor and the reporter's own count. Without
+# it, the fix for this defect would be "one more regex", and the next reporter change would put
+# the gate straight back into silent-pass — which is the failure mode, not the bug.
+assert_nameable() {
+  out="$1"; fails="$2"; rc="$3"; where="$4"
+  [ "$SUITE_SUMMARY" -eq 1 ] || die "The suite produced no summary on the $where. FAILING CLOSED: an unreadable result is not an empty one. Output: $out"
+  count=$(wc -l < "$fails" | tr -d ' ')
+  declared=$(declared_errors "$out")
+  unhandled=$(grep -c '^UNHANDLED ' "$fails" 2>/dev/null || true)
+  [ -n "$unhandled" ] || unhandled=0
+  if [ -n "$declared" ] && [ "$declared" -gt 0 ] && [ "$unhandled" -eq 0 ]; then
+    die "The $where reported $declared runner error(s) and this gate extracted none of them. FAILING CLOSED: these are failures I cannot name, and a gate that cannot name them cannot tell a new one from an inherited one. Output: $out"
+  fi
+  if [ "$rc" -ne 0 ] && [ "$count" -eq 0 ]; then
+    die "The suite exited $rc on the $where with a readable summary and no failure this gate can identify. FAILING CLOSED: these are failures I cannot name. Do NOT widen a pattern until this passes — read $out and decide deliberately."
+  fi
+  if [ "$rc" -eq 0 ] && [ "$count" -gt 0 ]; then
+    die "The suite exited 0 on the $where while this gate extracted $count failure row(s). Status and output disagree; FAILING CLOSED rather than believing whichever one is convenient. Output: $out"
+  fi
 }
 
 # --- 1. the branch under test -------------------------------------------------------------------
@@ -77,8 +157,10 @@ npm run build --silent || die "Build failed. Fix the build before pushing — a 
 
 say "running suite on the working tree..."
 HEAD_OUT="$(mktemp)"
-run_suite "$REPO_ROOT" "$HEAD_OUT" || die "The suite produced no summary on the working tree. Refusing to guess. Output: $HEAD_OUT"
+run_suite "$REPO_ROOT" "$HEAD_OUT"
+HEAD_RC=$SUITE_RC
 extract_failures "$HEAD_OUT" > "${HEAD_OUT}.fails"
+assert_nameable "$HEAD_OUT" "${HEAD_OUT}.fails" "$HEAD_RC" "working tree"
 HEAD_COUNT=$(wc -l < "${HEAD_OUT}.fails" | tr -d ' ')
 
 if [ "$HEAD_COUNT" -eq 0 ]; then
@@ -113,11 +195,20 @@ else
 
   BASE_OUT="$BASE_DIR/.not-worse-output"
   say "running suite on the baseline..."
-  if ! run_suite "$BASE_DIR" "$BASE_OUT"; then
+  run_suite "$BASE_DIR" "$BASE_OUT"
+  BASE_RC=$SUITE_RC
+  BASE_SUMMARY=$SUITE_SUMMARY
+  extract_failures "$BASE_OUT" > "$BASE_OUT.fails"
+  # ⛔ SAME REFUSALS ON THE BASELINE, AND THIS SIDE IS THE MORE DANGEROUS OF THE TWO. An
+  # unnameable baseline writes an empty (or short) cache keyed by sha, and every later branch
+  # compares against it: real inherited failures then read as NEW, or — if the branch is clean —
+  # the emptiness is never noticed at all. The cache is only written AFTER the refusals pass.
+  SUITE_SUMMARY=$BASE_SUMMARY
+  ( assert_nameable "$BASE_OUT" "$BASE_OUT.fails" "$BASE_RC" "baseline" ) || {
     git worktree remove --force "$BASE_DIR" 2>/dev/null
-    die "The suite produced no summary on the baseline. FAILING CLOSED rather than treating an empty set as green."
-  fi
-  extract_failures "$BASE_OUT" > "$CACHED_FAILS"
+    exit 1
+  }
+  mv "$BASE_OUT.fails" "$CACHED_FAILS"
 fi
 
 BASE_COUNT=$(wc -l < "$CACHED_FAILS" | tr -d ' ')
