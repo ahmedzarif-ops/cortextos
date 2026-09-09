@@ -6,15 +6,30 @@
 git clone https://github.com/grandamenium/cortextos.git
 cd cortextos
 npm install
-npm run build
+npm install --prefix dashboard   # NOT optional — see below
+npm run build                    # NOT optional — see below
 npm test
 ```
+
+**Both of those lines used to be missing or misread as optional, and each one costs you a
+QUIETER suite rather than a failing one.**
+
+- **Without `dashboard/`'s install**, `next/server` is unresolvable: one hard failure and
+  **47 dashboard-adjacent tests silently self-skip** (measured: 2649 tests against 2800).
+- **Without `npm run build`**, `dist/cli.js` does not exist and the two CLI integration
+  suites self-skip — **7 tests**, and the reported total does not move.
+
+⭐ **A missing prerequisite does not announce itself here.** It removes tests and leaves a
+large, confident number behind, so a run over a subset reads exactly like a run over the
+whole. `npm test` fails loudly if either prerequisite is absent (see
+`tests/unit/prerequisites.test.ts`) — that check exists because the honest-looking green
+was the failure mode, not the missing line.
 
 ## Before Submitting Changes
 
 1. `npm run typecheck:root-and-dashboard` — TypeScript must compile cleanly in **both** those trees
-2. `npm run build` — the CLI bundle must build
-3. `npm test` — all tests must pass
+2. `npm run build` — the CLI bundle must build, **and `npm test` needs `dist/` to exist**
+3. `npm test` — all tests must pass, with `dashboard/` deps installed
 4. Match existing patterns in `src/` for new features
 5. Add unit tests in `tests/` for any new code
 
