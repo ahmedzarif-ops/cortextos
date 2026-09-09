@@ -142,7 +142,7 @@ Agent secrets: `orgs/{org}/agents/{agent}/.env`
 ### Reminders
 | Command | What it does |
 |---|---|
-| `create-reminder "<fire_at>" "<prompt>"` | Persistent reminder (survives hard-restart) |
+| `create-reminder "<fire_at>" "<prompt>"` | ⛔ **NOT A TIMER — it does not fire.** Writes a persistent record that is surfaced ONLY in the NEXT BOOT PROMPT. `getOverdueReminders` has ONE consumer: `agent-process.ts buildReminderBlock()`, which injects overdue items at restart. **A reminder created in a running session is never dispatched** — it sits `[OVERDUE]` and silent until the seat restarts. Measured 2026-09-08: two reminders went 44 min overdue, unfired. **Timed obligations ride on a RECURRING daemon cron, or on a dated hold read by one. There is no one-shot cron either** — `fire_at` exists on `CronDefinition` but `cron-scheduler.ts` never reads it (`cron-migration.ts` TODO: the field landed, the behaviour did not). |
 | `list-reminders [--all]` | List pending reminders |
 | `ack-reminder <id>` | Acknowledge a fired reminder |
 | `prune-reminders [--days N]` | Clean up old acked reminders |
