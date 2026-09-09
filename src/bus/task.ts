@@ -828,7 +828,23 @@ export function lastTransition(
   task: Task,
   nowEpoch: number = Math.floor(Date.now() / 1000),
 ): TransitionReadout {
-  const fallback = epochSecondsOrNull(task.created_at) ?? 0;
+  // ⛔ THE FALLBACK GOES THROUGH `readClock` TOO, AND LEAVING IT OUT WAS THE DEFECT.
+  // `created_at` is an ELAPSED-TIME INPUT here exactly as it is in `checkStaleTasks`, so it gets
+  // the same policy: beyond-tolerance future or unparseable is UNUSABLE time and must produce the
+  // MAXIMALLY STALE fallback, not a raw epoch that the caller then clamps to 0 and reads as fresh.
+  //
+  // ⭐ THE PREVIOUS VERSION APPLIED THE FAIL-LOUD RULE AT THE SITE IT WAS WRITTEN FOR AND MISSED
+  // THE ONE PATH THAT REACHES THE SAME FIELD THROUGH A DIFFERENT DOOR: an `in_progress` task with
+  // NO valid audit transition falls back to `created_at`, and a future value there produced a
+  // negative idle that was clamped to 0 — so `max(clock, idle)` never alarmed while
+  // `clock_anomalies` correctly reported the broken timestamp. The diagnostic was right and the
+  // decision was wrong. AN INCOMPLETE POLICY MIGRATION LOOKS EXACTLY LIKE A COMPLETE ONE FROM THE
+  // SITE YOU EDITED.
+  //
+  // The arithmetic inverts `readClock`'s age back into an epoch, so all four verdicts fall out of
+  // the one helper with no second rule: `ok` -> the real epoch; `malformed`/`future` -> epoch 0,
+  // i.e. maximally stale; `skew` -> `nowEpoch`, i.e. idle 0, which is what tolerated skew means.
+  const fallback = nowEpoch - readClock(task.created_at, nowEpoch).ageSeconds;
   const audit = readTaskAuditDetailed(paths, task.id);
 
   let newest = 0;
@@ -1003,13 +1019,14 @@ export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
     const createdClock = readClock(task.created_at, nowEpoch);
     const clockMalformed = updatedClock.verdict === 'malformed';
     const rawAge = updatedClock.ageSeconds;
-    // A FUTURE `updated_at` GIVES A NEGATIVE AGE. Clamped at 0 so both clocks obey the
-    // same no-negative-age contract the type declares, and FLAGGED, because the clamp
-    // points the reassuring way: 0 reads as "just written". For `in_progress` that is
-    // covered — the idle clock is the other half of `max()` and still decides. For
-    // `blocked`, `pending` and `human` there is no second clock, so a future `updated_at`
-    // clears those rows; it already did that at -10800, and the clamp changes the number
-    // rather than the outcome. Flagged rather than widened into those buckets here.
+    // ⛔ THIS PROSE DESCRIBED A BLANKET CLAMP AND IS NOW SUPERSEDED — corrected rather than left
+    // to rot, because a comment that describes the previous policy is worse than none: it is read
+    // as documentation of the current one.
+    // WHAT ACTUALLY HAPPENS NOW, from `readClock`: a future `updated_at` WITHIN
+    // CLOCK_SKEW_TOLERANCE_SECONDS is `skew` — clamped to 0 and flagged, because tolerated skew is
+    // not staleness. BEYOND the tolerance it is `future` — MAXIMALLY STALE and flagged, the same
+    // rule an unparseable timestamp gets, so it ALARMS instead of clearing. The clamp survives
+    // only for skew; the blanket version this comment used to describe is gone.
     // Derived from the SAME reading that produced the age, so the flag and the number cannot
     // disagree — the previous version computed them separately and they could.
     const clockFuture = updatedClock.verdict === 'skew' || updatedClock.verdict === 'future';

@@ -360,7 +360,11 @@ busCommand
 busCommand
   .command('update-task')
   .argument('<id>', 'Task ID')
-  .argument('<status>', 'New status (pending, in_progress, completed, blocked, cancelled)')
+  // The HELP TEXT is derived from the same tuple as the validator, so the two cannot describe
+  // different sets. It is presentation rather than acceptance, but a help string that lists a
+  // status the validator rejects (or omits one it accepts) is a documentation defect with the
+  // same cause as the validator copy: a second hand-written list.
+  .argument('<status>', `New status (${TASK_STATUSES.join(', ')})`)
   .action((id: string, status: string) => {
     // ⛔ NOT A SECOND HAND-WRITTEN LIST. `TASK_STATUSES` is the runtime tuple `TaskStatus` is
     // DERIVED from, so the set this validator accepts and the set the compiler enforces cannot

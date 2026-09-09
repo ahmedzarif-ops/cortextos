@@ -372,8 +372,15 @@ describe('stale in_progress: TRUE IDLE beside the clock', () => {
     writeTask(paths, { id: 'task_ti_c4b', status: 'in_progress', updated_at: hoursAgo(0.1), created_at: hoursAgo(-3) });
 
     const row = checkStaleTasks(paths).idle_ages.find((r) => r.task_id === 'task_ti_c4b')!;
-    expect(row.idle_clamped).toBe(true);
-    expect(row.true_idle_seconds).toBe(0);
+    // ⛔ BEHAVIOUR CHANGED, DELIBERATELY, AND THE OLD EXPECTATION IS RECORDED SO THE CHANGE IS
+    // LEGIBLE: this arm used to assert `idle_clamped === true` and `true_idle_seconds === 0` — the
+    // blanket clamp. A `created_at` three hours ahead is FAR beyond CLOCK_SKEW_TOLERANCE_SECONDS,
+    // so the fallback now reads MAXIMALLY STALE and the row ALARMS, which is the repair guard's
+    // blocking control asked for. The clamp survives for TOLERATED SKEW, asserted immediately
+    // below — that is where `idle_clamped` still fires.
+    expect(row.idle_clamped).toBe(false);
+    expect(row.true_idle_seconds).toBeGreaterThan(7200);
+    expect(row.true_idle_seconds).toBeGreaterThanOrEqual(0);
   });
 
   /**
@@ -668,5 +675,65 @@ describe('stale in_progress: TRUE IDLE beside the clock', () => {
     const report = checkStaleTasks(paths);
     expect(report.stale_blocked.map((t) => t.id)).toContain('task_ti_c12');
     expect(report.clock_anomalies.find((a) => a.task_id === 'task_ti_c12')!.updated_at_verdict).toBe('malformed');
+  });
+
+  /**
+   * C13 — GUARD'S BLOCKING CONTROL, reproduced verbatim as the arm that was missing.
+   *
+   * INPUT:    `in_progress`, `updated_at` = 10 minutes ago, NO valid audit transition,
+   *           `created_at` 301s (and again 10800s) in the FUTURE.
+   * OBSERVED: the row stayed CLEAR. `clock_anomalies` correctly said
+   *           `created_at_verdict = future`, but `lastTransition` returned the RAW `created_at`
+   *           as its fallback, `checkStaleTasks` turned that into a negative idle and clamped it
+   *           to 0, so `max(600, 0)` never crossed the threshold.
+   * EXPECTED: the fallback is MAXIMALLY STALE and the row ALARMS.
+   *
+   * ⭐ THE DIAGNOSTIC WAS RIGHT AND THE DECISION WAS WRONG — which is the worst combination
+   * available, because the report says the timestamp is broken while the alarm says the task is
+   * fine. AN INCOMPLETE POLICY MIGRATION LOOKS EXACTLY LIKE A COMPLETE ONE FROM THE SITE YOU
+   * EDITED: the direct `created_at` read already failed loud; the FALLBACK reached the same field
+   * through a different door.
+   */
+  for (const ahead of [CLOCK_SKEW_TOLERANCE_SECONDS + 1, 10800]) {
+    it(`C13: in_progress with no transition and created_at ${ahead}s ahead ALARMS`, () => {
+      const id = `task_ti_c13_${ahead}`;
+      writeTask(paths, { id, status: 'in_progress', updated_at: hoursAgo(600 / 3600), created_at: secondsAhead(ahead) });
+
+      const report = checkStaleTasks(paths);
+      expect(report.stale_in_progress.map((t) => t.id)).toContain(id);
+      const row = report.idle_ages.find((r) => r.task_id === id)!;
+      // maximally stale, not clamped-to-fresh
+      expect(row.true_idle_seconds).toBeGreaterThan(7200);
+      expect(row.idle_clamped).toBe(false);
+      // and the anomaly still names WHY
+      expect(report.clock_anomalies.find((a) => a.task_id === id)!.created_at_verdict).toBe('future');
+    });
+  }
+
+  /**
+   * C13 MUST-STAY-GREEN, both halves. Tolerated skew on `created_at` must still read as fresh
+   * through the fallback — otherwise "make the fallback fail loud" becomes "alarm on every task
+   * whose clock is a second fast". And a genuine past transition must still WIN over the
+   * fallback, or the repair would have quietly disabled the feature it sits inside.
+   */
+  it(`C13-green: created_at ${CLOCK_SKEW_TOLERANCE_SECONDS - 1}s ahead is tolerated skew and does NOT alarm`, () => {
+    writeTask(paths, {
+      id: 'task_ti_c13g',
+      status: 'in_progress',
+      updated_at: hoursAgo(0.1),
+      created_at: secondsAhead(CLOCK_SKEW_TOLERANCE_SECONDS - 1),
+    });
+
+    const report = checkStaleTasks(paths);
+    expect(report.stale_in_progress.map((t) => t.id)).not.toContain('task_ti_c13g');
+    expect(report.idle_ages.find((r) => r.task_id === 'task_ti_c13g')!.true_idle_seconds).toBe(0);
+  });
+
+  it('C13-green2: a real past transition still WINS over the created_at fallback', () => {
+    writeTask(paths, { id: 'task_ti_c13g2', status: 'in_progress', updated_at: hoursAgo(0.1), created_at: secondsAhead(10800) });
+    audit(paths, 'task_ti_c13g2', { ts: hoursAgo(0.05), event: 'claim', agent: 'a', from: 'pending', to: 'in_progress' });
+
+    const report = checkStaleTasks(paths);
+    expect(report.stale_in_progress.map((t) => t.id)).not.toContain('task_ti_c13g2');
   });
 });
