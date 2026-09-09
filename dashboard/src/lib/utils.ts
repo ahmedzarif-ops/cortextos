@@ -19,9 +19,14 @@ export function cn(...inputs: ClassValue[]) {
  * HTML comment, or an obvious placeholder falls back to the agent's slug.
  *
  * NOTE the ordering — test the ORIGINAL string for a comment BEFORE any
- * splitting or trimming. Splitting on hyphens first tears "<!--" apart at its
- * own characters and the placeholder stops being detectable. (Learned the hard
- * way in the Agent City builder, same bug class, same night.)
+ * splitting or trimming. This IS load-bearing, but not for the reason this
+ * comment used to give. It claimed that splitting on hyphens first tears
+ * "<!--" apart so the placeholder "stops being detectable"; that was MEASURED
+ * FALSE — the `<!` prefix guard below still catches the torn marker. What a
+ * split-first version actually breaks is four other cases: embedded, multiple
+ * and multiline comments, and legitimate hyphenated text ("Growth - long-term
+ * systems"). Both mutants are pinned in tests/unit/dashboard/display-field.test.ts,
+ * so the properties are asserted rather than asserted-about.
  */
 export function displayField(raw: string | null | undefined, fallback: string): string {
   if (!raw) return fallback;
