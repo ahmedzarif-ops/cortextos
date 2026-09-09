@@ -37,9 +37,6 @@ export class AgentPTY {
   // first-run observability fix: set at the auto-accept backstop when the PTY is
   // still parked on a first-run prompt and never bootstrapped (a wedge).
   private _awaitingInteractiveConfirmation = false;
-  // LATCH: set once the session has been OBSERVED bootstrapped, and never unset.
-  // The observation is momentary; the fact is permanent. See the getter below.
-  private _everBootstrapped = false;
   private outputBuffer: OutputBuffer;
   protected env: CtxEnv;
   protected config: AgentConfig;
@@ -211,7 +208,7 @@ export class AgentPTY {
       if (!this.pty) { clearInterval(promptPoll); return; }
       // first-run observability fix: stop BEFORE evaluating any prompt branch — once the
       // real session is up, never write a stray keystroke (Down/CR/Enter) into it.
-      if (this.outputBuffer.isBootstrapped()) { this._everBootstrapped = true; clearInterval(promptPoll); return; }
+      if (this.outputBuffer.isBootstrapped()) { clearInterval(promptPoll); return; }
       const recent = this.outputBuffer.getRecent().replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
       const kind = this.detectFirstRunPrompt(recent);
       const showingBypass = kind === 'bypass';
@@ -243,7 +240,6 @@ export class AgentPTY {
     // still auto-accepts, and at the backstop surface a wedge instead of a false 'running'.
     setTimeout(() => {
       clearInterval(promptPoll);
-      if (this.pty && this.outputBuffer.isBootstrapped()) this._everBootstrapped = true;
       if (this.pty && !this.outputBuffer.isBootstrapped()) {
         const recent = this.outputBuffer.getRecent().replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
         if (this.detectFirstRunPrompt(recent) !== null) {
@@ -440,14 +436,22 @@ export class AgentPTY {
   // "awaiting interactive confirmation (first-run prompt not accepted)".
   //
   // ⭐ A MOMENTARY OBSERVATION CANNOT CARRY A PERMANENT FACT. "Ever bootstrapped" is
-  // monotonic; a scrolling buffer is not. So the observation is LATCHED at the two places
-  // that already make it, and the latch — never the live re-read — clears the flag.
+  // monotonic; a scrolling buffer is not.
+  //
+  // ⛔ AND LATCHING AT THE OBSERVATION SITES WAS STILL NOT ENOUGH — the first version of
+  // this fix latched at the prompt poll, the backstop and this getter, and moved the
+  // failure later instead of removing it. Reproduced on the real ring: bootstrap arrives
+  // LATE, after the backstop has already raised the flag; ~1050 further chunks arrive
+  // before anything calls this getter; by the time it looks, the pattern has been evicted
+  // and it latches nothing. A healthy seat stays 'awaiting' forever, exactly as before.
+  //
+  // ⭐ OBSERVATION SITES ARE SAMPLED; INGRESS IS CONTINUOUS. A fact that must be captured
+  // cannot be captured by a sampler, because between any two samples the evidence expires.
+  // So the latch now lives in OutputBuffer and is set on push — where the bytes arrive —
+  // and this getter only READS it. There is exactly one latch, owned by the object that
+  // sees every chunk.
   isAwaitingInteractiveConfirmation(): boolean {
-    if (this._everBootstrapped) return false;
-    if (this.outputBuffer.isBootstrapped()) {
-      this._everBootstrapped = true;
-      return false;
-    }
+    if (this.outputBuffer.hasEverBootstrapped()) return false;
     return this._awaitingInteractiveConfirmation;
   }
 

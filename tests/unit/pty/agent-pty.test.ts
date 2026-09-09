@@ -251,3 +251,97 @@ describe('AgentPTY awaiting-confirmation must not re-assert after the buffer scr
     expect(pty.isAwaitingInteractiveConfirmation()).toBe(true);
   });
 });
+
+describe('AgentPTY bootstrap latch lives at OUTPUT INGRESS, not at an observation site', () => {
+  beforeEach(() => { vi.useFakeTimers(); mockPty.write.mockClear(); mockPty.onData.mockClear(); });
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+
+  // ⛔ THE FIRST FIX MOVED THIS DEFECT; IT DID NOT REMOVE IT. That version latched at the
+  // three places that ALREADY looked at the buffer — the prompt poll, the 45s backstop, and
+  // the status getter. All three are OBSERVATION SITES, and an observation site only ever
+  // latches what it happens to be looking at.
+  //
+  // ⭐ OBSERVATION SITES ARE SAMPLED; INGRESS IS CONTINUOUS. A fact that must be captured
+  // cannot be captured by a sampler, because between any two samples the evidence expires.
+  //
+  // ⭐ AND THE FIRST ROUND OF TESTS HID IT: they call the getter BETWEEN the bootstrap and
+  // the eviction. A TEST THAT SAMPLES AT THE CONVENIENT MOMENT CANNOT SEE A DEFECT ABOUT
+  // SAMPLING. These tests deliver through the REGISTERED onData callback — the real path
+  // bytes take — and deliberately do not call the getter until after the eviction.
+
+  /** Deliver output the way the live process does: through the callback AgentPTY registered. */
+  function deliver(data: string): void {
+    const cb = mockPty.onData.mock.calls[0][0] as (d: string) => void;
+    cb(data);
+  }
+
+  it('CONTROL: output delivered through the registered onData callback reaches the ring', async () => {
+    // Without this, every "0 occurrences" assertion below is satisfiable by a harness that
+    // delivers nothing at all. Proves the delivery path works before anything relies on it.
+    const pty = newPty({});
+    await pty.spawn('fresh', 'P');
+    deliver('a distinctive marker line');
+    expect(pty.getOutputBuffer().getRecent()).toContain('a distinctive marker line');
+  });
+
+  it('⛔ THE FINDING: late bootstrap survives eviction even when NOTHING observes it in between', async () => {
+    const pty = newPty({});
+    await pty.spawn('fresh', 'P');
+    const buf = pty.getOutputBuffer();
+
+    deliver('2. Yes, I accept - Bypass Permissions mode');
+    await vi.advanceTimersByTimeAsync(46000);
+    expect(pty.isAwaitingInteractiveConfirmation()).toBe(true);
+
+    // Bootstrap arrives LATE — after the backstop has already raised the flag.
+    deliver('accept edits · permissions');
+
+    // ⛔ THE WHOLE POINT: NOTHING LOOKS HERE. No getter call, no poll — the poll has already
+    // been cleared by the backstop. Under a getter-site latch this is where the fact is lost.
+    const maxChunks = (buf as any).maxChunks ?? 1000;
+    for (let i = 0; i < maxChunks + 50; i++) deliver(`ordinary agent output line ${i}\n`);
+
+    // PRECONDITION CONTROL — the pattern really has left the window, so this test cannot
+    // pass by no longer exercising the defect.
+    expect(buf.searchSync('permissions')).toBe(false);
+    expect(buf.isBootstrapped()).toBe(false);
+
+    // THE ASSERTION. True against a latch set at any observation site.
+    expect(pty.isAwaitingInteractiveConfirmation()).toBe(false);
+  });
+
+  it('OVER-CORRECTION CONTROL: a seat that never bootstrapped still reports awaiting, via the same path', async () => {
+    // Same delivery path and same volume as the test above, so the two differ ONLY in
+    // whether the bootstrap pattern was ever delivered. The latch must not degrade into
+    // "healthy after enough output".
+    const pty = newPty({});
+    await pty.spawn('fresh', 'P');
+    const buf = pty.getOutputBuffer();
+
+    deliver('2. Yes, I accept - Bypass Permissions mode');
+    await vi.advanceTimersByTimeAsync(46000);
+    expect(pty.isAwaitingInteractiveConfirmation()).toBe(true);
+
+    const maxChunks = (buf as any).maxChunks ?? 1000;
+    for (let i = 0; i < maxChunks + 50; i++) deliver(`still wedged, no status bar ${i}\n`);
+
+    expect(pty.isAwaitingInteractiveConfirmation()).toBe(true);
+  });
+
+  it('the latch is monotonic: clearing the ring discards the EVIDENCE, not the EVENT', async () => {
+    // clear() empties the buffer. If it reset the latch, the whole defect would come back
+    // through a second door — a live session would report as never-started.
+    const pty = newPty({});
+    await pty.spawn('fresh', 'P');
+    const buf = pty.getOutputBuffer();
+
+    deliver('2. Yes, I accept - Bypass Permissions mode');
+    await vi.advanceTimersByTimeAsync(46000);
+    deliver('accept edits · permissions');
+
+    buf.clear();
+    expect(buf.isBootstrapped()).toBe(false);        // evidence gone
+    expect(buf.hasEverBootstrapped()).toBe(true);    // event remembered
+    expect(pty.isAwaitingInteractiveConfirmation()).toBe(false);
+  });
+});
