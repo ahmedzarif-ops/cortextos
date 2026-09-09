@@ -81,8 +81,20 @@ extract_failures() {
   } | sort -u
 }
 
-# How many errors the runner SAYS it had, read off its own summary line. This is the cardinality
-# control for the extractor above.
+# ⛔ OCCURRENCES, COUNTED BEFORE DEDUPLICATION — the two numbers being reconciled must count the
+# same kind of thing. `extract_failures` ends in `sort -u`, so two identical error messages collapse
+# to ONE row while the reporter counts TWO errors. Reconciling a reporter's OCCURRENCE count against
+# deduplicated IDENTITIES would refuse a perfectly ordinary duplicate — and, worse, would tempt the
+# next person to relax the check. Count occurrences here; deduplicate only for the comparison set.
+unhandled_occurrences() {
+  awk '
+    /Unhandled (Errors|Error|Rejection)/ { inblk = 1; next }
+    inblk && /^[A-Za-z0-9_$]*(Error|Exception):/ { n++; inblk = 0 }
+    END { print n + 0 }
+  ' "$1"
+}
+
+# How many errors the runner SAYS it had, read off its own summary line.
 declared_errors() {
   sed -nE 's/^[[:space:]]*Errors[[:space:]]+([0-9]+)[[:space:]]+error.*/\1/p' "$1" | head -1
 }
@@ -99,10 +111,16 @@ declared_errors() {
 # at all. Measured by guard 2026-09-09 against real Vitest in an isolated fixture: npm exit 1,
 # gate exit 0. That is MORE permissive than the not-worse policy this gate advertises.
 #
-# Structured outcome, both halves, because they answer different questions:
+# Two status variables, because they answer different questions:
 #   SUITE_RC       — what the runner said about ITSELF
 #   SUITE_SUMMARY  — whether a result can be READ at all
 # A caller that reads one without the other is back where this started.
+#
+# ⚠ THIS IS NOT A STRUCTURED REPORTER CONTRACT, AND CALLING IT ONE WOULD BE THE SAME MISTAKE ONE
+# LEVEL UP (guard's note, and it is fair). This is still a PARSER over rendered human-readable
+# output, and its declared and extracted outcomes can disagree — which is exactly why the
+# reconciliation below refuses rather than reports. A real contract would mean consuming the
+# runner's machine-readable reporter; that is a larger change than this fix and is not claimed.
 SUITE_RC=0
 SUITE_SUMMARY=0
 run_suite() {
@@ -138,10 +156,16 @@ assert_nameable() {
   [ "$SUITE_SUMMARY" -eq 1 ] || die "The suite produced no summary on the $where. FAILING CLOSED: an unreadable result is not an empty one. Output: $out"
   count=$(wc -l < "$fails" | tr -d ' ')
   declared=$(declared_errors "$out")
-  unhandled=$(grep -c '^UNHANDLED ' "$fails" 2>/dev/null || true)
-  [ -n "$unhandled" ] || unhandled=0
-  if [ -n "$declared" ] && [ "$declared" -gt 0 ] && [ "$unhandled" -eq 0 ]; then
-    die "The $where reported $declared runner error(s) and this gate extracted none of them. FAILING CLOSED: these are failures I cannot name, and a gate that cannot name them cannot tell a new one from an inherited one. Output: $out"
+  [ -n "$declared" ] || declared=0
+  named=$(unhandled_occurrences "$out")
+  # ⛔ EQUALITY, NOT EXISTENCE. This was `declared > 0 && named == 0` — an EXISTENCE check wearing a
+  # cardinality check's name, and guard broke it in one move: a baseline with one nameable error and
+  # a branch adding one UNNAMEABLE one gives declared 2 / named 1 / npm 1, the extractor emits the
+  # inherited row only, the comparison finds nothing new, and the gate PASSES. A brand-new runner
+  # failure admitted as "not worse". PARTIAL CAPTURE IS THE DANGEROUS CASE, NOT ZERO CAPTURE: zero
+  # is loud, partial looks exactly like a clean read of a smaller problem.
+  if [ "$declared" -ne "$named" ]; then
+    die "The $where reported $declared runner error(s) and this gate could name $named of them. FAILING CLOSED: the difference is failures I cannot name. Do NOT widen a pattern until the counts agree — read $out and decide deliberately."
   fi
   if [ "$rc" -ne 0 ] && [ "$count" -eq 0 ]; then
     die "The suite exited $rc on the $where with a readable summary and no failure this gate can identify. FAILING CLOSED: these are failures I cannot name. Do NOT widen a pattern until this passes — read $out and decide deliberately."

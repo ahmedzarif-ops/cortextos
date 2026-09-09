@@ -35,6 +35,15 @@ const FIXTURES = {
   unhandled:
     "import { it, expect } from 'vitest'; it('green assertion with runner failure',async()=>{setTimeout(()=>{Promise.reject(new Error('GUARD_UNHANDLED_CONTROL'))},0);await new Promise(r=>setTimeout(r,30));expect(true).toBe(true)});\n",
   assertion: "import { it, expect } from 'vitest'; it('ordinary red control',()=>expect(false).toBe(true));\n",
+  // Guard's second-round fixtures, copied verbatim from its report directory.
+  // KNOWN: one nameable unhandled error — the inherited case, which must still be accepted.
+  known:
+    "import { it, expect } from 'vitest'; it('passed assertion',async()=>{setTimeout(()=>{Promise.reject(new Error('GUARD_KNOWN_BASELINE'))},0);await new Promise(r=>setTimeout(r,30));expect(true).toBe(true)});\n",
+  // MIXED: the same known error PLUS a rejection of a bare object, which Vitest renders as a
+  // Serialized Error with no `Error:` headline. Reporter says `Errors  2 errors`; the extractor can
+  // name ONE. That gap is the whole defect.
+  mixed:
+    "import { it, expect } from 'vitest'; it('passed assertion',async()=>{setTimeout(()=>{Promise.reject(new Error('GUARD_KNOWN_BASELINE'));Promise.reject({code:'GUARD_NEW_UNNAMEABLE'})},0);await new Promise(r=>setTimeout(r,30));expect(true).toBe(true)});\n",
 } as const;
 
 // Allow-listed environment, and NO CTX_*/GIT_* — the fixture is a separate git repo and must not
@@ -130,6 +139,37 @@ describe('not-worse gate: a runner failure is never a green push', () => {
     }
   }, 60_000);
 
+  // ⛔ THE SECOND FAIL, AND IT IS THE MORE INSTRUCTIVE ONE: PARTIAL CAPTURE.
+  //
+  // The first fix's "cardinality control" rejected only `declared > 0 && named == 0` — an EXISTENCE
+  // check wearing a cardinality check's name. Guard broke it in one move: a baseline carrying one
+  // nameable error, a branch adding one UNNAMEABLE one. declared 2 / named 1 / npm 1. The extractor
+  // emits the inherited row only, the comparison finds nothing new, and the gate PASSES a
+  // brand-new runner failure as "not worse".
+  //
+  // ⭐ ZERO CAPTURE IS LOUD. PARTIAL CAPTURE LOOKS EXACTLY LIKE A CLEAN READ OF A SMALLER PROBLEM.
+  it('C9 KNOWN-ERROR COMPANION: one nameable unhandled error is still named, counts agree', () => {
+    const r = run('known');
+    expect(r.npmStatus, 'the known fixture did not exit non-zero — the premise is gone').not.toBe(0);
+    // It is refused here only because this fixture has no remote to compare against; what this arm
+    // pins is that the counts RECONCILE, so the refusal is about the baseline and not about naming.
+    expect(r.out).toContain('working tree has 1 failing entr');
+    expect(r.out).not.toContain('could name');
+  }, 60_000);
+
+  it('C10 PARTIAL CAPTURE: declared 2, nameable 1 — must refuse with both counts', () => {
+    const r = run('mixed');
+    expect(r.npmStatus, 'the mixed fixture did not exit non-zero — the premise is gone').not.toBe(0);
+    expect(
+      r.gateStatus,
+      'a run whose runner errors were only PARTIALLY extracted was accepted — the new unnameable ' +
+        'failure would have been admitted as "not worse"',
+    ).not.toBe(0);
+    // The sentence must carry BOTH numbers, or the reader cannot tell partial from total.
+    expect(r.out).toContain('reported 2 runner error(s) and this gate could name 1 of them');
+    expect(r.out).not.toContain('no failures on the working tree');
+  }, 60_000);
+
   it('C3 ORDINARY FAILURE: still recognised and still refused', () => {
     const r = run('assertion');
     expect(r.npmStatus).not.toBe(0);
@@ -166,7 +206,7 @@ describe('not-worse gate: the refusal set', () => {
   // defeats the zero-rows refusal), a non-zero exit (so the rc==0 refusal cannot fire), and a
   // summary DECLARING an error the extractor produced no UNHANDLED row for. That combination is
   // exactly "the reporter moved and the parser is behind it", and nothing else catches it.
-  it('C4 CARDINALITY CONTROL: declared errors with no extracted UNHANDLED row, isolated', () => {
+  it('C4 RECONCILIATION, TOTAL-MISS ARM: declared 1, nameable 0, isolated', () => {
     const out = join(fixture, 'c4.out');
     const r = callFunctions(
       `SUITE_SUMMARY=1; extract_failures "${out}" > "${out}.fails"; assert_nameable "${out}" "${out}.fails" 1 "working tree"`,
@@ -187,7 +227,9 @@ describe('not-worse gate: the refusal set', () => {
     expect(r.status, 'a declared runner error with no extracted row was accepted').not.toBe(0);
     expect(text).toContain('failures I cannot name');
     // The message must name the CARDINALITY, so the reader knows which refusal fired.
-    expect(text).toContain('reported 1 runner error(s) and this gate extracted none of them');
+    // The message carries BOTH counts now, so total capture failure and partial capture failure
+    // are distinguishable in the output rather than only in the code.
+    expect(text).toContain('reported 1 runner error(s) and this gate could name 0 of them');
   });
 
   it('C5 non-zero exit with a readable summary and zero rows is "failures I cannot name"', () => {
@@ -199,6 +241,40 @@ describe('not-worse gate: the refusal set', () => {
     );
     expect(r.status).not.toBe(0);
     expect((r.stdout ?? '') + (r.stderr ?? '')).toContain('failures I cannot name');
+  });
+
+  // ⛔ THE TRAP INSIDE THE FIX: the reporter counts OCCURRENCES, `extract_failures` ends in
+  // `sort -u`. Reconciling a declared count against DEDUPLICATED identities would refuse two
+  // identical error messages — an ordinary thing — and the pressure would then be to relax the
+  // check that was just added. Occurrences are counted before deduplication; this pins that.
+  it('C11 DUPLICATE IDENTITIES: two identical errors reconcile, and dedup to one row', () => {
+    const out = join(fixture, 'c11.out');
+    const body = [
+      '⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯',
+      '⎯⎯⎯⎯ Unhandled Rejection ⎯⎯⎯⎯⎯',
+      'Error: SAME_MESSAGE_TWICE',
+      '⎯⎯⎯⎯ Unhandled Rejection ⎯⎯⎯⎯⎯',
+      'Error: SAME_MESSAGE_TWICE',
+      '',
+      ' Test Files  1 passed (1)',
+      '      Tests  1 passed (1)',
+      '     Errors  2 errors',
+      '',
+    ].join('\n');
+    const accepted = callFunctions(
+      `SUITE_SUMMARY=1; extract_failures "${out}" > "${out}.fails"; assert_nameable "${out}" "${out}.fails" 1 "working tree"`,
+      out,
+      body,
+    );
+    expect(
+      accepted.status,
+      'two identical error messages were treated as partial capture — the reconciliation is ' +
+        'comparing occurrences against deduplicated identities',
+    ).toBe(0);
+    const rows = callFunctions(`extract_failures "${out}"`, out, body);
+    expect((rows.stdout ?? '').trim().split('\n').filter(Boolean)).toEqual([
+      'UNHANDLED Error: SAME_MESSAGE_TWICE',
+    ]);
   });
 
   it('C6 GREEN COMPANION for the refusals: rc 0 with a clean summary is accepted', () => {
