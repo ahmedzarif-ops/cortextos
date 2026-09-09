@@ -266,4 +266,76 @@ describe('guard PR41 seams', () => {
     await vi.advanceTimersByTimeAsync(TICK);
     expect(fired).toHaveLength(0);
   });
+
+  // R1 — guard's round-2 P1, and it was a REGRESSION my own previous head introduced.
+  // The attempt marker was written pre-dispatch while last_slot_at was written only on
+  // success, so a fire interrupted between them left an OLDER slot that won the next
+  // load over the NEWER attempt marker, and the slot was dispatched twice.
+  it('R1: an in-flight attempted slot is never dispatched twice', async () => {
+    const persisted: Record<string, unknown> = {};
+    mockUpdateCron.mockImplementation((_a: string, _n: string, patch: Record<string, unknown>) => {
+      Object.assign(persisted, patch); return true;
+    });
+    mockReadCrons.mockImplementation(() => [makeCron(persisted)]);
+
+    // A dispatch that never completes: the marker lands, the success write never does.
+    scheduler.stop();
+    scheduler = new CronScheduler({
+      agentName: 'test-agent',
+      onFire: () => { throw new Error('interrupted mid-fire'); },
+      logger: () => {},
+    });
+    scheduler.start();
+    vi.setSystemTime(T0 + HOUR);
+    await vi.advanceTimersByTimeAsync(TICK);
+
+    // ⭐ THE ASSERTION IS ON DISK, because disk is all a restart can see.
+    expect(persisted.last_fire_attempted_at).toBeDefined();
+    expect(persisted.last_slot_at).toBe(new Date(T0 + HOUR).toISOString());
+    expect(persisted.last_fired_at).toBeUndefined(); // the fire genuinely did not succeed
+
+    // Restart against exactly that file: the attempted slot must not come round again.
+    scheduler.stop();
+    const after: number[] = [];
+    scheduler = new CronScheduler({
+      agentName: 'test-agent', onFire: () => { after.push(Date.now()); }, logger: () => {},
+    });
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(2 * TICK);
+    expect(after).toHaveLength(0);
+  });
+
+  // R2 — the persisted slot must be the one the LIVE scheduler is anchored on after
+  // skipping missed slots, not the oldest slot the catch-up fire served. Otherwise a
+  // restart and both displays advance one interval from a slot already skipped past.
+  it('R2: after a multi-slot sleep, disk and memory describe the SAME next fire', async () => {
+    const persisted: Record<string, unknown> = {};
+    mockUpdateCron.mockImplementation((_a: string, _n: string, patch: Record<string, unknown>) => {
+      Object.assign(persisted, patch); return true;
+    });
+    mockReadCrons.mockImplementation(() => [makeCron(persisted)]);
+
+    scheduler.start();
+    vi.setSystemTime(T0 + 6 * HOUR + 30 * 60_000); // asleep across six slots
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(fired).toHaveLength(1); // one catch-up, not six
+
+    // In memory the next fire is T0+7h. On disk the anchor must be T0+6h, so that
+    // anchor + interval reproduces it exactly — for a restart AND for both displays.
+    expect(persisted.last_slot_at).toBe(new Date(T0 + 6 * HOUR).toISOString());
+
+    // Behavioural confirmation through a real restart.
+    scheduler.stop();
+    scheduler = new CronScheduler({
+      agentName: 'test-agent',
+      onFire: (c) => { fired.push({ name: c.name, at: Date.now() }); },
+      logger: () => {},
+    });
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(fired).toHaveLength(1); // ⛔ no re-dispatch of a skipped slot
+    vi.setSystemTime(T0 + 7 * HOUR + TICK);
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(fired).toHaveLength(2);
+  });
 });
