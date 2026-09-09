@@ -190,3 +190,64 @@ describe('AgentPTY structural no-keystroke-into-live-session invariant', () => {
     expect(mockPty.write).not.toHaveBeenCalled();
   });
 });
+
+describe('AgentPTY awaiting-confirmation must not re-assert after the buffer scrolls', () => {
+  beforeEach(() => { vi.useFakeTimers(); mockPty.write.mockClear(); });
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+
+  // ⛔ THE DEFECT, MEASURED ON A LIVE SEAT: 20h38m uptime, a heartbeat 60s old, a context
+  // file written that same minute and three bus messages exchanged — and `cortextos status`
+  // still printed "awaiting interactive confirmation (first-run prompt not accepted)".
+  // Three instruments said live, one said never bootstrapped.
+  //
+  // CAUSE, VERIFIED IN THE CODE RATHER THAN INFERRED FROM THE SYMPTOM: OutputBuffer.chunks
+  // is a RING (push, then shift past maxChunks), and isBootstrapped() reads getRecent() over
+  // that ring. It therefore answers "is the bootstrap pattern on screen NOW", not "did this
+  // session ever start". The previous gate ANDed on !isBootstrapped() and its comment
+  // promised a late recovery would "auto-report healthy without extra clearing" — true for
+  // as long as the pattern stays in the window, false forever after it scrolls out.
+  //
+  // ⭐ A MOMENTARY OBSERVATION CANNOT CARRY A PERMANENT FACT. "Ever bootstrapped" is
+  // monotonic; a ring buffer is not.
+  //
+  // NOTE: the existing 'clears the wedge flag on late recovery' test above passes under BOTH
+  // implementations — it reads the flag while the pattern is still in the window. That is
+  // precisely why this defect survived having a test named after it.
+  it('stays healthy after the bootstrap pattern scrolls out of the ring buffer', async () => {
+    const pty = newPty({});
+    await pty.spawn('fresh', 'P');
+    const buf = pty.getOutputBuffer();
+
+    buf.push('2. Yes, I accept - Bypass Permissions mode');
+    await vi.advanceTimersByTimeAsync(46000);
+    expect(pty.isAwaitingInteractiveConfirmation()).toBe(true);
+
+    buf.push('accept edits · permissions');
+    expect(pty.isAwaitingInteractiveConfirmation()).toBe(false);
+
+    const maxChunks = (buf as any).maxChunks ?? 1000;
+    for (let i = 0; i < maxChunks + 50; i++) buf.push(`ordinary agent output line ${i}\n`);
+
+    // PRECONDITION CONTROL — without it this test could pass because the buffer stopped
+    // evicting, i.e. because it no longer exercises the defect at all.
+    expect(buf.searchSync('permissions')).toBe(false);
+
+    // THE ASSERTION. Under the old gate this is `true` — the live 20h defect.
+    expect(pty.isAwaitingInteractiveConfirmation()).toBe(false);
+  });
+
+  it('still reports awaiting for a seat that never bootstrapped, however long it runs', async () => {
+    // The latch must not degrade into "everything is healthy after a while".
+    const pty = newPty({});
+    await pty.spawn('fresh', 'P');
+    const buf = pty.getOutputBuffer();
+    buf.push('2. Yes, I accept - Bypass Permissions mode');
+    await vi.advanceTimersByTimeAsync(46000);
+    expect(pty.isAwaitingInteractiveConfirmation()).toBe(true);
+
+    const maxChunks = (buf as any).maxChunks ?? 1000;
+    for (let i = 0; i < maxChunks + 50; i++) buf.push(`still wedged, no status bar ${i}\n`);
+
+    expect(pty.isAwaitingInteractiveConfirmation()).toBe(true);
+  });
+});

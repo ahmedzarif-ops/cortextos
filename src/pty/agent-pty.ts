@@ -37,6 +37,9 @@ export class AgentPTY {
   // first-run observability fix: set at the auto-accept backstop when the PTY is
   // still parked on a first-run prompt and never bootstrapped (a wedge).
   private _awaitingInteractiveConfirmation = false;
+  // LATCH: set once the session has been OBSERVED bootstrapped, and never unset.
+  // The observation is momentary; the fact is permanent. See the getter below.
+  private _everBootstrapped = false;
   private outputBuffer: OutputBuffer;
   protected env: CtxEnv;
   protected config: AgentConfig;
@@ -208,7 +211,7 @@ export class AgentPTY {
       if (!this.pty) { clearInterval(promptPoll); return; }
       // first-run observability fix: stop BEFORE evaluating any prompt branch — once the
       // real session is up, never write a stray keystroke (Down/CR/Enter) into it.
-      if (this.outputBuffer.isBootstrapped()) { clearInterval(promptPoll); return; }
+      if (this.outputBuffer.isBootstrapped()) { this._everBootstrapped = true; clearInterval(promptPoll); return; }
       const recent = this.outputBuffer.getRecent().replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
       const kind = this.detectFirstRunPrompt(recent);
       const showingBypass = kind === 'bypass';
@@ -240,6 +243,7 @@ export class AgentPTY {
     // still auto-accepts, and at the backstop surface a wedge instead of a false 'running'.
     setTimeout(() => {
       clearInterval(promptPoll);
+      if (this.pty && this.outputBuffer.isBootstrapped()) this._everBootstrapped = true;
       if (this.pty && !this.outputBuffer.isBootstrapped()) {
         const recent = this.outputBuffer.getRecent().replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
         if (this.detectFirstRunPrompt(recent) !== null) {
@@ -423,10 +427,28 @@ export class AgentPTY {
     return this.outputBuffer;
   }
 
-  // first-run observability fix: true only while genuinely wedged — AND-gated with
-  // !isBootstrapped so a late recovery auto-reports healthy without extra clearing.
+  // True only while genuinely wedged.
+  //
+  // ⛔ THE PREVIOUS AND-GATE WAS `!this.outputBuffer.isBootstrapped()`, and its comment
+  // claimed "a late recovery auto-reports healthy without extra clearing". IT DOES NOT.
+  // `isBootstrapped()` inspects the RECENT output window, so it answers "is the bootstrap
+  // pattern on screen right now", not "did this session ever start". Hours later the
+  // pattern has scrolled out of that window and the gate reads false again — so a seat
+  // that bootstrapped fine stays latched as `unhealthy*` for the life of the process.
+  // Measured on a live seat: 20h38m uptime, a heartbeat 60s old, a context file written
+  // that minute and three bus messages exchanged, still printed
+  // "awaiting interactive confirmation (first-run prompt not accepted)".
+  //
+  // ⭐ A MOMENTARY OBSERVATION CANNOT CARRY A PERMANENT FACT. "Ever bootstrapped" is
+  // monotonic; a scrolling buffer is not. So the observation is LATCHED at the two places
+  // that already make it, and the latch — never the live re-read — clears the flag.
   isAwaitingInteractiveConfirmation(): boolean {
-    return this._awaitingInteractiveConfirmation && !this.outputBuffer.isBootstrapped();
+    if (this._everBootstrapped) return false;
+    if (this.outputBuffer.isBootstrapped()) {
+      this._everBootstrapped = true;
+      return false;
+    }
+    return this._awaitingInteractiveConfirmation;
   }
 
   /**
