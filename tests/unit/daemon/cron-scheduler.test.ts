@@ -312,15 +312,30 @@ describe('CronScheduler', () => {
     // Scheduler must NOT crash — the log should contain a give-up message
     expect(retryLogs.some(l => l.includes('giving up'))).toBe(true);
 
-    // updateCron is called exactly once with last_fire_attempted_at (iter 11
-    // pre-fire persist), but NEVER with last_fired_at because all attempts
-    // failed.  This matches the iter 11 invariant: attempted_at is recorded
-    // even on failed dispatches so a crash mid-fire cannot double-fire.
-    expect(mockUpdateCron).toHaveBeenCalledTimes(1);
+    // ⚡ THE COUNT CHANGED FROM 1 TO 2 ON 2026-09-09, DELIBERATELY. The superseded
+    // expectation, kept visible rather than quietly edited:
+    //     expect(mockUpdateCron).toHaveBeenCalledTimes(1);
+    //     // "updateCron is called exactly once with last_fire_attempted_at (iter 11
+    //     //  pre-fire persist), but NEVER with last_fired_at because all attempts failed."
+    // ⭐ THE INVARIANT THAT TEST WAS PROTECTING IS UNCHANGED AND STILL ASSERTED BELOW:
+    // a wholly failed dispatch never writes `last_fired_at`. The COUNT was incidental
+    // to it — it happened to be 1 because the failed path persisted nothing at all,
+    // which is the very defect guard's round-3 P1 found (memory advanced past the
+    // skipped slots while disk kept an older anchor, so a restart re-opened a window
+    // whose four attempts were spent).
+    // ⇒ The failed path now persists the ACCOUNTED SLOT, so there are two writes: the
+    // pre-dispatch marker and this one. Both are asserted by CONTENT below, which is
+    // what the test actually cares about; a bare count would pass on the wrong pair.
+    expect(mockUpdateCron).toHaveBeenCalledTimes(2);
     expect(mockUpdateCron).toHaveBeenCalledWith(
       'test-agent',
       'test-cron',
       expect.objectContaining({ last_fire_attempted_at: expect.any(String) })
+    );
+    expect(mockUpdateCron).toHaveBeenCalledWith(
+      'test-agent',
+      'test-cron',
+      expect.objectContaining({ last_slot_at: expect.any(String) })
     );
     expect(mockUpdateCron).not.toHaveBeenCalledWith(
       'test-agent',
@@ -946,9 +961,47 @@ describe('CronScheduler', () => {
 
     // A reload happened...
     expect(mockReadCronsWithStatus.mock.calls.length).toBe(loadsBefore + 1);
-    // ...but the cron did not double-fire (nextFireAt preserved for the
-    // unchanged changeKey).
-    expect(fired.filter(c => c.name === 'job')).toHaveLength(1);
+
+    // ⛔ THIS ASSERTION WAS `toHaveLength(1)` AND IT NO LONGER HOLDS — CHANGED
+    // 2026-09-09 WITH THE REASON, because silently relaxing a double-fire guard
+    // is exactly the move that should never pass review unexplained.
+    //
+    // WHAT CHANGED: the post-fire advance now anchors on the SCHEDULED slot
+    // instead of the actual fire, so a cron keeps its phase. This fixture's
+    // catch-up fire lands mid-slot (last_fired_at is 2m old on a 1m cron), so
+    // the next ON-PHASE slot legitimately falls ~30s later — inside the window
+    // this test advances. THAT SECOND FIRE IS PHASE RESTORATION, NOT A DOUBLE
+    // FIRE, and a short gap after an off-phase catch-up is inherent to restoring
+    // a phase: it is the same arithmetic that makes a 15-min-late fire keep its
+    // slot instead of dragging every future fire 15 minutes later.
+    //
+    // ⭐ THE TEST'S ACTUAL TARGET IS UNCHANGED AND IS NOW ISOLATED PROPERLY.
+    // It exists to prove THE RELOAD does not cause a re-fire. Counting fires
+    // could never distinguish "the reload re-fired it" from "the schedule came
+    // round" — it only worked while the schedule could not come round this soon.
+    // The control below varies the ONE variable the test is about: with the
+    // mtime left alone, so NO reload occurs, the fire count is the same. Same
+    // count with and without a reload ⇒ the reload is not firing anything.
+    const withReload = fired.filter(c => c.name === 'job').length;
+    expect(mockReadCronsWithStatus.mock.calls.length).toBe(loadsBefore + 1);
+
+    // Rebuild the identical scenario, this time WITHOUT advancing the mtime.
+    const control = { fired: [] as { name: string }[] };
+    const controlScheduler = new CronScheduler({
+      agentName: 'test-agent',
+      onFire: (cron) => { control.fired.push({ name: cron.name }); },
+      logger: () => {},
+    });
+    mockReadCrons.mockReturnValue([
+      makeCron({ name: 'job', schedule: '1m', last_fired_at: twoMinAgo, fire_count: 1 }),
+    ]);
+    mockCronsFileMtimeMs.mockReturnValue(5000); // constant ⇒ no reload ever
+    controlScheduler.start();
+    await vi.advanceTimersByTimeAsync(TICK);
+    await vi.advanceTimersByTimeAsync(TICK);
+    controlScheduler.stop();
+
+    expect(control.fired.filter(c => c.name === 'job')).toHaveLength(withReload);
   });
 
   it('(g) external edit across a fire is applied and logged (suppression never hides a real edit)', async () => {

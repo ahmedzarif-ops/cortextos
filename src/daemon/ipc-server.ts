@@ -7,7 +7,7 @@ import { getIpcPath } from '../utils/paths.js';
 import { readCrons, getExecutionLog, getExecutionLogPage, addCron, updateCron, removeCron, getCronByName } from '../bus/crons.js';
 import type { ExecutionLogStatusFilter } from '../bus/crons.js';
 import { nextFireFromCron } from './cron-scheduler.js';
-import { parseDurationMs } from '../bus/cron-state.js';
+import { computeNextFireMs } from '../bus/cron-state.js';
 import { computeHealth, aggregateFleetHealth } from '../utils/cron-health.js';
 
 const WORKER_NAME_REGEX = /^[a-z0-9_-]+$/;
@@ -119,25 +119,34 @@ export function handleFireCron(
  * without duplicating the parser.
  *
  * @param schedule    - Interval shorthand or 5-field cron expression.
- * @param lastFiredAt - ISO 8601 of last fire; if absent uses `now`.
+ * @param anchorIso - ISO 8601 PHASE ANCHOR: the scheduled slot the last fire served
+ *                   (`last_slot_at`), falling back to the actual fire instant on
+ *                   legacy rows. If absent, uses `now`.
  * @param now         - Epoch ms for "now" (injectable for testing).
  */
 export function computeNextFire(
   schedule: string,
-  lastFiredAt: string | undefined,
+  anchorIso: string | undefined,
   now = Date.now(),
 ): string {
-  const referenceMs = lastFiredAt ? new Date(lastFiredAt).getTime() : now;
+  // ⛔ THE ANCHOR MUST BE THE SCHEDULED SLOT, NOT THE ACTUAL FIRE.
+  // Sharing `computeNextFireMs` with the scheduler reconciled the FUNCTION and not
+  // the INPUT: this surface passed the actual last-fired instant while the scheduler
+  // advanced from the slot, so after a 15m30s-late fire the display read 14:15:30
+  // and the scheduler meant 14:00. Two answers to one question, again, one layer
+  // down from where it was fixed. (guard, PR41: "display agrees with scheduler
+  // after late fire".) Callers pass `last_slot_at ?? last_fired_at`.
+  const referenceMs = anchorIso ? new Date(anchorIso).getTime() : now;
 
-  const durationMs = parseDurationMs(schedule);
-  if (!isNaN(durationMs)) {
-    const next = referenceMs + durationMs;
-    // If next is still in the past (daemon was stopped for a long time), advance to now
-    return new Date(next <= now ? now + durationMs : next).toISOString();
-  }
-
-  // Try as a 5-field cron expression
-  const nextMs = nextFireFromCron(schedule, now);
+  // ⛔ THE CLAMP THAT USED TO LIVE HERE IS GONE, DELIBERATELY.
+  // It read `next <= now ? now + durationMs : next`, so a cron that was overdue was
+  // displayed as due one interval from NOW — the dashboard could never show an overdue
+  // cron, whatever the state of the fleet. Meanwhile `bus list-crons` had no clamp and
+  // showed the real (past) value. TWO SURFACES, SAME QUESTION, TWO ANSWERS, and the one
+  // that always looked healthy was the one most people read.
+  // ⭐ An at-rest state and a failed state that render identically is the failure this
+  // area keeps producing. Both surfaces now call the one computation below.
+  const nextMs = computeNextFireMs({ schedule, referenceMs, nowMs: now });
   if (!isNaN(nextMs)) {
     return new Date(nextMs).toISOString();
   }
@@ -183,7 +192,7 @@ function listAllCrons(): CronSummaryRow[] {
         cron,
         lastFire: lastEntry?.ts ?? null,
         lastStatus: lastEntry?.status ?? null,
-        nextFire: computeNextFire(cron.schedule, cron.last_fired_at, now),
+        nextFire: computeNextFire(cron.schedule, cron.last_slot_at ?? cron.last_fired_at, now),
       });
     }
   }

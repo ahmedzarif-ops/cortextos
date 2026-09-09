@@ -444,6 +444,23 @@ export interface CronDefinition {
    * @example "2026-04-28T13:00:01.042Z"
    */
   last_fired_at?: string;
+  /**
+   * ISO 8601 UTC instant of the SCHEDULED SLOT the last fire served — not when it
+   * actually ran. This is the cron's PHASE, persisted because the phase has to
+   * survive a restart and has to be readable by every consumer, not just by the
+   * scheduler's in-memory advance.
+   *
+   * ⛔ WHY IT EXISTS (guard, PR41 review, 2026-09-09). Keeping the phase only in
+   * memory was not keeping it:
+   *   - a stop/start reloaded `last_fired_at` — the ACTUAL fire — so a 15m30s-late
+   *     fire moved the next slot 14:00 -> 14:15:30 at the next restart;
+   *   - the CLI and the ipc display anchored on the actual fire too, so the
+   *     dashboard read 14:15:30 while the scheduler meant 14:00. Sharing one
+   *     next-fire FUNCTION did not reconcile two different INPUTS.
+   * ⭐ ONE PERSISTED ANCHOR, READ BY ALL THREE CONSUMERS. Absent on legacy files,
+   * where every reader falls back to `last_fired_at` and behaves exactly as before.
+   */
+  last_slot_at?: string;
 
   /**
    * ISO 8601 UTC timestamp set by the scheduler IMMEDIATELY before it awaits
@@ -520,6 +537,23 @@ export interface CronDefinition {
 export interface CronExecutionLogEntry {
   /** ISO 8601 UTC timestamp of the fire attempt. */
   ts: string;
+  /**
+   * ISO 8601 UTC instant this fire was SCHEDULED for, when the scheduler knows
+   * it. `ts - due_at` is the lateness, and it is the only way to tell a fire
+   * that happened on time from one that happened fifteen minutes late.
+   *
+   * ⛔ WHY IT WAS ADDED (2026-09-09). A host sleep from 15:25:02Z left the
+   * daemon suspended; it ran only inside ~2s macOS DarkWake windows ~16 min
+   * apart, and fires landed up to 15m29s late against a 30s tick. Every one of
+   * them was logged `{"status":"fired"}` with a `ts` and nothing else, so a late
+   * fire and an on-time fire were written in identical words. The lateness was
+   * recoverable only by matching timestamps against `pmset`, a log this system
+   * does not own and never reads.
+   *
+   * OPTIONAL, and it stays optional: every line already on disk lacks it, and a
+   * reader that requires it would refuse the entire existing history.
+   */
+  due_at?: string;
   /** Cron name (matches CronDefinition.name). */
   cron: string;
   /** Outcome of this attempt. */
