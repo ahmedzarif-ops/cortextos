@@ -20,7 +20,7 @@
  *
  * RELOAD SEMANTICS
  * ----------------
- * reload() re-reads crons.json.  For crons whose name + schedule string are
+ * reload() re-reads crons.json.  For crons whose name + schedule + fire_at are
  * unchanged the in-memory nextFireAt is preserved so we don't reset timers.
  * New or modified crons get a freshly computed nextFireAt.
  */
@@ -55,14 +55,26 @@ interface ScheduledCron {
   definition: CronDefinition;
   /** Epoch ms when this cron should next fire. */
   nextFireAt: number;
-  /** Normalised key for detecting definition changes: name|schedule */
+  /** Normalised key for detecting definition changes: name|schedule|fire_at */
   changeKey: string;
   /** True while onFire (+ retries) is executing — prevents re-entry on the next tick. */
   firing?: boolean;
 }
 
+/**
+ * Schedule identity for reload().  A cron whose key is unchanged keeps its
+ * in-memory nextFireAt so a prompt-only edit does not reset a running timer.
+ *
+ * ⛔ `fire_at` IS PART OF THE IDENTITY. It was omitted, and the omission was
+ * invisible because `schedule` is present and looks like the whole answer:
+ * editing ONLY fire_at left the key identical, so reload() classified the cron
+ * as unchanged and KEPT THE OLD DUE EPOCH. The new definition object was swapped
+ * in — so the callback would receive the new prompt — at the OLD time. Adding
+ * the field also covers the recurring↔one-shot transitions, since fire_at
+ * appearing or disappearing changes the key in both directions.
+ */
 function changeKeyFor(c: CronDefinition): string {
-  return `${c.name}|${c.schedule}`;
+  return `${c.name}|${c.schedule}|${c.fire_at ?? ''}`;
 }
 
 /**
@@ -261,7 +273,7 @@ export class CronScheduler {
   /**
    * Re-read crons.json and update the in-memory schedule.
    *
-   * Crons whose name + schedule are unchanged retain their current nextFireAt
+   * Crons whose name + schedule + fire_at are unchanged retain their current nextFireAt
    * so we don't accidentally reset pending timers.  New or modified crons get
    * a freshly computed nextFireAt.
    */
@@ -473,14 +485,51 @@ export class CronScheduler {
       // updateCron below, loadCrons() on restart will see this attempt
       // timestamp in the referenceMs candidates and avoid re-firing the
       // same slot via the catch-up gate. (See iter 10/11 audit.)
+      //
+      // ⛔ FOR A ONE-SHOT: NO MARKER, NO FIRE. If this write does not land, the
+      // scheduler has no durable record that it claimed the slot, so a restart
+      // reads an untouched definition and fires again — two dispatches of an
+      // action promised to happen exactly once. The recurring path's inherited
+      // behaviour (warn, dispatch anyway) is right for a recurring cron, where a
+      // lost marker costs one duplicate slot rather than a broken guarantee, and
+      // it is deliberately left alone here.
+      //
+      // ⭐ THE MARKER CAN FAIL WITHOUT THROWING. updateCron returns `false` when
+      // no cron of that name exists in crons.json — deleted between load and
+      // fire, or renamed. A try/catch alone reads that as success. The RETURN
+      // VALUE and the throw are two different failure channels and both have to
+      // be closed.
       const attemptIso = new Date(now).toISOString();
+      const isOneShot = Boolean(cron.fire_at);
+      let markerPersisted = false;
+      let markerError = '';
       try {
-        updateCron(this.agentName, name, { last_fire_attempted_at: attemptIso });
-        sc.definition = { ...cron, last_fire_attempted_at: attemptIso };
+        markerPersisted = updateCron(this.agentName, name, { last_fire_attempted_at: attemptIso });
+        if (markerPersisted) {
+          sc.definition = { ...cron, last_fire_attempted_at: attemptIso };
+        } else {
+          markerError = 'no cron of that name in crons.json (deleted or renamed since load)';
+        }
       } catch (err) {
+        markerPersisted = false;
+        markerError = err instanceof Error ? err.message : String(err);
+      }
+
+      if (!markerPersisted) {
+        if (isOneShot) {
+          // FAIL CLOSED. Leave nextFireAt where it is so the cron stays due and a
+          // later tick retries once the write can succeed; do NOT dispatch.
+          this.logger(
+            `[cron-scheduler] WARNING: one-shot "${name}" NOT dispatched — could not persist ` +
+            `last_fire_attempted_at (${markerError}). Fail-closed: without a durable claim a restart ` +
+            `would fire it again. Still due; will retry when the write succeeds.`
+          );
+          sc.firing = false;
+          continue;
+        }
         this.logger(
           `[cron-scheduler] WARNING: failed to persist last_fire_attempted_at for "${name}" — ` +
-          `${err instanceof Error ? err.message : String(err)}. ` +
+          `${markerError}. ` +
           `Continuing dispatch; crash mid-fire could double-fire on restart.`
         );
       }
@@ -547,9 +596,21 @@ export class CronScheduler {
         const next = computeNextFireAt(attemptedDef, now);
         if (!isNaN(next)) {
           sc.nextFireAt = next;
+          // ⛔ A TERMINAL ONE-SHOT HAS NO NEXT SLOT, AND Infinity IS NOT A DATE.
+          // computeNextFireAt returns POSITIVE_INFINITY once the attempt marker
+          // exists, which is correct — but `new Date(Infinity).toISOString()`
+          // throws RangeError: Invalid time value. That rejected the whole tick
+          // and skipped `sc.firing = false` below, wedging the cron mid-fire
+          // forever. Render the terminal state as words instead of converting a
+          // non-finite number to a date. The success path already stores the
+          // same Infinity without rendering it, so both post-fire paths now
+          // agree: the entry stays, permanently not-due.
           this.logger(
-            `[cron-scheduler] WARNING: "${name}" dispatch failed — advancing to next slot ${new Date(next).toISOString()} ` +
-            `to avoid busy-loop (no last_fired_at update; failure recorded in execution log)`
+            Number.isFinite(next)
+              ? `[cron-scheduler] WARNING: "${name}" dispatch failed — advancing to next slot ${new Date(next).toISOString()} ` +
+                `to avoid busy-loop (no last_fired_at update; failure recorded in execution log)`
+              : `[cron-scheduler] WARNING: one-shot "${name}" dispatch failed after all retries — terminal, ` +
+                `it will not fire again (no last_fired_at update; failure recorded in execution log)`
           );
         } else {
           this.scheduled.delete(name);
