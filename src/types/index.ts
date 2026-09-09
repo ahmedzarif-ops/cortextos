@@ -27,7 +27,30 @@ export interface InboxMessage {
 
 // Task Types
 
-export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'blocked' | 'cancelled';
+/**
+ * Every task status, as a RUNTIME value.
+ *
+ * `TaskStatus` is derived FROM this rather than declared beside it, so the list a
+ * validator iterates and the type the compiler checks cannot drift apart. They
+ * already had: `src/cli/bus.ts` carries a hand-written copy of these five, and a
+ * sixth status added to the type would have left that copy silently short.
+ */
+export const TASK_STATUSES = ['pending', 'in_progress', 'completed', 'blocked', 'cancelled'] as const;
+
+export type TaskStatus = (typeof TASK_STATUSES)[number];
+
+/**
+ * Runtime check that a value is a real task status.
+ *
+ * Needed because data read off DISK is `unknown` no matter what the type says.
+ * An audit line reading `{ from: null, to: 'in_progress' }` is a plain object, so
+ * it survives a JSON shape check, and `null !== undefined` and `null !== 'in_progress'`,
+ * so it survives a presence check and a difference check too — and is then counted
+ * as a state change that never happened.
+ */
+export function isTaskStatus(value: unknown): value is TaskStatus {
+  return typeof value === 'string' && (TASK_STATUSES as readonly string[]).includes(value);
+}
 
 export interface TaskOutput {
   /** Output kind. "file" links to a saved deliverable; other shapes reserved. */
@@ -649,6 +672,91 @@ export interface StaleTaskReport {
   stale_blocked: Task[];
   stale_human: Task[];
   overdue: Task[];
+  /**
+   * Both staleness clocks for EVERY `in_progress` task, stale or not.
+   *
+   * `clock_age_seconds` is `now - updated_at` — the field the check has always
+   * read. `true_idle_seconds` is `now - <newest audit transition>`, falling back
+   * to `created_at`. They diverge exactly when a write moved `updated_at`
+   * without changing anything, which is how a genuinely idle task was being
+   * cleared: measured 2026-09-08, the shipped check cleared 5 of 10 in_progress
+   * tasks and all 5 were idle 4.2h-20.9h.
+   *
+   * Emitted for every row rather than only stale ones ON PURPOSE: a consumer
+   * has to be able to see the two clocks disagree on a row that is being
+   * CLEARED, since a cleared row is the case that produced no output at all.
+   */
+  idle_ages: TaskIdleAge[];
+}
+
+/**
+ * The two staleness clocks for one `in_progress` task, plus what the read had to
+ * discard to produce them. See StaleTaskReport.idle_ages.
+ *
+ * ⛔ NEITHER AGE IS EVER `null`, `NaN`, OR NEGATIVE. Those are the three values a
+ * consumer reads as "no problem here" while meaning "this data is broken":
+ * `NaN > threshold` is false, `null` renders as an absent age, and a negative
+ * age reads as activity in the future. Malformed input is reported as MAXIMALLY
+ * STALE with the matching flag set, never as fresh.
+ */
+export interface TaskIdleAge {
+  task_id: string;
+  /**
+   * now - updated_at, in seconds. Moves on ANY write, including a no-op.
+   * When `clock_malformed` is true this is the maximally-stale sentinel
+   * (the age of a task stamped at the UNIX epoch), not a measured age.
+   */
+  clock_age_seconds: number;
+  /** now - newest valid PAST audit transition (else created_at), in seconds. Never negative. */
+  true_idle_seconds: number;
+  /** `updated_at` did not parse. `clock_age_seconds` is the sentinel, and the row alarms. */
+  clock_malformed: boolean;
+  /**
+   * `updated_at` is in the FUTURE, so `clock_age_seconds` was negative and was clamped to 0.
+   *
+   * ⚠ READ THIS BEFORE TRUSTING A CLEARED ROW THAT CARRIES IT. Clamping honours the
+   * no-negative-age contract above, and it points the REASSURING way: a clamped clock
+   * reads as "just written". For `in_progress` that is harmless, because the idle clock
+   * is the other half of `max()` and still decides. For `blocked`, `pending` and `human`
+   * there IS no second clock, so a future `updated_at` clears those rows — exactly as a
+   * negative age already did before the clamp. The clamp changes the number, not that
+   * outcome. Recorded here rather than fixed silently.
+   */
+  clock_future: boolean;
+  /** `true_idle_seconds` was negative and was clamped to 0 — a future-dated `created_at`. */
+  idle_clamped: boolean;
+  /**
+   * Audit lines that were valid JSON but not an entry object — the literal
+   * `null`, a bare number, a string, an array. Skipped AND counted: a filter
+   * that cannot say how much it excluded is indistinguishable from one that
+   * excluded nothing. Non-zero here means this task's history is partly
+   * unreadable, so a low idle age is weak evidence rather than reassurance.
+   */
+  audit_lines_malformed: number;
+  /** Audit lines that were not valid JSON at all (a write that crashed mid-line). */
+  audit_lines_unparseable: number;
+  /** Transitions whose `ts` did not parse: they cannot date an event, so they were ignored. */
+  audit_transitions_unparseable_ts: number;
+  /** Transitions dated in the FUTURE: ignored, because they cannot establish present activity. */
+  audit_transitions_future: number;
+  /**
+   * Audit lines carrying BOTH ends where at least one is NOT a real `TaskStatus` —
+   * `null`, a number, an unknown string. Rejected and counted.
+   *
+   * ⛔ THE SHAPE CHECK ON THE LINE DOES NOT COVER THIS, and that is why it needed its own
+   * field. `{ from: null, to: 'in_progress' }` is a plain object, so it passes the
+   * JSON-shape filter; `null !== undefined`, so it passes the presence check; and
+   * `null !== 'in_progress'`, so it passes the difference check. A line can be malformed
+   * DATA inside a well-formed OBJECT, and every guard before this one asked about the
+   * container.
+   */
+  audit_transitions_invalid_endpoint: number;
+  /**
+   * Audit lines carrying `from === to` — both ends written, nothing changed.
+   * `updateTask` emits these unconditionally, so `update-task <id> in_progress`
+   * on an already-`in_progress` task produces one. They are NOT transitions.
+   */
+  audit_transitions_no_op: number;
 }
 
 export interface ArchiveReport {
