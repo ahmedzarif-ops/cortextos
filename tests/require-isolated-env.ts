@@ -1,3 +1,7 @@
+import { realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, dirname, join, sep } from 'node:path';
+
 /**
  * Suite precondition: CTX_FRAMEWORK_ROOT must not be set in the environment the
  * suite is launched with.
@@ -53,7 +57,113 @@
  */
 const CONTAMINATING = ['CTX_AGENT_DIR', 'CTX_FRAMEWORK_ROOT', 'CTX_PROJECT_ROOT'] as const;
 
+/**
+ * ⛔⛔ CTX_ROOT IS A POSITIVE REQUIREMENT, NOT A BLOCKLIST ENTRY — AND THE COMMENT
+ * THAT USED TO SIT ABOVE THE LIST SAID THE OPPOSITE IN TERMS.
+ *
+ * It read: "CTX_ROOT IS NOT AMONG THE CAUSES, which is why this is a named list and
+ * not a prefix sweep." That sentence is TRUE ABOUT TEST FAILURES and FALSE ABOUT THE
+ * HAZARD. The list above came from bisecting for which variables make the suite go
+ * RED. CTX_ROOT makes nothing red. It makes the suite PASS while writing into a tree
+ * somebody is using.
+ * ⭐ A CAUSE SET DERIVED FROM WHAT MAKES A TEST FAIL CANNOT CONTAIN A VARIABLE WHOSE
+ * EFFECT IS GREEN. A blocklist built from a red-bisect is blind to it by construction,
+ * so no amount of adding names fixes the shape — only a requirement does.
+ *
+ * MEASURED 2026-09-10, both directions:
+ *   CTX_ROOT=<tmp>  -> cron-scheduler.test.ts passes 35/35 AND creates
+ *                      <tmp>/.cortextOS/state/agents/test-agent
+ *   CTX_ROOT=<live> -> the same writes land in ~/.cortextos/default. alice/ and bob/,
+ *                      DELETED UNDER OWNER APPROVAL, were recreated by ordinary runs.
+ *
+ * ⛔ AND ABSENT IS NOT SAFE EITHER, which is why this demands a value rather than
+ * merely rejecting a bad one. src/bus/crons.ts:43 and :376 both read
+ *     process.env.CTX_ROOT ?? process.cwd()
+ * DIRECTLY — they never call resolveEnv, so env.ts's homedir default is irrelevant to
+ * that write path. Unset therefore does not mean "sandboxed"; it means "write into the
+ * repository". Measured: a run with every CTX_* stripped created
+ * <repo>/.cortextOS/state/agents/test-agent, and the cortextos checkout already carried
+ * alice, bob and test-agent from an earlier hook-driven push.
+ *
+ * ⇒ THE ORDINARY PATHS PASS BY CONSTRUCTION, NOT BY LUCK: package.json's test scripts
+ * and the pre-push hook both set CTX_ROOT to a fresh mktemp before vitest. This refusal
+ * therefore fires only on a HAND-RUN with a live or absent root — which is exactly the
+ * path that had no protection.
+ * ⚠ Deliberately NOT a default applied here in setup. A quiet default is the shape that
+ * caused this: it would make every caller look isolated while telling nobody which
+ * callers were not.
+ */
+// The echoed command is shared by BOTH refusals. One text, two callers — name the
+// invocation at runtime rather than letting each branch reconstruct it (a shared
+// sentence whose caller differs is how the slow lane once told operators to re-run the
+// fast one).
+function originalInvocation(): string {
+  const shellQuote = (a: string): string =>
+    /^[A-Za-z0-9_@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`;
+  const invoked = process.argv.slice(1).filter((a) => a !== '--');
+  return invoked.length > 0 ? `node ${invoked.map(shellQuote).join(' ')}` : 'npm test';
+}
+
+const CTX_ROOT_HELP =
+  'Set it to a throwaway directory for the run, e.g.  CTX_ROOT=$(mktemp -d)';
+
+function ctxRootFailure(): string | null {
+  const raw = process.env.CTX_ROOT;
+  if (raw === undefined || raw === '') {
+    return (
+      'CTX_ROOT is NOT SET.\n\n' +
+      '  Unset is not "sandboxed". src/bus/crons.ts falls back to process.cwd(), so the\n' +
+      '  suite writes .cortextOS/state/agents/ INTO THE REPOSITORY you are standing in.'
+    );
+  }
+  // realpath, so a symlink or a `..` cannot walk into the live tree behind the check.
+  let resolved: string;
+  try {
+    resolved = realpathSync(raw);
+  } catch {
+    // A path that does not exist yet is fine as a sandbox — resolve its parent instead,
+    // and fall back to the literal value when even that is absent.
+    try {
+      resolved = join(realpathSync(dirname(raw)), basename(raw));
+    } catch {
+      resolved = raw;
+    }
+  }
+  let live: string;
+  try {
+    live = realpathSync(join(homedir(), '.cortextos'));
+  } catch {
+    live = join(homedir(), '.cortextos');
+  }
+  if (resolved === live || resolved.startsWith(live + sep)) {
+    return (
+      `CTX_ROOT points INSIDE the live state tree:\n    CTX_ROOT=${raw}\n` +
+      `    resolves to  ${resolved}\n    which is under ${live}\n\n` +
+      '  Tests write agent state to whatever CTX_ROOT names. Pointed here, they add and\n' +
+      '  overwrite directories under a tree the running fleet reads.'
+    );
+  }
+  return null;
+}
+
 export default function setup(): void {
+  const rootProblem = ctxRootFailure();
+  if (rootProblem !== null) {
+    throw new Error(
+      '\n\n⛔ SUITE NOT ISOLATED — this is a SETUP failure, not a test failure.\n' +
+        'No test ran. Nothing below says anything about the code under review.\n\n' +
+        `  ${rootProblem}\n\n` +
+        `  ${CTX_ROOT_HELP}\n\n` +
+        '  Prefix your ORIGINAL command — this is the invocation this process actually received,\n' +
+        '  so your file filter, -t and reporter flags are preserved:\n' +
+        `    CTX_ROOT=$(mktemp -d) ${originalInvocation()}\n\n` +
+        '  The ordinary lanes already do this for you:\n' +
+        '    npm test            # fast lane\n' +
+        '    npm run test:slow   # slow lane\n' +
+        '  so seeing this message means the suite was launched by hand.\n',
+    );
+  }
+
   const set = CONTAMINATING.filter((name) => {
     const v = process.env[name];
     return v !== undefined && v !== '';
@@ -76,11 +186,7 @@ export default function setup(): void {
   // space in it; echoed bare it becomes two arguments and the printed command silently does
   // something different from the one that refused — a copy-paste remedy that is wrong in exactly
   // the case the operator was narrowing a run.
-  const shellQuote = (a: string): string =>
-    /^[A-Za-z0-9_@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`;
-  const invoked = process.argv.slice(1).filter((a) => a !== '--');
-  const original =
-    invoked.length > 0 ? `node ${invoked.map(shellQuote).join(' ')}` : 'npm test';
+  const original = originalInvocation();
 
   throw new Error(
     '\n\n⛔ SUITE NOT ISOLATED — this is a SETUP failure, not a test failure.\n' +
