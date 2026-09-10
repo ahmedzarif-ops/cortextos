@@ -179,6 +179,9 @@ export interface CostEntry {
   total_tokens: number;
   cost_usd: number | null;
   cost_micros: number | null;
+  reported_cost_usd: number | null;
+  reported_cost_micros: number | null;
+  reported_cost_source: 'message.costUSD' | 'costUSD' | null;
   cost_status: 'estimated' | 'billed' | 'unknown';
   unknown_reason: string | null;
   price_version: string | null;

@@ -193,14 +193,18 @@ export function CostTracking({
             Estimated subtotal: {currentMonthCost.estimated_usd === null ? 'UNKNOWN' : `$${currentMonthCost.estimated_usd.toFixed(2)}`} ·
             Billed subtotal: {currentMonthCost.billed_usd === null ? 'UNKNOWN' : `$${currentMonthCost.billed_usd.toFixed(2)}`}
           </p>
+          <p className="text-xs text-muted-foreground">
+            Transcript-reported subtotal: {currentMonthCost.reported_usd == null ? 'UNKNOWN' : `$${currentMonthCost.reported_usd.toFixed(2)}`} · {currentMonthCost.reported_entries ?? 0} entries.
+            {' '}Amounts recorded by the source; not verified bills. These may overlap the estimates above and are not added to them.
+          </p>
           <p className="text-xs text-muted-foreground">Estimates use recorded API prices. Subscription use is not a cash charge. Coverage is limited to the sources below; missing observations can leave costs unknown. No spending limit is enforced.</p>
           <p className="text-xs">Sources: {usageHealth.state.toUpperCase()} · {usageHealth.issues.length} accounting issues · {usageHealth.legacy_rows_excluded} legacy rows excluded</p>
           {usageHealth.instruments.map((i, n) => <p key={n} className="text-xs">{i.org}/{i.agent} ({i.runtime}): {i.status.toUpperCase()}{i.last_observation ? ` — ${new Date(i.last_observation).toLocaleString()}` : ''}</p>)}
           {usageHealth.issues.length > 0 && <details className="text-xs"><summary>Accounting issues</summary>
             {usageHealth.issues.map((i,n) => <p key={n}>{i.org}/{i.agent}: {i.code}{i.line ? ` (line ${i.line})` : ''}</p>)}
           </details>}
-          {dailyCosts.length > 0 && <table className="w-full text-sm"><thead><tr><th className="text-left">Day</th><th className="text-left">Cost status</th><th className="text-right">USD</th></tr></thead><tbody>
-            {dailyCosts.map(d => <tr key={d.date}><td>{d.date}</td><td>{d.cost_status.toUpperCase()}</td><td className="text-right">{d.cost === null ? 'UNKNOWN' : `$${d.cost.toFixed(2)}`}</td></tr>)}
+          {dailyCosts.length > 0 && <table className="w-full text-sm"><thead><tr><th className="text-left">Day</th><th className="text-left">Cost status</th><th className="text-right">USD</th><th className="text-right">Reported USD</th></tr></thead><tbody>
+            {dailyCosts.map(d => <tr key={d.date}><td>{d.date}</td><td>{d.cost_status.toUpperCase()}</td><td className="text-right">{d.cost === null ? 'UNKNOWN' : `$${d.cost.toFixed(2)}`}</td><td className="text-right">{d.reported_usd == null ? 'UNKNOWN' : `$${d.reported_usd.toFixed(2)}`}</td></tr>)}
           </tbody></table>}
         </CardContent>
       </Card>

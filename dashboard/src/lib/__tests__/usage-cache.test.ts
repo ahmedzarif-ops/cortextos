@@ -42,6 +42,40 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('usage scan and SQLite cache integration', () => {
+  it('restores reported costUSD on rescan, deduplicates copies, and exposes separate subtotals', () => {
+    const dir = agent('alpha', 'claude'); const file = transcript(dir);
+    const original = { ...claude(10), billing_mode: 'unknown' };
+    write(file, original); costs.syncCosts();
+    const originalId = costs.getCostEntries()[0].event_id;
+    // Simulate a v2 payload cached before reported fields existed.
+    const old = costs.getCostEntries()[0];
+    const { reported_cost_usd, reported_cost_micros, reported_cost_source, ...prior } = old;
+    db.prepare('UPDATE usage_entries_v2 SET payload = ? WHERE event_id = ?').run(JSON.stringify(prior), originalId);
+    expect(costs.getCurrentMonthCost(org).reported_usd).toBeNull();
+    const reported = { ...original, message: { ...original.message, costUSD: 2.50 } };
+    write(file, [JSON.stringify(reported), JSON.stringify(original)].join('\n'));
+    write(transcript(dir, 'copy.jsonl'), reported);
+    expect(costs.syncCosts().inserted).toBe(1);
+    expect(costs.syncCosts().inserted).toBe(0);
+    expect(costs.getCostEntries()).toHaveLength(1);
+    expect(costs.getCostEntries()[0].event_id).not.toBe(originalId);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM usage_entries_v2').get()).toEqual({ n: 2 });
+    const expected = { cost: null, cost_status: 'unknown', estimated_usd: null, billed_usd: null, reported_usd: 2.5, reported_entries: 1, entries: 1 };
+    expect(costs.getCurrentMonthCost(org)).toMatchObject(expected);
+    expect(costs.getDailyCosts(30, org)[0]).toMatchObject(expected);
+    expect(costs.getCostByModel(org)[0]).toMatchObject(expected);
+    expect(costs.getCurrentMonthCost('other-org')).toMatchObject({ reported_usd: null, reported_entries: 0 });
+    // A conflicting copy removes the amount from the active view, not the audit row.
+    write(transcript(dir, 'copy.jsonl'), { ...reported, message: { ...reported.message, costUSD: 3 } });
+    costs.syncCosts();
+    expect(costs.getCurrentMonthCost(org)).toMatchObject({ reported_usd: null, reported_entries: 0, tokens: 110 });
+    expect(costs.getUsageHealth(org).issues.map(i => i.code)).toContain('conflicting_reported_cost');
+  });
+  it('source-reported zero is observed, and does not replace an independent estimate', () => {
+    const dir = agent('alpha', 'claude');
+    write(transcript(dir), { ...claude(10), costUSD: 0 }); costs.syncCosts();
+    expect(costs.getCurrentMonthCost(org)).toMatchObject({ cost: .00075, cost_status: 'estimated', estimated_usd: .00075, reported_usd: 0, reported_entries: 1 });
+  });
   it('repeated sync is idempotent; overlapping sessions and organization filters survive persistence', () => {
     agent('alpha', 'codex-app-server'); agent('beta', 'codex-app-server', 'other-org');
     log('alpha', [codex(0, 0), codex(1, 100), codex(0, 0, { session_id:'s2' }), codex(2, 400, { session_id:'s2' })]);

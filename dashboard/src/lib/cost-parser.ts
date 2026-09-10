@@ -135,22 +135,27 @@ export function getUsageHealth(org?: string): UsageHealth {
 }
 export function getCostEntries(limit = 100, org?: string): CostEntry[] {
   const rows = db.prepare('SELECT payload FROM usage_entries_v2 WHERE active = 1').all() as { payload: string }[];
-  return rows.map(r => JSON.parse(r.payload) as CostEntry).filter(e => !org || e.org === org)
+  return rows.map(r => ({ reported_cost_usd: null, reported_cost_micros: null, reported_cost_source: null, ...JSON.parse(r.payload) }) as CostEntry).filter(e => !org || e.org === org)
     .sort((a,b) => b.timestamp.localeCompare(a.timestamp)).slice(0, limit);
 }
 export interface CostSummary {
   cost: number | null; cost_status: 'estimated' | 'billed' | 'unknown';
   estimated_usd: number | null; billed_usd: number | null; unknown_entries: number;
+  reported_usd: number | null; reported_entries: number;
   entries: number; tokens: number;
 }
 function summarize(entries: CostEntry[]): CostSummary {
   const unknown = entries.filter(e => e.cost_status === 'unknown').length;
   const estimated = entries.filter(e => e.cost_status === 'estimated');
   const billed = entries.filter(e => e.cost_status === 'billed');
+  const reported = entries.filter(e => e.reported_cost_micros !== null);
+  const reportedMicros = reported.reduce((n,e) => n + (e.reported_cost_micros ?? 0), 0);
   const sum = (es: CostEntry[]) => es.length ? es.reduce((n,e) => n+(e.cost_micros ?? 0),0) / 1e6 : null;
   return { cost: !entries.length || unknown || (estimated.length > 0 && billed.length > 0) ? null : sum(entries),
     cost_status: !entries.length || unknown || (estimated.length > 0 && billed.length > 0) ? 'unknown' : estimated.length ? 'estimated' : 'billed',
     estimated_usd: sum(estimated), billed_usd: sum(billed), unknown_entries: unknown,
+    reported_usd: reported.length && Number.isSafeInteger(reportedMicros) ? reportedMicros / 1e6 : null,
+    reported_entries: reported.length,
     entries: entries.length, tokens: entries.reduce((n,e) => n+e.total_tokens,0) };
 }
 function withCoverage(summary: CostSummary, org?: string): CostSummary {

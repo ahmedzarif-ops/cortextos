@@ -15,6 +15,26 @@ interface RecordUsage {
   source: UsageSource; line: number; time: string; model: string; session: string;
   identity: string; request: string | null; turn: string | null;
   counters: number[]; context: PriceContext; cacheKnown: boolean; modelKnown: boolean;
+  reportedMicros: number | null;
+  reportedSource: CostEntry['reported_cost_source'];
+  reportedInvalid: boolean;
+}
+// Transcript observations are not invoices. Validate both historical field
+// locations without coercing strings/null, or picking one side of a conflict.
+function reportedCost(raw: Obj, msg: Obj, bad: (code: string) => void) {
+  const values: { micros: number; source: NonNullable<CostEntry['reported_cost_source']> }[] = [];
+  let invalid = false;
+  for (const [obj, source] of [[msg, 'message.costUSD'], [raw, 'costUSD']] as const) {
+    if (!Object.prototype.hasOwnProperty.call(obj, 'costUSD')) continue;
+    const amount = obj.costUSD;
+    const micros = typeof amount === 'number' ? Math.round(amount * 1e6) : NaN;
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0 || !Number.isSafeInteger(micros)) {
+      invalid = true; bad('invalid_reported_cost');
+    } else values.push({ micros, source });
+  }
+  if (new Set(values.map(v => v.micros)).size > 1) { invalid = true; bad('conflicting_reported_cost'); }
+  return { reportedMicros: invalid ? null : values[0]?.micros ?? null,
+    reportedSource: invalid ? null : values[0]?.source ?? null, reportedInvalid: invalid };
 }
 function issue(r: RecordUsage, code: string): UsageIssue {
   return { source_file: r.source.source_file, agent: r.source.agent, org: r.source.org, code, line: r.line };
@@ -32,7 +52,8 @@ function entry(r: RecordUsage, tokens: number[], previous?: number[]): CostEntry
   const micros = reason || !p ? null : priceMicros(p, input, output, write, read, write1h);
   if (micros === null && !reason) reason = 'price_overflow';
   return {
-    event_id: hash([2, r.source.org, r.source.agent, r.source.runtime, r.session, r.identity, r.model, r.context, r.cacheKnown, r.modelKnown, previous ?? null, r.counters]),
+    event_id: hash([2, r.source.org, r.source.agent, r.source.runtime, r.session, r.identity, r.model, r.context, r.cacheKnown, r.modelKnown, previous ?? null, r.counters,
+      ...(r.reportedMicros === null ? [] : [['reported_costUSD', r.reportedMicros]])]),
     timestamp: r.time, agent: r.source.agent, org: r.source.org, model: r.model,
     provider: r.context.provider ?? 'unknown', billing_mode: r.context.billing_mode ?? 'unknown',
     session_id: r.session, request_id: r.request, turn_id: r.turn,
@@ -40,6 +61,8 @@ function entry(r: RecordUsage, tokens: number[], previous?: number[]): CostEntry
     cache_write_tokens: write + write1h, cache_write_1h_tokens: write1h,
     total_tokens: input + output + read + write + write1h,
     cost_usd: micros === null ? null : micros / 1e6, cost_micros: micros,
+    reported_cost_usd: r.reportedMicros === null ? null : r.reportedMicros / 1e6,
+    reported_cost_micros: r.reportedMicros, reported_cost_source: r.reportedSource,
     cost_status: micros === null ? 'unknown' : 'estimated', unknown_reason: reason,
     price_version: p ? PRICE_VERSION : null, price_source: p?.source ?? null,
     price_context: JSON.stringify(r.context), source_file: r.source.source_file,
@@ -97,7 +120,8 @@ export function normalizeUsage(sources: UsageSource[]): NormalizedUsage {
         turn: source.runtime === 'codex' ? identity : null,
         model: str(source.runtime === 'codex' ? raw.observed_model ?? raw.model : msg.model ?? raw.model) ?? 'unknown',
         modelKnown: source.runtime === 'claude' ? !!str(msg.model) : raw.model_source === 'observed' && !!str(raw.observed_model),
-        counters: c, context, cacheKnown };
+        counters: c, context, cacheKnown,
+        ...(source.runtime === 'claude' ? reportedCost(raw, msg, bad) : { reportedMicros: null, reportedSource: null, reportedInvalid: false }) };
       records.push(r);
     });
   }
@@ -139,7 +163,18 @@ export function normalizeUsage(sources: UsageSource[]): NormalizedUsage {
         if (!sameMeta || (!le && !ge)) { invalid = true; issues.push(issue(r, 'conflicting_message_usage')); break; }
         if (ge) current = { ...r, time: first.time };
       }
-      if (!invalid && current.counters.some(n => n > 0)) entries.push(entry(current, current.counters));
+      if (!invalid && current.counters.some(n => n > 0)) {
+        // Only costs attached to the maximal usage vector describe this entry.
+        // Missing duplicate fields may be filled; a partial earlier amount may not.
+        const maximal = group.filter(r => r.counters.every((n,i) => n === current.counters[i]));
+        const reported = maximal.filter(r => r.reportedMicros !== null);
+        const conflict = new Set(reported.map(r => r.reportedMicros)).size > 1;
+        if (conflict) issues.push(issue(current, 'conflicting_reported_cost'));
+        if (conflict || maximal.some(r => r.reportedInvalid))
+          current = { ...current, reportedMicros: null, reportedSource: null };
+        else if (reported.length) current = { ...reported[0], time: first.time };
+        entries.push(entry(current, current.counters));
+      }
     } else {
       let previous = first;
       const pending: CostEntry[] = [];
