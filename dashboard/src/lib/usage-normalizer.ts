@@ -14,7 +14,7 @@ const timestamp = (v: unknown): string | null => typeof v === 'string' && /^\d{4
 interface RecordUsage {
   source: UsageSource; line: number; time: string; model: string; session: string;
   identity: string; request: string | null; turn: string | null;
-  counters: number[]; context: PriceContext; cacheKnown: boolean;
+  counters: number[]; context: PriceContext; cacheKnown: boolean; modelKnown: boolean;
 }
 function issue(r: RecordUsage, code: string): UsageIssue {
   return { source_file: r.source.source_file, agent: r.source.agent, org: r.source.org, code, line: r.line };
@@ -24,6 +24,7 @@ function entry(r: RecordUsage, tokens: number[], previous?: number[]): CostEntry
   const p = resolvePrice(r.model, r.context);
   let reason: string | null = null;
   if (r.context.billing_mode !== 'api') reason = r.context.billing_mode === 'subscription' ? 'subscription_not_cash_charge' : 'unknown_billing_mode';
+  else if (!r.modelKnown) reason = 'unobserved_model';
   else if (!r.cacheKnown) reason = 'unknown_cache_write_breakdown';
   else if (!p) reason = 'unknown_price_context';
   // This snapshot does not assert historical rate validity.
@@ -31,7 +32,7 @@ function entry(r: RecordUsage, tokens: number[], previous?: number[]): CostEntry
   const micros = reason || !p ? null : priceMicros(p, input, output, write, read, write1h);
   if (micros === null && !reason) reason = 'price_overflow';
   return {
-    event_id: hash([2, r.source.org, r.source.agent, r.source.runtime, r.session, r.identity, r.model, r.context, r.cacheKnown, previous ?? null, r.counters]),
+    event_id: hash([2, r.source.org, r.source.agent, r.source.runtime, r.session, r.identity, r.model, r.context, r.cacheKnown, r.modelKnown, previous ?? null, r.counters]),
     timestamp: r.time, agent: r.source.agent, org: r.source.org, model: r.model,
     provider: r.context.provider ?? 'unknown', billing_mode: r.context.billing_mode ?? 'unknown',
     session_id: r.session, request_id: r.request, turn_id: r.turn,
@@ -71,8 +72,9 @@ export function normalizeUsage(sources: UsageSource[]): NormalizedUsage {
       let counters: unknown[];
       let cacheKnown = true;
       if (source.runtime === 'codex') {
-        counters = [raw.input_tokens, raw.output_tokens, raw.cache_read_tokens ?? 0, raw.cache_write_tokens ?? 0, 0];
-        cacheKnown = raw.cache_write_known === true || raw.model === 'gpt-5-codex';
+        if (raw.counter_scope !== undefined && raw.counter_scope !== 'session_cumulative') { bad('unsupported_counter_scope'); return; }
+        counters = [raw.input_tokens, raw.output_tokens, raw.cache_read_tokens === undefined ? 0 : raw.cache_read_tokens, raw.cache_write_tokens === undefined ? 0 : raw.cache_write_tokens, 0];
+        cacheKnown = raw.cache_write_known === true;
       } else {
         const creation = object(usage.cache_creation);
         const write = usage.cache_creation_input_tokens ?? 0;
@@ -93,7 +95,9 @@ export function normalizeUsage(sources: UsageSource[]): NormalizedUsage {
       };
       const r: RecordUsage = { source, line: i+1, time, session, identity, request,
         turn: source.runtime === 'codex' ? identity : null,
-        model: str(msg.model ?? raw.model) ?? 'unknown', counters: c, context, cacheKnown };
+        model: str(source.runtime === 'codex' ? raw.observed_model ?? raw.model : msg.model ?? raw.model) ?? 'unknown',
+        modelKnown: source.runtime === 'claude' ? !!str(msg.model) : raw.model_source === 'observed' && !!str(raw.observed_model),
+        counters: c, context, cacheKnown };
       records.push(r);
     });
   }

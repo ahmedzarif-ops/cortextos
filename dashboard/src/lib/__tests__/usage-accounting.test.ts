@@ -5,7 +5,7 @@ import { PRICES, resolvePrice, priceMicros, calculateCost } from '../usage-prici
 const api = { provider: 'openai', billing_mode: 'api', service_tier: 'standard', region: 'global' };
 const row = (n: number, input: number, output = 0, extra = {}) => ({
   timestamp: `2026-09-10T00:00:${String(n).padStart(2,'0')}Z`, session_id: 's1', turn_id: 't1', model: 'gpt-5-codex',
-  ...api, input_tokens: input, output_tokens: output, cache_read_tokens: 0, cache_write_tokens: 0, ...extra,
+  ...api, model_source:'observed', observed_model:'gpt-5-codex', cache_write_known:true, input_tokens: input, output_tokens: output, cache_read_tokens: 0, cache_write_tokens: 0, ...extra,
 });
 const source = (rows: unknown[], extra: Partial<UsageSource> = {}): UsageSource => ({
   runtime: 'codex', agent: 'guard', org: 'hyphen-org', source_file: '/fixture/codex-tokens.jsonl',
@@ -17,6 +17,33 @@ const claude = (n: number, id: string, output: number, extra = {}) => ({
 });
 
 describe('usage normalization boundaries', () => {
+  it('joins missing request IDs and request-only blocks without duplicating a message', () => {
+    const initial = claude(0,'m1',1,{requestId:undefined});
+    const linked = claude(1,'m1',10);
+    const requestOnly = claude(2,'m1',20); delete (requestOnly.message as {id?:string}).id;
+    const result = normalizeUsage([source([initial,linked,requestOnly],{runtime:'claude'})]);
+    expect(result.issues).toEqual([]);
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0]).toMatchObject({request_id:'req-m1',output_tokens:20});
+  });
+  it('conflicting request aliases are quarantined, including blocks missing the request ID', () => {
+    const result = normalizeUsage([source([claude(0,'m1',1),claude(1,'m1',2,{requestId:'retry'}),claude(2,'m1',3,{requestId:undefined})],{runtime:'claude'})]);
+    expect(result.entries).toEqual([]);
+    expect(result.issues.every(i=>i.code==='conflicting_request_identity')).toBe(true);
+  });
+  it.each([
+    [{model_source:'configured',observed_model:null},'unobserved_model'],
+    [{model_source:undefined,observed_model:undefined},'unobserved_model'],
+    [{cache_write_known:false},'unknown_cache_write_breakdown'],
+  ])('does not infer missing model or cache evidence: %j', (extra, reason) => {
+    const result = normalizeUsage([source([row(0,0),row(1,100,0,extra)])]);
+    expect(result.entries[0]).toMatchObject({total_tokens:100,cost_usd:null,unknown_reason:reason});
+  });
+  it('rejects an explicitly different counter scope', () => {
+    const result = normalizeUsage([source([row(0,0),row(1,100,0,{counter_scope:'turn_cumulative'})])]);
+    expect(result.entries).toEqual([]);
+    expect(result.issues[0].code).toBe('unsupported_counter_scope');
+  });
   it('subtracts session totals across turn boundaries and removes cache from input', () => {
     const r = normalizeUsage([source([row(0,0), row(1,100,10,{cache_read_tokens:40}), row(2,160,30,{turn_id:'t2',cache_read_tokens:50})])]);
     expect(r.issues).toEqual([]);
@@ -85,7 +112,7 @@ describe('usage normalization boundaries', () => {
     expect(normalizeUsage([source([r],{runtime:'claude'})]).entries[0].cost_status).toBe('unknown');
   });
   it('unknown model is retained with null cost, never a Sonnet price', () => {
-    const e = normalizeUsage([source([row(0,0),row(1,100,0,{model:'gpt-new-unpriced'})])]).entries[0];
+    const e = normalizeUsage([source([row(0,0),row(1,100,0,{model:'gpt-new-unpriced',observed_model:'gpt-new-unpriced'})])]).entries[0];
     expect(e.cost_usd).toBeNull(); expect(e.total_tokens).toBe(100);
   });
   it('historical rows do not silently receive the current rate snapshot', () => {

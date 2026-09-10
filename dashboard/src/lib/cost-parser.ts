@@ -29,7 +29,7 @@ function readSources(runtime?: 'codex' | 'claude') {
     catch (err) {
       const missing = (err as NodeJS.ErrnoException).code === 'ENOENT';
       if (required || !missing) instruments.push({ agent, org, runtime: kind, source_file: file, status: missing ? 'missing' : 'unreadable', last_observation: null });
-      return;
+      return false;
     }
     sources.push({ source_file: file, agent, org, runtime: kind, content });
     const dates = content.split('\n').flatMap(line => {
@@ -46,6 +46,7 @@ function readSources(runtime?: 'codex' | 'claude') {
     if (required) instruments.push({ agent, org, runtime: kind, source_file: file,
       status: !content.trim() ? 'empty' : latest === null ? 'invalid' : now-latest > USAGE_STALE_MS ? 'stale' : 'fresh',
       last_observation: latest === null ? null : new Date(latest).toISOString() });
+    return true;
   }
   for (const { name: agent, org } of getAllAgents()) {
     const agentDir = getAgentDir(agent, org);
@@ -72,7 +73,7 @@ function readSources(runtime?: 'codex' | 'claude') {
       }
     };
     for (const dir of dirs) walk(path.join(projects, dir.replace(/[^a-zA-Z0-9]/g, '-')), 0);
-    for (const file of [...files].sort()) { found = true; read(file, agent, org, 'claude', false); }
+    for (const file of [...files].sort()) { found = true; if (!read(file, agent, org, 'claude', false)) failed = true; }
     if (configured === 'claude') {
       // One instrument per agent, so archived session files do not create a
       // stale-writer alarm when a newer session is producing observations.
@@ -82,7 +83,7 @@ function readSources(runtime?: 'codex' | 'claude') {
       }));
       const latest = dates.length ? dates.reduce((a,b) => Math.max(a,b), 0) : null;
       instruments.push({ agent, org, runtime: 'claude', source_file: agentDir,
-        status: failed ? 'unreadable' : !found ? 'missing' : latest === null ? 'invalid' : now-latest > USAGE_STALE_MS ? 'stale' : 'fresh',
+        status: failed ? 'unreadable' : !found ? 'missing' : own.every(s => !s.content.trim()) ? 'empty' : latest === null ? 'invalid' : now-latest > USAGE_STALE_MS ? 'stale' : 'fresh',
         last_observation: latest === null ? null : new Date(latest).toISOString() });
     }
   }

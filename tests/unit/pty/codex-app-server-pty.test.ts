@@ -1435,23 +1435,14 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
     expect(entry.output_tokens).toBe(800);
     expect(entry.cache_read_tokens).toBe(1234);
     expect(entry.cache_write_tokens).toBe(0);
+    expect(entry).toMatchObject({schema_version:2,counter_scope:'session_cumulative',billing_mode:'unknown',observed_model:'gpt-5.6-sol',model_source:'observed',cache_write_known:false});
     expect(entry.session_id).toBe('thread-9');
     expect(entry.turn_id).toBe('turn-1');
     expect(typeof entry.timestamp).toBe('string');
   });
 
   it('falls back to the CONFIGURED model when the app-server never reports one', () => {
-    // ⛔ THE LEDGER KNEW THE ANSWER AND WROTE 'unknown' BESIDE IT (guard a4dv8, 2026-09-04).
-    // `model` fed the dashboard's resolvePricingKey(), which matches on substrings
-    // (opus / haiku / codex / gpt-5) and DEFAULTS TO SONNET for anything else. So an
-    // app-server that never emitted a model had its Codex traffic priced at Anthropic
-    // rates — while `configured_model`, one line below in the same object, held the
-    // right value the whole time.
-    // Measured on this pricing table: input 1.25 -> 3.00 per M (+140%) and output
-    // 10 -> 15 (+50%) when 'unknown' resolves to sonnet.
-    // ⚠ AND A CORRECTION TO THE MAGNITUDE AS RELAYED: the cacheWrite lever (sonnet 3.75
-    // vs codex 0) CANNOT fire on this path — this entry hardcodes cache_write_tokens: 0.
-    // The overcharge is real; it is input/output/cacheRead, not cache writes.
+    // Keep configured identity for diagnostics; pricing requires an observed model.
     const pty = new CodexAppServerPTY(mockEnv, { model: 'gpt-5-codex-preview' });
     (pty as unknown as { _threadId: string })._threadId = 'thread-9';
     feedTokenUsage(pty, {
@@ -1466,6 +1457,7 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
     // collapse the two fields into one, or an OBSERVED model and an ASSUMED one
     // become indistinguishable, which is the ambiguity this whole ledger exists to avoid.
     expect(entry.configured_model).toBe('gpt-5-codex-preview');
+    expect(entry).toMatchObject({observed_model:null,model_source:'configured',billing_mode:'unknown',cache_write_known:false});
   });
 
   it("reports 'unknown' only when there is NOTHING to fall back to", () => {
@@ -1532,6 +1524,15 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
       expect.stringContaining('"actualModel": "gpt-5.6-terra"'),
       'utf-8',
     );
+  });
+
+  it('preserves missing and malformed counters for parser rejection instead of writing plausible zeros', () => {
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    (pty as unknown as { _threadId: string })._threadId = 'thread-9';
+    (pty as unknown as { handleRpcMessage(message: unknown): void }).handleRpcMessage({
+      method: 'thread/tokenUsage/updated', params: { threadId:'thread-9', turnId:'turn-1', tokenUsage:{total:{inputTokens:'bad',cachedInputTokens:null}} },
+    });
+    expect(lastAppendedEntry()).toMatchObject({input_tokens:'bad',output_tokens:null,cache_read_tokens:null});
   });
 
   it('skips append when turnId is missing', () => {

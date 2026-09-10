@@ -40,13 +40,16 @@ export interface AgentCostData {
   totalTokens: number;
   inputTokens: number;
   outputTokens: number;
-  costUsd: number;
+  costUsd: null;
+  costStatus: 'unknown';
+  legacyReportedCostUsd: number | null;
   models: Record<string, number>;
 }
 
 export interface CostIntelligence {
   fleetTokensToday: number;
-  fleetCostToday: number;
+  fleetCostToday: null;
+  costStatus: 'unknown';
   perAgent: AgentCostData[];
 }
 
@@ -411,24 +414,25 @@ export function getCostIntelligence(org: string): CostIntelligence | null {
 
   const perAgent: AgentCostData[] = [];
   let fleetTokens = 0;
-  let fleetCost = 0;
 
   for (const [agent, data] of Object.entries(costData.agents)) {
     fleetTokens += data.total_tokens || 0;
-    fleetCost += data.cost_usd || 0;
     perAgent.push({
       agent,
       totalTokens: data.total_tokens || 0,
       inputTokens: data.input_tokens || 0,
       outputTokens: data.output_tokens || 0,
-      costUsd: data.cost_usd || 0,
+      costUsd: null,
+      costStatus: 'unknown',
+      legacyReportedCostUsd: typeof data.cost_usd === 'number' && Number.isFinite(data.cost_usd) ? data.cost_usd : null,
       models: data.models || {},
     });
   }
 
   return {
     fleetTokensToday: fleetTokens,
-    fleetCostToday: fleetCost,
+    fleetCostToday: null,
+    costStatus: 'unknown',
     perAgent: perAgent.sort((a, b) => b.totalTokens - a.totalTokens),
   };
 }

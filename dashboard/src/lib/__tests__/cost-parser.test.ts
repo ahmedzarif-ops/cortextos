@@ -45,7 +45,7 @@ function writeCodexJsonl(agent: string, lines: Array<Record<string, unknown>>): 
   const dir = path.join(tmpDir, 'logs', agent);
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, 'codex-tokens.jsonl');
-  lines = lines.map(l => ({ session_id: 'thread-A', turn_id: 'turn-1', provider: 'openai', billing_mode: 'api', service_tier: 'standard', region: 'global', ...l }));
+  lines = lines.map(l => ({ session_id: 'thread-A', turn_id: 'turn-1', model_source:'observed', observed_model:'gpt-5-codex', cache_write_known:true, provider: 'openai', billing_mode: 'api', service_tier: 'standard', region: 'global', ...l }));
   const sessions = [...new Set(lines.map(l => l.session_id))];
   lines = [...sessions.map(session_id => ({ timestamp: '2026-09-10T00:00:00Z', session_id, turn_id: 'baseline', model: 'gpt-5-codex', input_tokens: 0, output_tokens: 0 })), ...lines];
   fs.writeFileSync(filePath, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');

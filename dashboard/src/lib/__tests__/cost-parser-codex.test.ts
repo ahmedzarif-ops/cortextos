@@ -1,20 +1,4 @@
-/**
- * cost-parser-codex.test.ts — codex-only peer to cost-parser.test.ts.
- *
- * Per PR 09 §4 + reject conditions: this suite exercises ONLY codex paths in
- * the dashboard cost-parser (no claude regression coverage). It is the test
- * surface a designer can deliberately break the codex parser against and watch
- * fail without polluting the broader cost-parser suite.
- *
- * Coverage:
- *   - resolvePricingKey returns 'gpt-5-codex' for codex/gpt-5 substring matches
- *   - calculateCost applies codex cache_read pricing distinctly from claude
- *   - parseCodexJsonlFile extracts the codex JSONL schema (flat shape)
- *   - scanCodexLogsCosts walks per-agent dirs and produces CostEntry[]
- *   - syncCosts dedup contract holds when codex + claude entries are merged
- *   - source_file always points at codex-tokens.jsonl (dedup key invariant)
- */
-
+/** Codex-only peer: exact prices, source scanning, disjoint session deltas and malformed inputs. */
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
@@ -57,7 +41,7 @@ function writeCodexLog(agent: string, lines: Array<Record<string, unknown>>): st
   const dir = path.join(tmpDir, 'logs', agent);
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, 'codex-tokens.jsonl');
-  lines = lines.map(l => ({ session_id: 'thread-A', turn_id: 'turn-1', provider: 'openai', billing_mode: 'api', service_tier: 'standard', region: 'global', ...l }));
+  lines = lines.map(l => ({ session_id: 'thread-A', turn_id: 'turn-1', model_source:'observed', observed_model:'gpt-5-codex', cache_write_known:true, provider: 'openai', billing_mode: 'api', service_tier: 'standard', region: 'global', ...l }));
   const sessions = [...new Set(lines.map(l => l.session_id))];
   lines = [...sessions.map(session_id => ({ timestamp: '2026-09-10T00:00:00Z', session_id, turn_id: 'baseline', model: 'gpt-5-codex', input_tokens: 0, output_tokens: 0 })), ...lines];
   fs.writeFileSync(filePath, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
@@ -77,7 +61,7 @@ describe('codex pricing — gpt-5-codex pricing key resolution', () => {
     expect(calculateCost('gpt-5', 1_000_000, 0)).toBeNull();
   });
 
-  it('output token pricing applies $10/M (10× input)', () => {
+  it('output token pricing applies $10/M output', () => {
     const cost = calculateCost('gpt-5-codex', 0, 100_000);
     expect(cost).toBeCloseTo(1.0, 5);
   });
@@ -101,7 +85,7 @@ describe('codex pricing — gpt-5-codex pricing key resolution', () => {
 });
 
 describe('codex JSONL parsing — flat schema shape', () => {
-  it('parses one entry per line and converts to CostEntry shape', () => {
+  it('converts the cumulative change from a zero baseline to disjoint CostEntry buckets', () => {
     writeCodexLog('codex-alpha', [
       {
         timestamp: '2026-09-10T01:00:00Z',
@@ -128,7 +112,7 @@ describe('codex JSONL parsing — flat schema shape', () => {
     expect(e.source_file).toContain('codex-tokens.jsonl');
   });
 
-  it('source_file always points at the codex-tokens.jsonl (dedup key invariant)', () => {
+  it('source_file always points at the codex-tokens.jsonl (source provenance)', () => {
     writeCodexLog('codex-alpha', [
       { timestamp: '2026-09-10T01:00:00Z', model: 'gpt-5-codex', input_tokens: 100, output_tokens: 50 },
     ]);
@@ -141,7 +125,7 @@ describe('codex JSONL parsing — flat schema shape', () => {
     }
   });
 
-  it('multi-turn JSONL emits one CostEntry per turn (no aggregation)', () => {
+  it('multi-turn JSONL emits validated session deltas across turn changes', () => {
     writeCodexLog('codex-alpha', [
       { timestamp: '2026-09-10T01:00:00Z', model: 'gpt-5-codex', input_tokens: 100, output_tokens: 50, turn_id: 'turn-1' },
       { timestamp: '2026-09-10T01:01:00Z', model: 'gpt-5-codex', input_tokens: 200, output_tokens: 75, turn_id: 'turn-2' },
