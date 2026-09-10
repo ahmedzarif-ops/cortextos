@@ -262,10 +262,33 @@ export function findTaskFile(paths: BusPaths, taskId: string): string | null {
  * cross-org fallback from findTaskFile so an assignee in one org can drive
  * the lifecycle of a task filed by an orchestrator in a sibling org.
  */
+/**
+ * Set a task's status, and OPTIONALLY replace its description while keeping the old one.
+ *
+ * ⛔ `description` USED TO BE IMMUTABLE BY DESIGN, AND THAT DESIGN WAS HALF RIGHT.
+ * The rationale on `Task.annotations` is sound — rewriting the description destroys the
+ * record of what was originally asked — but it was enforced by REFUSING TO WRITE, which
+ * keeps the old text by leaving the WRONG text in front of every future reader. Measured
+ * 2026-09-10: a queue item was dispatched as work from a stale title while the correction
+ * sat in its own body, and a task went on asserting a fix direction its author had already
+ * measured dead, because the only route for the correction was an annotation UNDERNEATH
+ * the claim it disproved.
+ *
+ * ⭐ KEEP BOTH. The live field is corrected; the superseded text is appended verbatim to
+ * `description_history` AND written to the append-only audit log. Two independent copies,
+ * because the audit log is documented best-effort and swallows its own write failures —
+ * fine for observability, not enough to be the only home for the text being replaced.
+ *
+ * `undefined` and the empty string are NOT the same argument here: `undefined` means "do
+ * not touch the description" and an empty string is a real (if unwise) replacement, so the
+ * check is on `!== undefined` and never on truthiness. A description revised to `''` under
+ * a truthiness test would silently become a no-op and the caller would be told it worked.
+ */
 export function updateTask(
   paths: BusPaths,
   taskId: string,
   status: TaskStatus,
+  description?: string,
 ): void {
   const filePath = findTaskFile(paths, taskId);
   if (!filePath) {
@@ -275,18 +298,52 @@ export function updateTask(
   }
   let prevStatus: TaskStatus | undefined;
   let assignee: string | undefined;
+  let prevDescription: string | undefined;
   try {
     const content = readFileSync(filePath, 'utf-8');
     const task: Task = JSON.parse(content);
     prevStatus = task.status;
     assignee = task.assigned_to;
+    const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    if (description !== undefined && description !== task.description) {
+      // Identical text is not a revision. Recording one would put a duplicate in the
+      // history and make a re-run of the same command look like a second correction.
+      prevDescription = task.description;
+      task.description_history = [
+        ...(task.description_history ?? []),
+        { ts: now, agent: assignee || 'unknown', description: prevDescription },
+      ];
+      task.description = description;
+    }
     task.status = status;
-    task.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    task.updated_at = now;
     atomicWriteSync(filePath, JSON.stringify(task));
   } catch (err) {
     throw new Error(`Task ${taskId} update failed: ${err}`);
   }
   appendTaskAudit(paths, taskId, { event: 'update', agent: assignee || 'unknown', from: prevStatus, to: status });
+  if (prevDescription !== undefined) {
+    // A SECOND entry, not a field on the first: the status transition and the description
+    // revision are different events that happen to share a command, and `lastTransition`
+    // reads `from`/`to`. This one carries neither, so it is an annotation-shaped line and
+    // is skipped by that reader exactly like any other note — it must not read as activity.
+    //
+    // `event: 'update'` with a note, NOT a new `'describe'` member on the union. That is the
+    // convention `annotateTask` already established for a non-transition event, and widening
+    // the union would change what an existing hook `event_pattern.type` matches — a
+    // behavioural change to an unrelated subsystem, smuggled in by a type edit. The note is
+    // where the discrimination belongs.
+    //
+    // The PREVIOUS TEXT IS NOT REPEATED HERE. It is already stored verbatim on the record;
+    // duplicating a long description into an append-only log on every revision grows the log
+    // without adding a fact, and the length is what a reader needs to know something
+    // substantial was replaced.
+    appendTaskAudit(paths, taskId, {
+      event: 'update',
+      agent: assignee || 'unknown',
+      note: `description replaced (${prevDescription.length} chars); previous text preserved in description_history`,
+    });
+  }
 }
 
 /**
@@ -306,9 +363,25 @@ export function updateTask(
  * the reader sees a task with no note and concludes there was nothing to say.
  * So this writes into the task record itself and THROWS on failure.
  *
- * `description` is never modified. A correction is a new fact about the task, not
- * a replacement for what was originally asked; keeping both is what lets a reader
- * see that the ask changed, and when, and who changed it.
+ * `description` is never modified BY THIS FUNCTION. A correction is a new fact about
+ * the task, not a replacement for what was originally asked; keeping both is what lets
+ * a reader see that the ask changed, and when, and who changed it.
+ *
+ * ⛔ THE RATIONALE ABOVE IS UNCHANGED. HOW IT IS ENFORCED IS NOT — updated 2026-09-10.
+ * It used to be enforced by there being NO route to revise a description at all, and that
+ * kept the original by leaving the WRONG text in front of every future reader: a
+ * correction could only ever sit UNDERNEATH the claim it disproved. Measured the same day,
+ * twice — a queue item dispatched as work from a stale title whose own body held the
+ * correction, and a task still asserting a fix direction its author had measured dead.
+ *
+ * ⭐ `update-task --desc` NOW REVISES IT, AND HONOURS "KEEPING BOTH" LITERALLY: the
+ * superseded text is appended verbatim to `Task.description_history`. Both copies exist;
+ * the one a reader hits first is the current one.
+ *
+ * ⇒ SO CHOOSE BY WHAT THE TEXT IS, not by which route is available. An ANNOTATION is a new
+ * fact arriving later ("this shipped", "blocked on X"). A REVISION is for a description
+ * that is now FALSE and would mislead anyone who acts on it. Annotating a falsehood leaves
+ * it standing; revising a merely-superseded note throws away context that was still true.
  */
 export function annotateTask(
   paths: BusPaths,

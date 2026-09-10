@@ -70,6 +70,22 @@ export interface TaskAnnotation {
   text: string;
 }
 
+/** One superseded `description`, kept verbatim when `update-task --desc` replaces it. */
+export interface TaskDescriptionRevision {
+  /** When the replacement happened (ISO 8601, UTC). */
+  ts: string;
+  /** Who replaced it. */
+  agent: string;
+  /**
+   * The description as it stood BEFORE this revision, byte-for-byte.
+   *
+   * ⛔ THE PREVIOUS TEXT, NOT THE NEW ONE. Storing the new text here would make the
+   * history a duplicate of the live field and lose the only copy of the old — the exact
+   * destruction this array exists to prevent, in a shape that still looks like a record.
+   */
+  description: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -95,9 +111,34 @@ export interface Task {
    * Separate from `description` ON PURPOSE: the description is what the task was
    * ASSIGNED as, and rewriting it destroys the record of what was originally asked.
    * A correction is a new fact about the task, not a replacement for the old one —
-   * so annotations accumulate and `description` stays byte-identical forever.
+   * so annotations accumulate and the description is never edited in place.
+   *
+   * ⚠ `description` IS NO LONGER "byte-identical forever" — that clause was true when
+   * written and is not now. `update-task --desc` revises it, and `description_history`
+   * below is what preserves the rationale above: the original is KEPT, not overwritten.
    */
   annotations?: TaskAnnotation[];
+  /**
+   * Every previous `description`, oldest first, appended on each `--desc` revision.
+   *
+   * WHY REVISION EXISTS AT ALL, given the rationale on `annotations`. Both halves are
+   * true at once: keeping the original is right, AND a live `description` that asserts
+   * something since disproved is a DISPATCHABLE FALSEHOOD. Measured 2026-09-10 — a queue
+   * item was dispatched as work from a stale title while the correction sat in its body,
+   * and separately a task shipped a fix direction its own author had already measured
+   * dead, because the only route for the correction was an annotation UNDERNEATH the
+   * claim it disproved. A reader hits the description first.
+   *
+   * ⭐ SO THE FIX IS NOT "ALLOW OVERWRITE" AND NOT "REFUSE TO WRITE" — IT IS KEEP BOTH.
+   * The field a reader hits is current; the record of what was originally asked is
+   * intact and queryable. The previous behaviour honoured "keeping both" by refusing to
+   * write, which kept the old text by leaving the wrong text in front of it.
+   *
+   * Optional, so every task file written before this existed stays valid and reads back
+   * unchanged — a task that has never been revised carries no key at all, not an empty
+   * array, so its serialised form is byte-identical to what it was.
+   */
+  description_history?: TaskDescriptionRevision[];
   /** Linked deliverables (files saved via `cortextos bus save-output`). */
   outputs?: TaskOutput[];
   /**
