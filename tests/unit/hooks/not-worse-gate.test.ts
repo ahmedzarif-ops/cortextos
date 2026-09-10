@@ -123,7 +123,17 @@ beforeAll(() => {
   );
   git(['add', '-A'], fixture);
   git(['commit', '-qm', 'fixture base'], fixture);
-});
+  // ⛔ EXPLICIT SETUP TIMEOUT — guard round-2 follow-up (1). This hook does a REAL `npm install`
+  // against the registry. Vitest's default hook timeout is 10s, which is not a budget for a network
+  // install: on a fresh HOME with a cold npm cache it overran and vitest reported ALL 15 CASES
+  // PENDING. ⭐ THAT IS THE FAILURE SHAPE WORTH NAMING — a setup timeout does not fail one arm, it
+  // silently un-runs the whole file, and "15 pending" reads like a skip decision rather than an
+  // infrastructure timeout. The reviewer's ad-hoc `--testTimeout 120000` made it pass and fixed
+  // NOTHING, because the next runner on a cold cache gets the default again.
+  // 300s is chosen against the observed cost, not guessed: the install is the only network step and
+  // a warm cache completes it in seconds, so this is headroom for a cold one, not an expected cost.
+  // It is a CEILING, never a target — if this hook ever approaches it, the fixture is wrong, not slow.
+}, 300_000);
 
 afterAll(() => {
   if (fixture) rmSync(fixture, { recursive: true, force: true });
@@ -513,6 +523,52 @@ describe('not-worse gate: prerequisites and populations', () => {
       expect(r.out, 'the populations check fired on two identical suites').not.toContain('populations-differ');
       expect(r.status, 'a new failure was admitted').not.toBe(0);
       expect(r.out).toContain('NEW FAILURES NOT PRESENT ON');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 180_000);
+
+  // ⛔ CASE 14b — THE ACCEPTANCE COMPANION. (guard round-2 follow-up (3).)
+  // Case 14 below proves the M-only diff reaches the LOOSE arm, but it adds a green AND a red, so it
+  // ends in a REFUSAL. That pins the new-failure arm and leaves the case a contributor actually hits
+  // completely unpinned: an M-only diff that ADDS A PASSING TEST WHILE A PRE-EXISTING FAILURE STAYS
+  // RED. That acceptance was asserted only OUTSIDE this suite, so nothing in-suite stopped a change
+  // from turning it into a refusal.
+  // ⭐ THE ASYMMETRY IS THE REASON THIS ARM EXISTS: every other M-only arm ends in `status != 0`, so a
+  // regression that made the gate refuse EVERYTHING would keep them all green. An arm whose expected
+  // outcome is rc=0 is the only one that can fail in the direction that costs a contributor a push.
+  it('case 14b M-ONLY ACCEPTANCE: adding a green test while an inherited failure stays red is ACCEPTED', () => {
+    const { root, bare, work } = remoteFixture();
+    try {
+      writePrereq(work, true);
+      // Baseline carries a RED test. It is inherited, so it must not count against the head.
+      writeFileSync(
+        join(work, 'gate.test.ts'),
+        FIXTURES.green +
+          "import { it as itR, expect as eR } from 'vitest'; itR('inherited red',()=>eR(1).toBe(2));\n",
+      );
+      git(['add', '-A'], work);
+      git(['commit', '-qm', 'baseline: one green, one inherited red'], work);
+      git(['remote', 'add', 'origin', bare], work);
+      git(['push', '-q', 'origin', 'main'], work);
+
+      // MODIFY the same file: +1 green, and the SAME red stays red. Nothing new fails.
+      writeFileSync(
+        join(work, 'gate.test.ts'),
+        FIXTURES.green +
+          "import { it as itR, expect as eR } from 'vitest'; itR('inherited red',()=>eR(1).toBe(2));\n" +
+          "import { it as it2, expect as e2 } from 'vitest'; it2('added green',()=>e2(1).toBe(1));\n",
+      );
+      git(['add', '-A'], work);
+      git(['commit', '-qm', 'modify the test file: +1 green, inherited red untouched'], work);
+
+      const r = gateOn(work);
+      // The diff MODIFIES a test path, so the strict populations arm must not apply.
+      expect(r.out).toContain('test_paths_changed=1');
+      expect(r.out, 'a modified test file was treated as "no test paths changed"').not.toContain('populations-differ');
+      // ⛔ THE POINT OF THE ARM: no NEW failure, so the gate must ACCEPT.
+      expect(r.out, 'an inherited failure was reported as new').not.toContain('NEW FAILURES NOT PRESENT ON');
+      expect(r.status, 'a not-worse push carrying an inherited red was refused').toBe(0);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
