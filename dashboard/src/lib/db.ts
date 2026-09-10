@@ -117,6 +117,17 @@ function initializeSchema(db: Database.Database): void {
       source_file TEXT
     );
 
+    -- V2 is a separate cache generation. Legacy rows are retained, never repriced.
+    CREATE TABLE IF NOT EXISTS usage_entries_v2 (
+      event_id TEXT PRIMARY KEY,
+      payload TEXT NOT NULL,
+      active INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE TABLE IF NOT EXISTS usage_health_v2 (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      payload TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE NOT NULL,

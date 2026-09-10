@@ -1,467 +1,192 @@
-// cortextOS Dashboard - Cost parser
-// Parses ~/.claude/projects/*.jsonl AND <ctxRoot>/logs/<agent>/codex-tokens.jsonl
-// for token usage and calculates cost.
-
+// Observe-only usage accounting. Source logs are authoritative; SQLite is a cache.
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { db } from '@/lib/db';
-import { CTX_ROOT, getAgentsForOrg, getAllAgents, getOrgs } from '@/lib/config';
+import { CTX_ROOT, getAllAgents, getAgentDir } from '@/lib/config';
 import type { CostEntry } from '@/lib/types';
+import { normalizeUsage, type UsageSource, type UsageIssue } from './usage-normalizer';
+export { calculateCost } from './usage-pricing';
 
-// -- Pricing per million tokens --
-
-interface ModelPricing {
-  inputPerMillion: number;
-  outputPerMillion: number;
-  cacheWritePerMillion: number;
-  cacheReadPerMillion: number;
+export const USAGE_STALE_MS = 6 * 60 * 60 * 1000;
+export interface UsageInstrument {
+  agent: string; org: string; runtime: string; source_file: string;
+  status: 'fresh' | 'stale' | 'missing' | 'unreadable' | 'empty' | 'invalid' | 'unsupported';
+  last_observation: string | null;
 }
-
-const MODEL_PRICING: Record<string, ModelPricing> = {
-  opus: { inputPerMillion: 15, outputPerMillion: 75, cacheWritePerMillion: 3.75, cacheReadPerMillion: 1.50 },
-  sonnet: { inputPerMillion: 3, outputPerMillion: 15, cacheWritePerMillion: 3.75, cacheReadPerMillion: 0.30 },
-  haiku: { inputPerMillion: 0.8, outputPerMillion: 4, cacheWritePerMillion: 1.00, cacheReadPerMillion: 0.08 },
-  // gpt-5-codex: OpenAI list pricing as of 2026-01. cache write n/a (no separate
-  // write cost on cached input). Update when codex pricing changes upstream.
-  'gpt-5-codex': { inputPerMillion: 1.25, outputPerMillion: 10, cacheWritePerMillion: 0, cacheReadPerMillion: 0.125 },
-};
-
-/**
- * Resolve model name to pricing key. Matches substrings: claude variants map to
- * opus/sonnet/haiku; gpt-5-codex (and bare "codex" / "gpt-5" variants) map to
- * gpt-5-codex pricing rather than silently defaulting to sonnet.
- */
-function resolvePricingKey(model: string): string {
-  const lower = model.toLowerCase();
-  if (lower.includes('opus')) return 'opus';
-  if (lower.includes('haiku')) return 'haiku';
-  if (lower.includes('codex') || lower.includes('gpt-5')) return 'gpt-5-codex';
-  // Default to sonnet for all other claude models
-  return 'sonnet';
+export interface UsageHealth {
+  observed_at: string | null; stale_after_ms: number; instruments: UsageInstrument[];
+  issues: UsageIssue[]; legacy_rows_excluded: number; state: 'observed' | 'unknown';
 }
-
-/**
- * Calculate USD cost for a single entry, including cache token pricing.
- */
-export function calculateCost(
-  model: string,
-  inputTokens: number,
-  outputTokens: number,
-  cacheWriteTokens: number = 0,
-  cacheReadTokens: number = 0,
-): number {
-  const key = resolvePricingKey(model);
-  const pricing = MODEL_PRICING[key] ?? MODEL_PRICING.sonnet;
-  const inputCost = (inputTokens / 1_000_000) * pricing.inputPerMillion;
-  const outputCost = (outputTokens / 1_000_000) * pricing.outputPerMillion;
-  const cacheWriteCost = (cacheWriteTokens / 1_000_000) * pricing.cacheWritePerMillion;
-  const cacheReadCost = (cacheReadTokens / 1_000_000) * pricing.cacheReadPerMillion;
-  return Math.round((inputCost + outputCost + cacheWriteCost + cacheReadCost) * 1_000_000) / 1_000_000;
-}
-
-// ---------------------------------------------------------------------------
-// JSONL parsing
-// ---------------------------------------------------------------------------
-
-interface RawTokenEntry {
-  model?: string;
-  input_tokens?: number;
-  output_tokens?: number;
-  usage?: {
-    input_tokens?: number;
-    output_tokens?: number;
-    cache_creation_input_tokens?: number;
-    cache_read_input_tokens?: number;
-  };
-  timestamp?: string;
-  costUSD?: number;
-}
-
-/**
- * Parse a single JSONL file and return cost entries.
- */
-function parseJsonlFile(filePath: string, agent: string, org: string): CostEntry[] {
-  const entries: CostEntry[] = [];
-
-  let content: string;
-  try {
-    content = fs.readFileSync(filePath, 'utf-8');
-  } catch {
-    return [];
-  }
-
-  const lines = content.split('\n').filter((l) => l.trim());
-
-  for (const line of lines) {
-    try {
-      const parsed = JSON.parse(line);
-      // Claude Code JSONL nests data in .message, plain JSONL has it at top level
-      const raw: RawTokenEntry = parsed.message ?? parsed;
-      const model = raw.model;
-      if (!model) continue;
-
-      const inputTokens = raw.input_tokens ?? raw.usage?.input_tokens ?? 0;
-      const outputTokens = raw.output_tokens ?? raw.usage?.output_tokens ?? 0;
-      const cacheWriteTokens = raw.usage?.cache_creation_input_tokens ?? 0;
-      const cacheReadTokens = raw.usage?.cache_read_input_tokens ?? 0;
-      if (inputTokens === 0 && outputTokens === 0 && cacheWriteTokens === 0 && cacheReadTokens === 0) continue;
-
-      const totalTokens = inputTokens + outputTokens + cacheWriteTokens + cacheReadTokens;
-      const costUsd = raw.costUSD ?? calculateCost(model, inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens);
-      const timestamp = parsed.timestamp ?? raw.timestamp ?? new Date().toISOString();
-
-      entries.push({
-        timestamp,
-        agent,
-        org,
-        model,
-        input_tokens: inputTokens,
-        output_tokens: outputTokens,
-        total_tokens: totalTokens,
-        cost_usd: costUsd,
-        source_file: filePath,
-      });
-    } catch {
-      // Skip malformed lines
+function readSources(runtime?: 'codex' | 'claude') {
+  const sources: UsageSource[] = [];
+  const instruments: UsageInstrument[] = [];
+  const now = Date.now();
+  const projects = path.join(os.homedir(), '.claude', 'projects');
+  function read(file: string, agent: string, org: string, kind: 'codex' | 'claude', required: boolean) {
+    let content: string;
+    try { content = fs.readFileSync(file, 'utf8'); }
+    catch (err) {
+      const missing = (err as NodeJS.ErrnoException).code === 'ENOENT';
+      if (required || !missing) instruments.push({ agent, org, runtime: kind, source_file: file, status: missing ? 'missing' : 'unreadable', last_observation: null });
+      return;
     }
+    sources.push({ source_file: file, agent, org, runtime: kind, content });
+    const dates = content.split('\n').flatMap(line => {
+      try {
+        const v = JSON.parse(line);
+        if (kind === 'claude' && !(v.message?.usage || v.usage)) return [];
+        const time = typeof v.timestamp === 'string' && /(?:Z|[+-]\d\d:\d\d)$/.test(v.timestamp) ? Date.parse(v.timestamp) : NaN;
+        return Number.isFinite(time) && time <= now ? [time] : [];
+      } catch { return []; }
+    });
+    const latest = dates.length ? dates.reduce((a,b) => Math.max(a,b), 0) : null;
+    // Historical files on a different runtime remain readable history, not a
+    // failing writer. Freshness is an observation age, never a diagnosis.
+    if (required) instruments.push({ agent, org, runtime: kind, source_file: file,
+      status: !content.trim() ? 'empty' : latest === null ? 'invalid' : now-latest > USAGE_STALE_MS ? 'stale' : 'fresh',
+      last_observation: latest === null ? null : new Date(latest).toISOString() });
   }
-
-  return entries;
-}
-
-// ---------------------------------------------------------------------------
-// Directory scanning
-// ---------------------------------------------------------------------------
-
-/**
- * Scan ~/.claude/projects/ for JSONL files and parse them.
- * Scoped to the current instance's orgs to prevent cross-instance data bleed.
- */
-export function scanClaudeProjectsCosts(): CostEntry[] {
-  const claudeDir = path.join(os.homedir(), '.claude', 'projects');
-  if (!fs.existsSync(claudeDir)) return [];
-
-  const allowedOrgs = new Set(getOrgs());
-
-  // Also allow the instance ID itself as a fallback org label
-  const instanceId = process.env.CTX_INSTANCE_ID ?? 'default';
-  allowedOrgs.add(instanceId);
-
-  const allEntries: CostEntry[] = [];
-
-  try {
-    const projectDirs = fs.readdirSync(claudeDir, { withFileTypes: true });
-
-    for (const dir of projectDirs) {
-      if (!dir.isDirectory()) continue;
-      // Only scan directories that contain 'agents' in the path (skip unrelated projects)
-      if (!dir.name.includes('agents')) continue;
-
-      const parts = dir.name.split('-');
-      const orgsIdx = parts.indexOf('orgs');
-      const orgName = orgsIdx >= 0 && orgsIdx < parts.length - 1
-        ? parts[orgsIdx + 1]
-        : 'default';
-
-      // Scope to current instance's orgs — prevent cross-instance bleed
-      if (!allowedOrgs.has(orgName)) continue;
-
-      const projectPath = path.join(claudeDir, dir.name);
-      const files = fs.readdirSync(projectPath).filter((f) => f.endsWith('.jsonl'));
-
-      for (const file of files) {
-        const filePath = path.join(projectPath, file);
-        // Extract agent name from encoded dir path (e.g. "-Users-...-agents-devbot" -> "devbot")
-        const agentsIdx = parts.lastIndexOf('agents');
-        const agentName = agentsIdx >= 0 && agentsIdx < parts.length - 1
-          ? parts.slice(agentsIdx + 1).join('-')
-          : dir.name;
-        const entries = parseJsonlFile(filePath, agentName, orgName);
-        allEntries.push(...entries);
+  for (const { name: agent, org } of getAllAgents()) {
+    const agentDir = getAgentDir(agent, org);
+    let configured = 'unknown';
+    try { configured = JSON.parse(fs.readFileSync(path.join(agentDir, 'config.json'), 'utf8')).runtime ?? 'claude'; } catch { /* explicit unknown below */ }
+    if (!runtime && !['claude', 'codex-app-server'].includes(configured)) instruments.push({ agent, org, runtime: configured, source_file: agentDir, status: 'unsupported', last_observation: null });
+    if (!runtime || runtime === 'codex') read(path.join(CTX_ROOT, 'logs', agent, 'codex-tokens.jsonl'), agent, org, 'codex', configured === 'codex-app-server');
+    if (runtime === 'codex') continue;
+    // Match the complete encoded agent path, preserving org/agent hyphens and
+    // instance boundaries. realpath handles the framework/state symlink layout.
+    const dirs = new Set([agentDir]);
+    try { dirs.add(fs.realpathSync(agentDir)); } catch { /* missing is surfaced below */ }
+    let found = false;
+    let failed = false;
+    const files = new Set<string>();
+    const walk = (dir: string, depth: number) => {
+      let children: fs.Dirent[];
+      try { children = fs.readdirSync(dir, { withFileTypes: true }); }
+      catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ENOENT') failed = true; return; }
+      for (const child of children) {
+        const file = path.join(dir, child.name);
+        if (child.isFile() && child.name.endsWith('.jsonl')) files.add(file);
+        else if (child.isDirectory() && depth < 3) walk(file, depth+1);
       }
-    }
-  } catch {
-    // Directory scan failed
-  }
-
-  return allEntries;
-}
-
-// ---------------------------------------------------------------------------
-// Codex JSONL scanning
-// ---------------------------------------------------------------------------
-
-interface CodexTokenEntry {
-  timestamp?: string;
-  model?: string;
-  input_tokens?: number;
-  output_tokens?: number;
-  cache_read_tokens?: number;
-  cache_write_tokens?: number;
-  session_id?: string;
-  turn_id?: string;
-}
-
-/**
- * Parse a single codex-tokens.jsonl file. Schema differs from claude JSONL:
- * one record per `thread/tokenUsage/updated` notification with the shape
- * written by CodexAppServerPTY.appendCodexTokenLog.
- */
-function parseCodexJsonlFile(filePath: string, agent: string, org: string): CostEntry[] {
-  const entries: CostEntry[] = [];
-  let content: string;
-  try {
-    content = fs.readFileSync(filePath, 'utf-8');
-  } catch {
-    return [];
-  }
-
-  const lines = content.split('\n').filter((l) => l.trim());
-  for (const line of lines) {
-    try {
-      const raw = JSON.parse(line) as CodexTokenEntry;
-      const model = raw.model;
-      if (!model) continue;
-
-      const inputTokens = raw.input_tokens ?? 0;
-      const outputTokens = raw.output_tokens ?? 0;
-      const cacheReadTokens = raw.cache_read_tokens ?? 0;
-      const cacheWriteTokens = raw.cache_write_tokens ?? 0;
-      if (inputTokens === 0 && outputTokens === 0 && cacheReadTokens === 0 && cacheWriteTokens === 0) continue;
-
-      const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
-      const costUsd = calculateCost(model, inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens);
-      const timestamp = raw.timestamp ?? new Date().toISOString();
-
-      entries.push({
-        timestamp,
-        agent,
-        org,
-        model,
-        input_tokens: inputTokens,
-        output_tokens: outputTokens,
-        total_tokens: totalTokens,
-        cost_usd: costUsd,
-        source_file: filePath,
-      });
-    } catch {
-      // Skip malformed lines
+    };
+    for (const dir of dirs) walk(path.join(projects, dir.replace(/[^a-zA-Z0-9]/g, '-')), 0);
+    for (const file of [...files].sort()) { found = true; read(file, agent, org, 'claude', false); }
+    if (configured === 'claude') {
+      // One instrument per agent, so archived session files do not create a
+      // stale-writer alarm when a newer session is producing observations.
+      const own = sources.filter(s => s.agent === agent && s.org === org && s.runtime === 'claude');
+      const dates = own.flatMap(s => s.content.split('\n').flatMap(l => {
+        try { const r = JSON.parse(l); const t = Date.parse(r.timestamp); return r.message?.usage && /(?:Z|[+-]\d\d:\d\d)$/.test(r.timestamp) && Number.isFinite(t) && t <= now ? [t] : []; } catch { return []; }
+      }));
+      const latest = dates.length ? dates.reduce((a,b) => Math.max(a,b), 0) : null;
+      instruments.push({ agent, org, runtime: 'claude', source_file: agentDir,
+        status: failed ? 'unreadable' : !found ? 'missing' : latest === null ? 'invalid' : now-latest > USAGE_STALE_MS ? 'stale' : 'fresh',
+        last_observation: latest === null ? null : new Date(latest).toISOString() });
     }
   }
-
-  return entries;
+  return { sources, instruments };
 }
+export function scanClaudeProjectsCosts(): CostEntry[] { return normalizeUsage(readSources('claude').sources).entries; }
+export function scanCodexLogsCosts(): CostEntry[] { return normalizeUsage(readSources('codex').sources).entries; }
 
-/**
- * Scan <ctxRoot>/logs/<agent>/codex-tokens.jsonl for every enabled agent.
- * Codex token logs are written per-agent under the instance's logs dir, not
- * under ~/.claude/projects, so we walk the agent registry instead of a single
- * root directory.
- */
-export function scanCodexLogsCosts(): CostEntry[] {
-  const allEntries: CostEntry[] = [];
-
-  // Build (agent, org) pairs. Prefer getAllAgents so we pick up CLI-created
-  // agents; fall back to per-org enumeration if it returns nothing.
-  const pairs: Array<{ name: string; org: string }> = getAllAgents();
-  if (pairs.length === 0) {
-    for (const org of getOrgs()) {
-      for (const name of getAgentsForOrg(org)) pairs.push({ name, org });
-    }
-  }
-
-  for (const { name, org } of pairs) {
-    const filePath = path.join(CTX_ROOT, 'logs', name, 'codex-tokens.jsonl');
-    if (!fs.existsSync(filePath)) continue;
-    allEntries.push(...parseCodexJsonlFile(filePath, name, org));
-  }
-
-  return allEntries;
-}
-
-// ---------------------------------------------------------------------------
-// SQLite persistence
-// ---------------------------------------------------------------------------
-
-const INSERT_COST = db.prepare(`
-  INSERT OR IGNORE INTO cost_entries (timestamp, agent, org, model, input_tokens, output_tokens, total_tokens, cost_usd, source_file)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`);
-
-/**
- * Persist cost entries to SQLite. Skips duplicates via INSERT OR IGNORE.
- */
+// Additive cache generation: retain v1 rows for audit, never include their
+// timestamp-only duplicates or guessed prices in the corrected totals.
+const INSERT = db.prepare('INSERT OR IGNORE INTO usage_entries_v2 (event_id, payload, active) VALUES (?, ?, 1)');
+const ACTIVATE = db.prepare('UPDATE usage_entries_v2 SET active = 1 WHERE event_id = ?');
 export function persistCostEntries(entries: CostEntry[]): number {
-  let inserted = 0;
-  const insertMany = db.transaction((items: CostEntry[]) => {
-    for (const e of items) {
-      const result = INSERT_COST.run(
-        e.timestamp,
-        e.agent,
-        e.org,
-        e.model,
-        e.input_tokens,
-        e.output_tokens,
-        e.total_tokens,
-        e.cost_usd,
-        e.source_file ?? null,
-      );
-      if (result.changes > 0) inserted++;
+  return db.transaction(() => {
+    let inserted = 0;
+    for (const e of entries) {
+      inserted += INSERT.run(e.event_id, JSON.stringify(e)).changes;
+      ACTIVATE.run(e.event_id);
     }
-  });
-  insertMany(entries);
-  return inserted;
+    return inserted;
+  })();
 }
-
-/**
- * Full sync: scan claude JSONL + codex JSONL files and persist to DB.
- *
- * Dedup contract: an (agent, model, source_file, timestamp) tuple from claude
- * scan and codex scan should never collide in practice, because codex turns are
- * only ever written to <ctxRoot>/logs/<agent>/codex-tokens.jsonl while claude
- * turns are only ever written under ~/.claude/projects/. We still build the
- * union explicitly so any future overlap (e.g., a codex agent that also gets
- * scanned through claude's projects dir) does not double-count.
- */
-export function syncCosts(): { scanned: number; inserted: number } {
-  const claudeEntries = scanClaudeProjectsCosts();
-  const codexEntries = scanCodexLogsCosts();
-
-  const seen = new Set<string>();
-  const merged: CostEntry[] = [];
-  for (const entry of [...claudeEntries, ...codexEntries]) {
-    const key = `${entry.source_file ?? ''}|${entry.timestamp}|${entry.model}|${entry.agent}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    merged.push(entry);
-  }
-
-  const inserted = merged.length > 0 ? persistCostEntries(merged) : 0;
-  return { scanned: merged.length, inserted };
+export function syncCosts(): { scanned: number; inserted: number; health: UsageHealth } {
+  const { sources, instruments } = readSources();
+  const result = normalizeUsage(sources);
+  const health: UsageHealth = { observed_at: new Date().toISOString(), stale_after_ms: USAGE_STALE_MS,
+    instruments, issues: result.issues, legacy_rows_excluded: legacyCount(), state: instruments.length ? 'observed' : 'unknown' };
+  const inserted = db.transaction(() => {
+    db.prepare('UPDATE usage_entries_v2 SET active = 0').run();
+    const n = persistCostEntries(result.entries);
+    db.prepare('INSERT OR REPLACE INTO usage_health_v2 (id, payload) VALUES (1, ?)').run(JSON.stringify(health));
+    return n;
+  })();
+  return { scanned: result.entries.length, inserted, health };
 }
-
-// ---------------------------------------------------------------------------
-// Query helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Get cost entries from the DB, newest first.
- */
-export function getCostEntries(
-  limit: number = 100,
-  org?: string,
-): CostEntry[] {
-  const conditions: string[] = [];
-  const params: (string | number)[] = [];
-
-  if (org) {
-    conditions.push('org = ?');
-    params.push(org);
-  }
-
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-
-  try {
-    return db
-      .prepare(
-        `SELECT id, timestamp, agent, org, model, input_tokens, output_tokens, total_tokens, cost_usd, source_file
-         FROM cost_entries ${where}
-         ORDER BY timestamp DESC
-         LIMIT ?`,
-      )
-      .all(...params, limit) as CostEntry[];
-  } catch {
-    return [];
-  }
+function legacyCount(org?: string): number {
+  const query = db.prepare('SELECT COUNT(*) AS n FROM cost_entries' + (org ? ' WHERE org = ?' : ''));
+  return ((org ? query.get(org) : query.get()) as { n: number }).n;
 }
-
-/**
- * Get daily cost totals for the last N days.
- */
-export function getDailyCosts(days: number = 30): Array<{ date: string; cost: number }> {
-  try {
-    const rows = db
-      .prepare(
-        `SELECT DATE(timestamp) as date, SUM(cost_usd) as cost
-         FROM cost_entries
-         WHERE timestamp >= DATE('now', ?)
-         GROUP BY DATE(timestamp)
-         ORDER BY date ASC`,
-      )
-      .all(`-${days} days`) as Array<{ date: string; cost: number }>;
-    return rows;
-  } catch {
-    return [];
-  }
+export function getUsageHealth(org?: string): UsageHealth {
+  const row = db.prepare('SELECT payload FROM usage_health_v2 WHERE id = 1').get() as { payload: string } | undefined;
+  const health: UsageHealth = row ? JSON.parse(row.payload) : { observed_at: null, stale_after_ms: USAGE_STALE_MS, instruments: [], issues: [], legacy_rows_excluded: legacyCount(), state: 'unknown' };
+  health.legacy_rows_excluded = legacyCount(org);
+  if (org) { health.instruments = health.instruments.filter(i => i.org === org); health.issues = health.issues.filter(i => i.org === org); }
+  if (!health.observed_at || Date.now() - Date.parse(health.observed_at) > USAGE_STALE_MS) health.state = 'unknown';
+  if (!health.instruments.length) health.state = 'unknown';
+  for (const i of health.instruments) if (i.status === 'fresh' && i.last_observation && Date.now() - Date.parse(i.last_observation) > USAGE_STALE_MS) i.status = 'stale';
+  return health;
 }
-
-/**
- * Get cost totals grouped by model.
- */
-export function getCostByModel(): Array<{ model: string; cost: number; tokens: number }> {
-  try {
-    return db
-      .prepare(
-        `SELECT model, SUM(cost_usd) as cost, SUM(total_tokens) as tokens
-         FROM cost_entries
-         GROUP BY model
-         ORDER BY cost DESC`,
-      )
-      .all() as Array<{ model: string; cost: number; tokens: number }>;
-  } catch {
-    return [];
-  }
+export function getCostEntries(limit = 100, org?: string): CostEntry[] {
+  const rows = db.prepare('SELECT payload FROM usage_entries_v2 WHERE active = 1').all() as { payload: string }[];
+  return rows.map(r => JSON.parse(r.payload) as CostEntry).filter(e => !org || e.org === org)
+    .sort((a,b) => b.timestamp.localeCompare(a.timestamp)).slice(0, limit);
 }
-
-/**
- * Get daily cost breakdown by model for stacked bar chart.
- */
-export function getDailyCostByModel(
-  days: number = 30,
-): Array<Record<string, unknown>> {
-  try {
-    const rows = db
-      .prepare(
-        `SELECT DATE(timestamp) as date, model, SUM(cost_usd) as cost
-         FROM cost_entries
-         WHERE timestamp >= DATE('now', ?)
-         GROUP BY DATE(timestamp), model
-         ORDER BY date ASC`,
-      )
-      .all(`-${days} days`) as Array<{ date: string; model: string; cost: number }>;
-
-    // Pivot: group by date, model names as keys
-    const dateMap = new Map<string, Record<string, unknown>>();
-    for (const row of rows) {
-      if (!dateMap.has(row.date)) {
-        dateMap.set(row.date, { date: row.date });
-      }
-      const entry = dateMap.get(row.date)!;
-      const key = resolvePricingKey(row.model);
-      entry[key] = ((entry[key] as number) ?? 0) + row.cost;
-    }
-
-    return Array.from(dateMap.values());
-  } catch {
-    return [];
-  }
+export interface CostSummary {
+  cost: number | null; cost_status: 'estimated' | 'billed' | 'unknown';
+  estimated_usd: number | null; billed_usd: number | null; unknown_entries: number;
+  entries: number; tokens: number;
 }
-
-/**
- * Get total cost for the current month, useful for projections.
- */
-export function getCurrentMonthCost(): number {
-  try {
-    const row = db
-      .prepare(
-        `SELECT SUM(cost_usd) as total
-         FROM cost_entries
-         WHERE timestamp >= DATE('now', 'start of month')`,
-      )
-      .get() as { total: number | null } | undefined;
-    return row?.total ?? 0;
-  } catch {
-    return 0;
+function summarize(entries: CostEntry[]): CostSummary {
+  const unknown = entries.filter(e => e.cost_status === 'unknown').length;
+  const estimated = entries.filter(e => e.cost_status === 'estimated');
+  const billed = entries.filter(e => e.cost_status === 'billed');
+  const sum = (es: CostEntry[]) => es.length ? es.reduce((n,e) => n+(e.cost_micros ?? 0),0) / 1e6 : null;
+  return { cost: !entries.length || unknown || (estimated.length > 0 && billed.length > 0) ? null : sum(entries),
+    cost_status: !entries.length || unknown || (estimated.length > 0 && billed.length > 0) ? 'unknown' : estimated.length ? 'estimated' : 'billed',
+    estimated_usd: sum(estimated), billed_usd: sum(billed), unknown_entries: unknown,
+    entries: entries.length, tokens: entries.reduce((n,e) => n+e.total_tokens,0) };
+}
+function withCoverage(summary: CostSummary, org?: string): CostSummary {
+  const health = getUsageHealth(org);
+  if (health.state === 'unknown' || health.issues.length || health.instruments.some(i => i.status !== 'fresh'))
+    return { ...summary, cost: null, cost_status: 'unknown' };
+  return summary;
+}
+export function getDailyCosts(days = 30, org?: string): Array<CostSummary & { date: string }> {
+  const cutoff = Date.now() - days * 86400000;
+  const groups = new Map<string, CostEntry[]>();
+  for (const e of getCostEntries(Infinity, org)) {
+    if (Date.parse(e.timestamp) < cutoff) continue;
+    const date = e.timestamp.slice(0,10); groups.set(date, [...(groups.get(date) ?? []),e]);
   }
+  return [...groups].sort(([a],[b]) => a.localeCompare(b)).map(([date, entries]) => ({ date, ...withCoverage(summarize(entries), org) }));
+}
+export function getCostByModel(org?: string): Array<CostSummary & { model: string }> {
+  const groups = new Map<string, CostEntry[]>();
+  for (const e of getCostEntries(Infinity, org)) groups.set(e.model, [...(groups.get(e.model) ?? []),e]);
+  return [...groups].map(([model, entries]) => ({ model, ...withCoverage(summarize(entries), org) }));
+}
+export function getDailyCostByModel(days = 30, org?: string): Array<Record<string, unknown>> {
+  const groups = new Map<string, Map<string, CostEntry[]>>();
+  for (const e of getCostEntries(Infinity, org)) {
+    if (Date.parse(e.timestamp) < Date.now() - days*86400000) continue;
+    const date = e.timestamp.slice(0,10);
+    const models = groups.get(date) ?? new Map<string, CostEntry[]>();
+    models.set(e.model, [...(models.get(e.model) ?? []), e]); groups.set(date, models);
+  }
+  return [...groups].sort(([a],[b]) => a.localeCompare(b)).map(([date, models]) => ({ date,
+    ...Object.fromEntries([...models].map(([model, entries]) => [model, withCoverage(summarize(entries), org).cost])),
+    cost_status: withCoverage(summarize([...models.values()].flat()), org).cost_status,
+    unknown_entries: [...models.values()].flat().filter(e => e.cost_status === 'unknown').length,
+  }));
+}
+export function getCurrentMonthCost(org?: string): CostSummary {
+  const month = new Date().toISOString().slice(0,7);
+  return withCoverage(summarize(getCostEntries(Infinity, org).filter(e => e.timestamp.startsWith(month))), org);
 }

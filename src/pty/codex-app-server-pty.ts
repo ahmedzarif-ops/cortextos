@@ -1100,13 +1100,13 @@ export class CodexAppServerPTY {
 
     const entry = {
       timestamp: new Date().toISOString(),
-      // ⛔ FALL BACK TO THE CONFIGURED MODEL BEFORE 'unknown' (guard a4dv8, 2026-09-04).
-      // 'unknown' is not inert: the dashboard's resolvePricingKey() matches on substrings
-      // (opus / haiku / codex / gpt-5) and DEFAULTS TO SONNET for everything else, so an
-      // app-server that never reports its model got Codex traffic priced at Anthropic rates.
-      // configured_model below already carries this value — the ledger knew the answer and
-      // wrote 'unknown' beside it. Keep 'unknown' as the last resort: it must still be
-      // possible to say we do not know, rather than to guess.
+      // Configured identity is a fallback, never evidence of the observed model.
+      schema_version: 2,
+      counter_scope: 'session_cumulative',
+      billing_mode: 'unknown', // Auth/plan cannot be inferred from token notifications.
+      observed_model: this._actualModel || null,
+      model_source: this._actualModel ? 'observed' : 'configured',
+      cache_write_known: false, // The current app-server TokenUsage does not expose writes.
       model: this._actualModel || this._config.model || 'unknown',
       configured_model: this._config.model || null,
       model_provider: this._modelProvider,

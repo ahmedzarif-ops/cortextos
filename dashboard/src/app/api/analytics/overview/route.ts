@@ -1,7 +1,8 @@
 import { NextRequest } from 'next/server';
 import { getTaskThroughput, getAgentEffectiveness } from '@/lib/data/analytics';
-import { getDailyCosts, getDailyCostByModel, getCurrentMonthCost, getCostByModel } from '@/lib/cost-parser';
+import { getDailyCosts, getDailyCostByModel, getCurrentMonthCost, getCostByModel, getUsageHealth } from '@/lib/cost-parser';
 import { getFleetHealth } from '@/lib/data/reports';
+import { syncCostsLazy } from '@/lib/sync';
 import { getAllAgents } from '@/lib/config';
 
 export const dynamic = 'force-dynamic';
@@ -38,17 +39,21 @@ export async function GET(request: NextRequest) {
     // Agent effectiveness
     const effectiveness = getAgentEffectiveness(org);
 
+    // Refresh the same observable cache used by the dashboard.
+    syncCostsLazy();
     // Cost data
-    const dailyCosts = getDailyCosts(days);
-    const dailyCostByModel = getDailyCostByModel(days);
-    const currentMonthCost = getCurrentMonthCost();
-    const costByModel = getCostByModel();
+    const dailyCosts = getDailyCosts(days, org);
+    const dailyCostByModel = getDailyCostByModel(days, org);
+    const currentMonthCost = getCurrentMonthCost(org);
+    const costByModel = getCostByModel(org);
 
     return Response.json({
       fleetHealth,
       throughput,
       effectiveness,
       costs: {
+        schemaVersion: 2,
+        health: getUsageHealth(org),
         daily: dailyCosts,
         byModel: dailyCostByModel,
         currentMonth: currentMonthCost,
