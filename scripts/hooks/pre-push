@@ -67,6 +67,23 @@ for _leaked_ctx_var in $(compgen -v CTX_ || true); do
 done
 unset _leaked_ctx_var
 
+# ⛔ UNSETTING CTX_ROOT IS NOT THE SAME AS SANDBOXING IT, AND THE LOOP ABOVE ONLY DOES THE FIRST.
+#
+# src/bus/crons.ts:43 and :376 read `process.env.CTX_ROOT ?? process.cwd()` DIRECTLY — they never
+# call resolveEnv, so the homedir default in src/utils/env.ts is irrelevant to that write path.
+# With CTX_ROOT unset the fallback is the REPOSITORY, and the suite writes
+# `.cortextOS/state/agents/<name>/` into the tree being pushed.
+#
+# MEASURED 2026-09-10: a hook-form run (every CTX_* stripped) left the live state root untouched —
+# rows 1485 before and after, `find <live roots> -mmin -6` showing only daemon traffic — and created
+# `<repo>/.cortextOS/state/agents/test-agent`. The cortextos checkout already carried alice/, bob/
+# and test-agent/ from earlier pushes, the oldest dated three weeks back.
+#
+# ⭐ So the strip loop moved the damage rather than removing it, and it moved it somewhere quiet.
+# A throwaway root removes the occasion instead: neither branch of that `??` can reach anything
+# anyone is using.
+export CTX_ROOT="$(mktemp -d)"
+
 # THE BAR IS "NOT WORSE", NOT "GREEN".
 #
 # This hook used to require a fully green suite. `main` has not been green for some time, so the gate

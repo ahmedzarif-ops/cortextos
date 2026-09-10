@@ -85,3 +85,10 @@ leakage-fixture.json
 #   node orgs/<org>/agents/city/build/build-internal.mjs
 # The /city page renders an explicit "not built" state when it is absent.
 dashboard/public/agent-city/
+
+# Test residue: src/bus/crons.ts writes .cortextOS/state/agents/<name>/ to CTX_ROOT, and
+# falls back to process.cwd() when it is unset — so a suite run from the repo root lands
+# state directories here. The tests now run with a throwaway CTX_ROOT (package.json,
+# scripts/hooks/pre-push), but an older checkout or a hand-run still produces this, and it
+# showed in `git status` as an untracked `.cortextOS/` one `git add -A` away from a commit.
+.cortextOS/

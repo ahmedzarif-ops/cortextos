@@ -35,7 +35,7 @@ import { strict as assert } from 'node:assert';
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LEAKED_GIT_ENV, scrubLeakedGitEnv } from '../../helpers/git-env';
@@ -289,16 +289,24 @@ describe('cortextOS CTX_* env must not leak from the pre-push hook into the test
     // — an accusation against the CONTROL for what was a parsing bug in the READER. A count
     // that arrives as NaN is not a small number, and a message that blames the subject for the
     // instrument's defect is the most expensive kind of red.
-    const run = (script: string) => {
-      const out = execFileSync('bash', ['-c', `${script}\nenv | grep -c '^CTX_' || true`], {
+    // ⚡ THIS NOW READS THE LINES, NOT A COUNT — because the prelude's job changed and a count
+    // can no longer express it. The prelude used to leave ZERO CTX_ variables; it now leaves
+    // exactly one, CTX_ROOT, pointing at a throwaway directory it creates.
+    // ⛔ THAT IS A STRONGER PROPERTY, NOT A RELAXED ONE, and the reason is measured: unsetting
+    // CTX_ROOT does not sandbox the suite, it REDIRECTS it — src/bus/crons.ts reads
+    // `process.env.CTX_ROOT ?? process.cwd()` directly, so with the variable gone the suite
+    // writes `.cortextOS/state/agents/` into the repository being pushed. Measured 2026-09-10:
+    // a hook-form run created `<repo>/.cortextOS/state/agents/test-agent`, and this checkout
+    // already carried alice/, bob/ and test-agent/ from earlier pushes.
+    // ⇒ So the assertion below is: no INHERITED value survives, and the one variable that does
+    // survive is a sandbox. A count of 0 would now mean the sandbox was NOT set up.
+    const run = (script: string): string[] => {
+      const out = execFileSync('bash', ['-c', `${script}\nenv | grep '^CTX_' || true`], {
         cwd: REPO,
         encoding: 'utf-8',
         env: { ...process.env, ...planted },
-      }).trim();
-      const last = out.split('\n').pop() ?? '';
-      const n = Number(last);
-      expect(Number.isFinite(n), `could not read a count from the prelude output: ${JSON.stringify(out)}`).toBe(true);
-      return n;
+      });
+      return out.split('\n').filter((l) => /^CTX_[A-Za-z0-9_]*=/.test(l));
     };
 
     // NEGATIVE CONTROL — the planted variables must actually REACH a bash child. Without this,
@@ -313,14 +321,37 @@ describe('cortextOS CTX_* env must not leak from the pre-push hook into the test
     // variable survived. A control that is derived from the subject stops working exactly when
     // the subject changes shape, which is the moment you need it.
     expect(
-      run(':'),
+      run(':').length,
       'the planted CTX_ variables did not reach a bash child at all — the control cannot fail, so the assertion below proves nothing',
     ).toBeGreaterThanOrEqual(Object.keys(planted).length);
 
-    // THE ASSERTION.
+    // THE ASSERTION, in three parts.
+    const after = run(prelude);
+
+    // (1) NOTHING INHERITED SURVIVES — including the name no list in this repo contains.
+    for (const [name, value] of Object.entries(planted)) {
+      expect(
+        after.some((l) => l === `${name}=${value}`),
+        `${name} survived the hook prelude with its inherited value — a push from a live agent shell will hand the suite that seat's real directories`,
+      ).toBe(false);
+    }
     expect(
-      run(prelude),
-      'CTX_* survived the hook prelude — a push from a live agent shell will hand the suite that seat\'s real directories',
-    ).toBe(0);
+      after.some((l) => l.startsWith('CTX_FUTURE_VARIABLE_NOBODY_HARDCODED=')),
+      'a CTX_ variable no list hardcodes survived — the scrub has regressed to an enumeration',
+    ).toBe(false);
+
+    // (2) EXACTLY ONE REMAINS, AND IT IS THE ONE THE PRELUDE CREATES ON PURPOSE.
+    expect(after.map((l) => l.split('=')[0]).sort()).toEqual(['CTX_ROOT']);
+
+    // (3) AND IT IS A SANDBOX, NOT THE INHERITED VALUE AND NOT THE LIVE TREE. Without this the
+    // arm would pass if the prelude simply failed to unset CTX_ROOT.
+    const rootLine = after.find((l) => l.startsWith('CTX_ROOT=')) ?? '';
+    const rootValue = rootLine.slice('CTX_ROOT='.length);
+    expect(rootValue, 'the prelude left CTX_ROOT at its inherited value').not.toBe(planted.CTX_ROOT);
+    expect(rootValue.length, 'the prelude left CTX_ROOT empty, which reads as unset').toBeGreaterThan(0);
+    expect(
+      rootValue.startsWith(join(homedir(), '.cortextos')),
+      'the prelude pointed CTX_ROOT inside the live state tree',
+    ).toBe(false);
   });
 });
