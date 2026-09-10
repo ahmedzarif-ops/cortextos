@@ -16,6 +16,11 @@ export default defineConfig({
     },
   },
   test: {
+    // Refuses the whole run when any of the measured contaminating CTX_* variables is
+    // set in the launching environment. Both lanes, deliberately: an isolation
+    // precondition that holds for one lane and not the other is a gate with a
+    // documented way around it.
+    globalSetup: ['./tests/require-isolated-env.ts'],
     globals: true,
     testTimeout: 10000,
     include: [
