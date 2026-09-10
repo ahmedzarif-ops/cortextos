@@ -63,13 +63,24 @@ export default function setup(): void {
   const shown = set.map((name) => `    ${name}=${process.env[name]}`).join('\n');
   const flags = set.map((name) => `-u ${name}`).join(' ');
 
-  // ⛔ NAME THE LANE THAT WAS REFUSED, NOT THE DEFAULT ONE. (guard, reviewing this file:
-  // the slow lane's refusal used to print `npm test`, which re-runs the FAST lane — a fix
-  // instruction pointing at a different suite than the one that just refused. A remedy that
-  // silently changes the subject is worse than no remedy: it produces a green from a lane
-  // nobody asked about, and the reader takes it as the refusal being cleared.)
-  const usedConfig = process.argv.find((a) => a.includes('vitest.slow.config'));
-  const command = usedConfig ? 'npm run test:slow' : 'npm test';
+  // ⛔ PREFIX THE ORIGINAL INVOCATION; DO NOT NAME A LANE. (guard, two rounds on this file.)
+  // Round 1: the refusal hardcoded `npm test`, so the SLOW lane told the operator to re-run the
+  // FAST one. Round 2 killed my fix too: naming the lane still DROPS THE ARGUMENTS — an operator
+  // who ran `npm run test:slow -- some.test.ts -t 'name' --reporter=json` was handed a command
+  // that reruns the whole lane and loses the filter, the -t and the reporter.
+  // ⭐ The general defect both rounds share: I was RECONSTRUCTING the command from a guess about
+  // how it was invoked, when the invocation is right there in argv. A reconstruction can only ever
+  // be as good as the cases its author thought of, and it fails silently — the printed command is
+  // always plausible. Echo what was actually run instead.
+  // ⛔ AND QUOTE WHAT NEEDS QUOTING. `-t 'my test name'` arrives in argv as ONE element with a
+  // space in it; echoed bare it becomes two arguments and the printed command silently does
+  // something different from the one that refused — a copy-paste remedy that is wrong in exactly
+  // the case the operator was narrowing a run.
+  const shellQuote = (a: string): string =>
+    /^[A-Za-z0-9_@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`;
+  const invoked = process.argv.slice(1).filter((a) => a !== '--');
+  const original =
+    invoked.length > 0 ? `node ${invoked.map(shellQuote).join(' ')}` : 'npm test';
 
   throw new Error(
     '\n\n⛔ SUITE NOT ISOLATED — this is a SETUP failure, not a test failure.\n' +
@@ -81,7 +92,12 @@ export default function setup(): void {
       '  Re-run with the variable removed. ⛔ THE FLAG MUST BE LITERAL: an unquoted\n' +
       '  shell variable holding flags arrives as ONE argument and applies none of them,\n' +
       '  so a strip list built in a variable silently does nothing.\n' +
-      `    env ${flags} ${command}\n\n` +
+      '  Prefix your ORIGINAL command — this is the invocation this process actually received,\n' +
+      '  so your file filter, -t and reporter flags are preserved:\n' +
+      `    env ${flags} ${original}\n\n` +
+      '  Or, for a whole lane:\n' +
+      `    env ${flags} npm test          # fast lane\n` +
+      `    env ${flags} npm run test:slow # slow lane\n\n` +
       '  To confirm the strip actually took effect, assert INSIDE the same invocation:\n' +
       `    env ${flags} printenv ${set[0]}   # must exit 1\n\n` +
       '  A test that needs one of these set points it at its own fixture in-process,\n' +
