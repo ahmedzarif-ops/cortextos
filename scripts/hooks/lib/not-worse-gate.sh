@@ -243,6 +243,24 @@ assert_nameable() {
   fi
 }
 
+# ⛔ ONE EXTRACTION, TWO READERS. The predicate below COUNTS these rows and the diagnostic
+# PRINTS them, and they must be the same rows — not "the same query written twice".
+# ⭐ WHY THIS IS A FUNCTION AND NOT A WIDER CHARACTER CLASS: the two call sites HAD DRIFTED,
+# and drift is what a duplicated query does. #46 fixed the PREDICATE to count any test-path
+# change (A/M/D/R) after guard measured a MODIFY-only diff hitting the strict arm and refusing
+# a valid push — and left the DIAGNOSTIC filtering `^[AD]`. So on a modify-only diff the gate
+# printed:
+#     ⚠ FINDING: collected totals differ (X vs Y) and the diff touches 1 test path(s):
+#     <nothing>
+# A finding with a colon and an empty list, which reads as THE PREDICATE being wrong when the
+# PRINTER is wrong. Measured on real shas (a commit modifying one .test.ts, adding none):
+# predicate 1, diagnostic rows 0.
+# ⇒ A widened class would fix today's disagreement and leave tomorrow's possible. One function
+# cannot disagree with itself.
+changed_test_paths() {                     # $1=base sha, $2=head sha; emits "<status>\t<path>"
+  git diff --name-status "$1" "$2" -- '*.test.ts' '*.test.tsx' 2>/dev/null
+}
+
 # ---- functions end ----
 # ⛔ THAT MARKER IS AN INTERFACE, NOT A COMMENT. tests/unit/hooks/not-worse-gate.test.ts sources only
 # the definitions above it, by cutting this file at this exact line. It used to cut at the PROSE
@@ -385,7 +403,7 @@ say "baseline has $BASE_COUNT failing entr(ies)"
 # ⭐ That is the false positive this block's own comment warns about, committed in the block that
 # warns about it: a gate that refuses ordinary work teaches the bypass. The strict arm is only
 # honest when the diff touches NO test path at all.
-TEST_FILE_DELTA="$(git diff --name-status "$BASE_SHA" "$HEAD_SHA" -- '*.test.ts' '*.test.tsx' 2>/dev/null | grep -c .)"
+TEST_FILE_DELTA="$(changed_test_paths "$BASE_SHA" "$HEAD_SHA" | grep -c .)"
 say "collected_base=${BASE_COLLECTED:-unknown} collected_head=${HEAD_COLLECTED:-unknown} test_paths_changed=${TEST_FILE_DELTA:-0}"
 if [ -z "$BASE_COLLECTED" ] || [ -z "$HEAD_COLLECTED" ]; then
   die "populations-unknown — could not read a collected-test total from one of the runs. FAILING CLOSED: a comparison whose population sizes are unknown is not a comparison."
@@ -395,7 +413,7 @@ if [ "${TEST_FILE_DELTA:-0}" -eq 0 ] && [ "$BASE_COLLECTED" != "$HEAD_COLLECTED"
 fi
 if [ "${TEST_FILE_DELTA:-0}" -gt 0 ] && [ "$BASE_COLLECTED" != "$HEAD_COLLECTED" ]; then
   say "⚠ FINDING: collected totals differ ($BASE_COLLECTED vs $HEAD_COLLECTED) and the diff touches $TEST_FILE_DELTA test path(s):"
-  git diff --name-status "$BASE_SHA" "$HEAD_SHA" -- '*.test.ts' '*.test.tsx' 2>/dev/null | grep -E '^[AD]' | sed 's/^/    /'
+  changed_test_paths "$BASE_SHA" "$HEAD_SHA" | sed 's/^/    /'
   say "   Not a refusal: a file count cannot bound a test count. The prerequisite control on both sides is what refuses an under-prepared tree."
 fi
 
