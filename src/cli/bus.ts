@@ -365,7 +365,12 @@ busCommand
   // status the validator rejects (or omits one it accepts) is a documentation defect with the
   // same cause as the validator copy: a second hand-written list.
   .argument('<status>', `New status (${TASK_STATUSES.join(', ')})`)
-  .action((id: string, status: string) => {
+  // ⛔ REPLACES the live description and KEEPS the old one in `description_history`.
+  // Omitting the flag leaves the description untouched; passing it with the SAME text is a
+  // no-op and records no revision. There is deliberately no way to erase the history: the
+  // whole point of the flag is that the correction and the original both survive.
+  .option('--desc <text>', 'Replace the description, preserving the previous text in description_history')
+  .action((id: string, status: string, opts: { desc?: string }) => {
     // ⛔ NOT A SECOND HAND-WRITTEN LIST. `TASK_STATUSES` is the runtime tuple `TaskStatus` is
     // DERIVED from, so the set this validator accepts and the set the compiler enforces cannot
     // drift. This line used to repeat the five literals, which a sixth status would have left
@@ -389,7 +394,7 @@ busCommand
       }
     }
 
-    updateTask(paths, id, status as TaskStatus);
+    updateTask(paths, id, status as TaskStatus, opts.desc);
     console.log(`Updated ${id} -> ${status}`);
   });
 
