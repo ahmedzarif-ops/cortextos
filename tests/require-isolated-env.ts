@@ -63,6 +63,14 @@ export default function setup(): void {
   const shown = set.map((name) => `    ${name}=${process.env[name]}`).join('\n');
   const flags = set.map((name) => `-u ${name}`).join(' ');
 
+  // ⛔ NAME THE LANE THAT WAS REFUSED, NOT THE DEFAULT ONE. (guard, reviewing this file:
+  // the slow lane's refusal used to print `npm test`, which re-runs the FAST lane — a fix
+  // instruction pointing at a different suite than the one that just refused. A remedy that
+  // silently changes the subject is worse than no remedy: it produces a green from a lane
+  // nobody asked about, and the reader takes it as the refusal being cleared.)
+  const usedConfig = process.argv.find((a) => a.includes('vitest.slow.config'));
+  const command = usedConfig ? 'npm run test:slow' : 'npm test';
+
   throw new Error(
     '\n\n⛔ SUITE NOT ISOLATED — this is a SETUP failure, not a test failure.\n' +
       'No test ran. Nothing below says anything about the code under review.\n\n' +
@@ -73,7 +81,7 @@ export default function setup(): void {
       '  Re-run with the variable removed. ⛔ THE FLAG MUST BE LITERAL: an unquoted\n' +
       '  shell variable holding flags arrives as ONE argument and applies none of them,\n' +
       '  so a strip list built in a variable silently does nothing.\n' +
-      `    env ${flags} npm test\n\n` +
+      `    env ${flags} ${command}\n\n` +
       '  To confirm the strip actually took effect, assert INSIDE the same invocation:\n' +
       `    env ${flags} printenv ${set[0]}   # must exit 1\n\n` +
       '  A test that needs one of these set points it at its own fixture in-process,\n' +
