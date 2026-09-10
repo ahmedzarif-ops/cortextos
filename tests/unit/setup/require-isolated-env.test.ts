@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, normalize, sep } from 'node:path';
 import setup, {
@@ -240,13 +240,68 @@ describe('setup() — end to end, against the operator\'s real live root', () =>
     }
   };
 
-  it('REFUSES a missing tail under a symlink that points into ~/.cortextos', () => {
-    const link = join(SP, 'live-link');
-    symlinkSync(liveStateRoot(), link);
-    withRoot(join(link, 'never-created', 'deeper'), () => {
-      expect(() => setup()).toThrow(/points INSIDE the live state tree/);
+  /**
+   * ⛔⛔ THIS ARM WAS THE ONE CI FAILURE AT 68829c36, AND THE DEFECT WAS THE ARM, NOT THE GUARD.
+   * It symlinked to `liveStateRoot()` and asserted the INSIDE reason. On a CI runner there is no
+   * `~/.cortextos`, so that symlink is DANGLING — and the guard refused by the
+   * `cannot be resolved` branch instead. **Fail-closed either way, which is why nothing unsafe
+   * shipped; but the assertion named a mechanism the runner cannot exercise.**
+   * ⭐ AND IT WAS KILLED BY THE REFUSAL I ADDED TWO COMMITS EARLIER: the fixture became an instance
+   * of the thing under test. A test whose SETUP depends on the operator's environment is a test
+   * that measures the operator, not the code.
+   * ⇒ The mechanism is now carried by a HERMETIC arm that always runs (a fake HOME under mktemp),
+   * the CI shape is asserted as its own arm, and the real-live-root arm survives only as an
+   * operator belt, CONDITIONED and named as such. The gate is the hermetic arm; the conditioned one
+   * is not an exemption inside a gate.
+   */
+  const withHome = (home: string, fn: () => void) => {
+    const savedHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      fn();
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+    }
+  };
+
+  it('HERMETIC: a missing tail under a symlink into a FAKE ~/.cortextos gives the INSIDE reason', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ctxroot-home-'));
+    mkdirSync(join(home, '.cortextos', 'default'), { recursive: true });
+    const link = join(SP, 'fake-live-link');
+    symlinkSync(join(home, '.cortextos', 'default'), link);
+    withHome(home, () => {
+      // proves the fixture really is the root the guard will compare against
+      expect(liveStateRoot()).toBe(realpathSync.native(join(home, '.cortextos')));
+      withRoot(join(link, 'never-created', 'deeper'), () => {
+        expect(() => setup()).toThrow(/points INSIDE the live state tree/);
+      });
     });
+    rmSync(home, { recursive: true, force: true });
   });
+
+  it('HERMETIC: the CI shape — no live root at all — still refuses, by the unresolvable branch', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ctxroot-nohome-'));
+    const link = join(SP, 'absent-live-link');
+    symlinkSync(join(home, '.cortextos'), link); // deliberately dangling: no live tree exists
+    withHome(home, () => {
+      withRoot(join(link, 'x'), () => {
+        expect(() => setup()).toThrow(/cannot be resolved/);
+      });
+    });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it.runIf(existsSync(join(homedir(), '.cortextos')))(
+    'OPERATOR BELT (runs only where ~/.cortextos exists): the REAL live root is refused too',
+    () => {
+      const link = join(SP, 'live-link');
+      symlinkSync(liveStateRoot(), link);
+      withRoot(join(link, 'never-created', 'deeper'), () => {
+        expect(() => setup()).toThrow(/points INSIDE the live state tree/);
+      });
+    },
+  );
 
   it('REFUSES an unset root', () => {
     withRoot(undefined, () => expect(() => setup()).toThrow(/CTX_ROOT is NOT SET/));
