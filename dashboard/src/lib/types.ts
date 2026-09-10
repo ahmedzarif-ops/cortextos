@@ -161,16 +161,33 @@ export interface GoalsFile {
 // -- Cost Types --
 
 export interface CostEntry {
-  id?: number;
+  event_id: string;
   timestamp: string;
   agent: string;
   org: string;
   model: string;
+  provider: string;
+  billing_mode: string;
+  session_id: string;
+  request_id: string | null;
+  turn_id: string | null;
   input_tokens: number;
   output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cache_write_1h_tokens: number;
   total_tokens: number;
-  cost_usd: number;
-  source_file?: string;
+  cost_usd: number | null;
+  cost_micros: number | null;
+  reported_cost_usd: number | null;
+  reported_cost_micros: number | null;
+  reported_cost_source: 'message.costUSD' | 'costUSD' | null;
+  cost_status: 'estimated' | 'billed' | 'unknown';
+  unknown_reason: string | null;
+  price_version: string | null;
+  price_source: string | null;
+  price_context: string;
+  source_file: string;
 }
 
 // -- User / Auth Types --

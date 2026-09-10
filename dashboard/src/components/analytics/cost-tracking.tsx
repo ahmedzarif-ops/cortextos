@@ -2,8 +2,8 @@
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { AreaChart } from '@/components/charts/area-chart';
-import { BarChart } from '@/components/charts/bar-chart';
-import { CHART_GOLD, MODEL_COLORS } from '@/components/charts/chart-theme';
+import { CHART_GOLD } from '@/components/charts/chart-theme';
+import type { CostSummary, UsageHealth } from '@/lib/cost-parser';
 
 interface PlanUsageData {
   session: { used_pct: number; resets: string };
@@ -27,10 +27,9 @@ interface CodexUsageData {
 }
 
 interface CostTrackingProps {
-  dailyCosts: Array<{ date: string; cost: number }>;
-  dailyCostByModel: Array<Record<string, unknown>>;
-  currentMonthCost: number;
-  projectedMonthly: number;
+  dailyCosts: Array<CostSummary & { date: string }>;
+  currentMonthCost: CostSummary;
+  usageHealth: UsageHealth;
   planUsage?: PlanUsageData | null;
   usageHistory?: UsageHistoryPoint[];
   codexUsage?: CodexUsageData | null;
@@ -54,18 +53,12 @@ function UsageBar({ pct, label, sublabel }: { pct: number; label: string; sublab
 
 export function CostTracking({
   dailyCosts,
-  dailyCostByModel,
   currentMonthCost,
-  projectedMonthly,
+  usageHealth,
   planUsage,
   usageHistory,
   codexUsage,
 }: CostTrackingProps) {
-  const modelKeys = Object.keys(MODEL_COLORS); // opus, sonnet, haiku
-  const modelColorValues = modelKeys.map((k) => MODEL_COLORS[k]);
-
-  const hasPlanData = !!planUsage || (usageHistory && usageHistory.length > 0);
-
   return (
     <div className="space-y-6">
       {/* Plan Usage — primary metric, always shown */}
@@ -190,63 +183,31 @@ export function CostTracking({
         </Card>
       ) : null}
 
-      {/* API Cost Tracking (secondary — for users on pay-per-token) */}
-      {!hasPlanData && dailyCosts.length > 0 && (
-        <>
-          {currentMonthCost > 0 && (
-            <div className="grid grid-cols-2 gap-3">
-              <Card>
-                <CardContent className="pt-4 pb-3">
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide">Month to Date</p>
-                  <p className="text-2xl font-semibold mt-1">${currentMonthCost.toFixed(2)}</p>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardContent className="pt-4 pb-3">
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide">Projected Monthly</p>
-                  <p className="text-2xl font-semibold mt-1">${projectedMonthly.toFixed(2)}</p>
-                </CardContent>
-              </Card>
-            </div>
-          )}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
-                Daily API Cost
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <AreaChart
-                data={dailyCosts}
-                xKey="date"
-                yKeys={['cost']}
-                colors={[CHART_GOLD]}
-                height={200}
-              />
-            </CardContent>
-          </Card>
-          {dailyCostByModel.length > 0 && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
-                  Cost by Model
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <BarChart
-                  data={dailyCostByModel}
-                  xKey="date"
-                  yKeys={modelKeys}
-                  colors={modelColorValues}
-                  stacked
-                  showLegend
-                  height={200}
-                />
-              </CardContent>
-            </Card>
-          )}
-        </>
-      )}
+      <Card>
+        <CardHeader><CardTitle className="text-sm">Observed token costs</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-sm">Month to date: {currentMonthCost.cost_status.toUpperCase()}
+            {currentMonthCost.cost !== null ? ` — $${currentMonthCost.cost.toFixed(2)}` : ''}</p>
+          <p className="text-xs text-muted-foreground">{currentMonthCost.tokens.toLocaleString()} validated tokens · {currentMonthCost.unknown_entries} entries with unknown cost</p>
+          <p className="text-xs text-muted-foreground">
+            Estimated subtotal: {currentMonthCost.estimated_usd === null ? 'UNKNOWN' : `$${currentMonthCost.estimated_usd.toFixed(2)}`} ·
+            Billed subtotal: {currentMonthCost.billed_usd === null ? 'UNKNOWN' : `$${currentMonthCost.billed_usd.toFixed(2)}`}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Transcript-reported subtotal: {currentMonthCost.reported_usd == null ? 'UNKNOWN' : `$${currentMonthCost.reported_usd.toFixed(2)}`} · {currentMonthCost.reported_entries ?? 0} entries.
+            {' '}Amounts recorded by the source; not verified bills. These may overlap the estimates above and are not added to them.
+          </p>
+          <p className="text-xs text-muted-foreground">Estimates use recorded API prices. Subscription use is not a cash charge. Coverage is limited to the sources below; missing observations can leave costs unknown. No spending limit is enforced.</p>
+          <p className="text-xs">Sources: {usageHealth.state.toUpperCase()} · {usageHealth.issues.length} accounting issues · {usageHealth.legacy_rows_excluded} legacy rows excluded</p>
+          {usageHealth.instruments.map((i, n) => <p key={n} className="text-xs">{i.org}/{i.agent} ({i.runtime}): {i.status.toUpperCase()}{i.last_observation ? ` — ${new Date(i.last_observation).toLocaleString()}` : ''}</p>)}
+          {usageHealth.issues.length > 0 && <details className="text-xs"><summary>Accounting issues</summary>
+            {usageHealth.issues.map((i,n) => <p key={n}>{i.org}/{i.agent}: {i.code}{i.line ? ` (line ${i.line})` : ''}</p>)}
+          </details>}
+          {dailyCosts.length > 0 && <table className="w-full text-sm"><thead><tr><th className="text-left">Day</th><th className="text-left">Cost status</th><th className="text-right">USD</th><th className="text-right">Reported USD</th></tr></thead><tbody>
+            {dailyCosts.map(d => <tr key={d.date}><td>{d.date}</td><td>{d.cost_status.toUpperCase()}</td><td className="text-right">{d.cost === null ? 'UNKNOWN' : `$${d.cost.toFixed(2)}`}</td><td className="text-right">{d.reported_usd == null ? 'UNKNOWN' : `$${d.reported_usd.toFixed(2)}`}</td></tr>)}
+          </tbody></table>}
+        </CardContent>
+      </Card>
     </div>
   );
 }

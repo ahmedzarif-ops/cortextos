@@ -45,6 +45,9 @@ function writeCodexJsonl(agent: string, lines: Array<Record<string, unknown>>): 
   const dir = path.join(tmpDir, 'logs', agent);
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, 'codex-tokens.jsonl');
+  lines = lines.map(l => ({ session_id: 'thread-A', turn_id: 'turn-1', model_source:'observed', observed_model:'gpt-5-codex', cache_write_known:true, provider: 'openai', billing_mode: 'api', service_tier: 'standard', region: 'global', ...l }));
+  const sessions = [...new Set(lines.map(l => l.session_id))];
+  lines = [...sessions.map(session_id => ({ timestamp: '2026-09-10T00:00:00Z', session_id, turn_id: 'baseline', model: 'gpt-5-codex', input_tokens: 0, output_tokens: 0 })), ...lines];
   fs.writeFileSync(filePath, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
   return filePath;
 }
@@ -56,29 +59,29 @@ describe('calculateCost — gpt-5-codex pricing', () => {
     expect(cost).toBeCloseTo(2.25, 5);
   });
 
-  it('uses gpt-5-codex pricing for any model containing "codex"', () => {
+  it('does not guess a price for a codex preview alias', () => {
     const cost = calculateCost('gpt-5-codex-preview', 1_000_000, 0);
-    expect(cost).toBeCloseTo(1.25, 5);
+    expect(cost).toBeNull();
   });
 
-  it('uses gpt-5-codex pricing for any model containing "gpt-5"', () => {
+  it('does not guess a price for an unlisted gpt-5 alias', () => {
     const cost = calculateCost('gpt-5', 1_000_000, 0);
-    expect(cost).toBeCloseTo(1.25, 5);
+    expect(cost).toBeNull();
   });
 
   it('still maps opus correctly (no regression)', () => {
-    const cost = calculateCost('claude-3-opus-20240229', 1_000_000, 0);
-    expect(cost).toBeCloseTo(15, 5);
+    const cost = calculateCost('claude-opus-4-6', 1_000_000, 0);
+    expect(cost).toBeCloseTo(5, 5);
   });
 
   it('still maps sonnet correctly (no regression)', () => {
-    const cost = calculateCost('claude-3-5-sonnet-20240620', 1_000_000, 0);
+    const cost = calculateCost('claude-sonnet-4-6', 1_000_000, 0);
     expect(cost).toBeCloseTo(3, 5);
   });
 
   it('still maps haiku correctly (no regression)', () => {
-    const cost = calculateCost('claude-3-5-haiku-20241022', 1_000_000, 0);
-    expect(cost).toBeCloseTo(0.8, 5);
+    const cost = calculateCost('claude-haiku-4-5', 1_000_000, 0);
+    expect(cost).toBeCloseTo(1, 5);
   });
 });
 
@@ -90,7 +93,7 @@ describe('scanCodexLogsCosts', () => {
   it('parses a single codex-tokens.jsonl file and computes cost via gpt-5-codex pricing', () => {
     writeCodexJsonl('codex-agent-1', [
       {
-        timestamp: '2026-05-08T01:00:00Z',
+        timestamp: '2026-09-10T01:00:00Z',
         model: 'gpt-5-codex',
         input_tokens: 1_000_000,
         output_tokens: 100_000,
@@ -115,7 +118,7 @@ describe('scanCodexLogsCosts', () => {
   it('parses multiple turns from one file', () => {
     writeCodexJsonl('codex-agent-1', [
       {
-        timestamp: '2026-05-08T01:00:00Z',
+        timestamp: '2026-09-10T01:00:00Z',
         model: 'gpt-5-codex',
         input_tokens: 100,
         output_tokens: 50,
@@ -125,7 +128,7 @@ describe('scanCodexLogsCosts', () => {
         turn_id: 'turn-1',
       },
       {
-        timestamp: '2026-05-08T01:01:00Z',
+        timestamp: '2026-09-10T01:01:00Z',
         model: 'gpt-5-codex',
         input_tokens: 200,
         output_tokens: 75,
@@ -141,7 +144,7 @@ describe('scanCodexLogsCosts', () => {
   it('walks logs from multiple agents', () => {
     writeCodexJsonl('codex-agent-1', [
       {
-        timestamp: '2026-05-08T01:00:00Z',
+        timestamp: '2026-09-10T01:00:00Z',
         model: 'gpt-5-codex',
         input_tokens: 100,
         output_tokens: 50,
@@ -153,7 +156,7 @@ describe('scanCodexLogsCosts', () => {
     ]);
     writeCodexJsonl('codex-agent-2', [
       {
-        timestamp: '2026-05-08T02:00:00Z',
+        timestamp: '2026-09-10T02:00:00Z',
         model: 'gpt-5-codex',
         input_tokens: 200,
         output_tokens: 100,
@@ -172,7 +175,7 @@ describe('scanCodexLogsCosts', () => {
   it('skips zero-token records (no cost-bearing data)', () => {
     writeCodexJsonl('codex-agent-1', [
       {
-        timestamp: '2026-05-08T01:00:00Z',
+        timestamp: '2026-09-10T01:00:00Z',
         model: 'gpt-5-codex',
         input_tokens: 0,
         output_tokens: 0,
@@ -197,9 +200,9 @@ describe('scanCodexLogsCosts', () => {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, 'codex-tokens.jsonl'),
-      'not json\n' +
+      'not json\n' + JSON.stringify({timestamp:'2026-09-10T00:00:00Z',session_id:'thread-A',turn_id:'baseline',model:'gpt-5-codex',input_tokens:0,output_tokens:0}) + '\n' +
         JSON.stringify({
-          timestamp: '2026-05-08T01:00:00Z',
+          timestamp: '2026-09-10T01:00:00Z',
           model: 'gpt-5-codex',
           input_tokens: 100,
           output_tokens: 50,
