@@ -31,8 +31,8 @@ const TEMPLATES_DIR = join(__dirname, '..', '..', '..', 'templates');
  */
 const DEAD_ON_CHATGPT_ACCOUNT = ['gpt-5-codex'];
 
-/** The model proven to complete a real turn on the seat path (2026-09-04). */
-const PROVEN_MODEL = 'gpt-5.6-sol';
+/** Default selected by the 2026-09-04 owner directive: Claude + Astra only. */
+const DEFAULT_MODEL = 'gpt-6-astra';
 
 function isDeadOnChatGPTAccount(model: string | undefined): boolean {
   if (!model) return false;
@@ -46,11 +46,11 @@ function readTemplateConfig(template: string): Record<string, unknown> | null {
 }
 
 describe('codex template default model', () => {
-  it('agent-codex scaffolds the model proven to complete a turn', () => {
+  it('agent-codex scaffolds the selected default model', () => {
     const cfg = readTemplateConfig('agent-codex');
     expect(cfg).not.toBeNull();
     expect(cfg!.runtime).toBe('codex-app-server');
-    expect(cfg!.model).toBe(PROVEN_MODEL);
+    expect(cfg!.model).toBe(DEFAULT_MODEL);
   });
 
   it('agent-codex does not ship a model that 400s on a ChatGPT account', () => {
@@ -65,7 +65,7 @@ describe('codex template default model', () => {
    */
   it('POSITIVE CONTROL: the predicate flags the model that actually failed', () => {
     expect(isDeadOnChatGPTAccount('gpt-5-codex')).toBe(true);
-    expect(isDeadOnChatGPTAccount(PROVEN_MODEL)).toBe(false);
+    expect(isDeadOnChatGPTAccount(DEFAULT_MODEL)).toBe(false);
   });
 
   /**
