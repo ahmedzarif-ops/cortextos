@@ -1,6 +1,6 @@
-import { realpathSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, sep } from 'node:path';
 
 /**
  * Suite precondition: CTX_FRAMEWORK_ROOT must not be set in the environment the
@@ -107,6 +107,123 @@ function originalInvocation(): string {
 const CTX_ROOT_HELP =
   'Set it to a throwaway directory for the run, e.g.  CTX_ROOT=$(mktemp -d)';
 
+/**
+ * ⛔⛔ CONTAINMENT IS A PHYSICAL QUESTION, AND EVERY CONVENIENT INSTRUMENT ANSWERS
+ * IT LEXICALLY. THE FIRST VERSION OF THIS CHECK USED TWO OF THEM AND HAD THREE HOLES.
+ *
+ * It resolved with `realpathSync(raw)`, fell back to `join(realpathSync(dirname(raw)),
+ * basename(raw))`, and then FELL BACK TO THE RAW STRING when even the parent was
+ * absent. Measured by city at round 1 (`tests/require-isolated-env.ts:129`): a missing
+ * tail under a symlink into `~/.cortextos`, a RELATIVE path, and a `..` path all
+ * PASSED the real setup function.
+ * ⭐ The raw fallback is the shape to remember: when resolution FAILS, the check
+ * compared the unresolved argument — so the harder the path was to resolve, the more
+ * likely it was to be admitted. A guard whose weakest input takes its weakest path.
+ *
+ * ⛔ AND `..` THROUGH A SYMLINK IS AN ESCAPE VECTOR IN ITS OWN RIGHT, independent of
+ * that. Measured on node v22.23.2 (social, chief reproduced) with `sandbox/escape`
+ * a symlink to `outside`, on the RAW string `…/sandbox/escape/../outside`:
+ *
+ *   fs.existsSync            true                  PHYSICAL — the kernel resolves it
+ *   fs.statSync              true                  PHYSICAL
+ *   path.resolve             …/sandbox/outside     LEXICAL — declares it INSIDE (wrong)
+ *   fs.realpathSync   (JS)   THREW ENOENT          LEXICAL first, then lstat
+ *   fs.realpathSync.native   …/outside             PHYSICAL — correct
+ *
+ * ⇒ `path.resolve` + `startsWith` calls that argument INSIDE the sandbox while its real
+ * target is OUTSIDE. And `existsSync` and `realpathSync` DISAGREE ON THE SAME STRING,
+ * so a deepest-existing-ancestor walk that probes with one and resolves with the other
+ * throws on a path it was just told exists.
+ * ⇒ ***`path.resolve` AND JS `fs.realpathSync` ARE NOT CONTAINMENT INSTRUMENTS.***
+ *
+ * ⛔ THE `lstat` ARM IS A DISAMBIGUATOR, NOT A PROBE — and the version that used it as
+ * a probe FAILED OPEN. A DANGLING symlink (link present, target absent) satisfies
+ * `lstat` and throws on `.native`, `stat` and `existsSync`. Used as an existence probe
+ * it stops the walk on a link the resolver cannot resolve; treated as a missing NAME it
+ * is resolved away and the parent is re-joined — so a link pointing INTO the live tree
+ * is reported as safe, and a later-created target means writes land there.
+ * ⇒ THE DISAGREEMENT IS THE SIGNAL:
+ *     .native throws AND lstat SUCCEEDS  => a name that exists and cannot be resolved
+ *                                           => REFUSE, naming the link
+ *     .native throws AND lstat ALSO throws => a genuinely absent NAME
+ *                                           => treat as tail and keep walking
+ *
+ * ⚠ DELIBERATE TRADE, recorded so a future refusal is read as the trade and not as a
+ * regression (chief, 02:5xZ): this REFUSES a dangling symlink outright. A caller that
+ * creates the link before its target is refused; the remedy is to create the target
+ * first. ⛔ NEVER RELAX IT — the relaxation is indistinguishable from the hole.
+ */
+export type ContainmentVerdict =
+  | { kind: 'resolved'; path: string }
+  | { kind: 'not-absolute' }
+  | { kind: 'dotdot-component' }
+  | { kind: 'unresolvable'; at: string; isSymlink: boolean };
+
+export function resolveNonStrict(raw: string): ContainmentVerdict {
+  // (1) Reject the forms that no resolver can be trusted with, BEFORE resolving.
+  //     Order matters: both of these are properties of the STRING, and once any
+  //     resolver has touched it the information is already gone.
+  if (!isAbsolute(raw)) return { kind: 'not-absolute' };
+  if (raw.split(sep).includes('..')) return { kind: 'dotdot-component' };
+
+  // (2) Walk up to the deepest ancestor `.native` actually RESOLVES, collecting the
+  //     unresolved tail. `.native` calls realpath(3), so it follows symlinks the way
+  //     the kernel does — which is the only definition of "where a write lands".
+  const tail: string[] = [];
+  let cursor = raw;
+  for (;;) {
+    try {
+      const base = realpathSync.native(cursor);
+      return { kind: 'resolved', path: tail.length === 0 ? base : join(base, ...tail) };
+    } catch {
+      let exists: boolean;
+      let isSymlink = false;
+      try {
+        isSymlink = lstatSync(cursor).isSymbolicLink();
+        exists = true;
+      } catch {
+        exists = false;
+      }
+      if (exists) return { kind: 'unresolvable', at: cursor, isSymlink };
+      const parent = dirname(cursor);
+      // `dirname('/') === '/'`: the filesystem root is the termination condition, and
+      // it is unreachable in practice because `/` always resolves. Without it a root
+      // that somehow failed to resolve would spin forever.
+      if (parent === cursor) return { kind: 'unresolvable', at: cursor, isSymlink: false };
+      tail.unshift(basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+/**
+ * BOTH SIDES ARE RESOLVED BY THE SAME METHOD. A root under `~/.cortextos` can itself
+ * sit behind a symlink, and comparing a resolved candidate against an unresolved root
+ * is the same class of mismatch as comparing an epoch against a string: two values
+ * that look comparable and are not.
+ * If the live root does not exist there is no live tree to protect, so the literal
+ * value is a safe floor.
+ */
+export function liveStateRoot(): string {
+  const literal = join(homedir(), '.cortextos');
+  try {
+    return realpathSync.native(literal);
+  } catch {
+    return literal;
+  }
+}
+
+/**
+ * Prefix containment on ALREADY-RESOLVED values only. Exported so the arms can pin a
+ * fixture root instead of the operator's real one — a containment check that can only
+ * be exercised against `homedir()` is a check whose escape cases cannot be written down.
+ * ⛔ `root + sep` is load-bearing: a bare `startsWith(root)` also matches a sibling whose
+ * name merely begins with the root's name (`~/.cortextos-backup`).
+ */
+export function isUnderRoot(resolved: string, root: string): boolean {
+  return resolved === root || resolved.startsWith(root + sep);
+}
+
 function ctxRootFailure(): string | null {
   const raw = process.env.CTX_ROOT;
   if (raw === undefined || raw === '') {
@@ -116,26 +233,45 @@ function ctxRootFailure(): string | null {
       '  suite writes .cortextOS/state/agents/ INTO THE REPOSITORY you are standing in.'
     );
   }
-  // realpath, so a symlink or a `..` cannot walk into the live tree behind the check.
-  let resolved: string;
-  try {
-    resolved = realpathSync(raw);
-  } catch {
-    // A path that does not exist yet is fine as a sandbox — resolve its parent instead,
-    // and fall back to the literal value when even that is absent.
-    try {
-      resolved = join(realpathSync(dirname(raw)), basename(raw));
-    } catch {
-      resolved = raw;
-    }
+
+  const verdict = resolveNonStrict(raw);
+
+  if (verdict.kind === 'not-absolute') {
+    return (
+      `CTX_ROOT is RELATIVE:\n    CTX_ROOT=${raw}\n\n` +
+      '  A relative root is resolved against whatever directory each writer happens to\n' +
+      '  be standing in, so it names a different tree depending on the caller. It is\n' +
+      '  refused rather than resolved here: resolving it would make this check answer a\n' +
+      '  question about THIS process that the writers do not have to agree with.'
+    );
   }
-  let live: string;
-  try {
-    live = realpathSync(join(homedir(), '.cortextos'));
-  } catch {
-    live = join(homedir(), '.cortextos');
+
+  if (verdict.kind === 'dotdot-component') {
+    return (
+      `CTX_ROOT contains a '..' component:\n    CTX_ROOT=${raw}\n\n` +
+      "  node's own resolvers collapse '..' LEXICALLY, before following symlinks, so a\n" +
+      "  '..' that traverses a symlink resolves to one place on disk and a DIFFERENT\n" +
+      '  place under path.resolve() — measured: path.resolve reports INSIDE a sandbox\n' +
+      '  while realpath(3) reports OUTSIDE it. Any containment answer computed after\n' +
+      '  that collapse is an answer about a path that was never the argument.'
+    );
   }
-  if (resolved === live || resolved.startsWith(live + sep)) {
+
+  if (verdict.kind === 'unresolvable') {
+    return (
+      `CTX_ROOT cannot be resolved:\n    CTX_ROOT=${raw}\n` +
+      `    stops at    ${verdict.at}${verdict.isSymlink ? '  (a symlink whose target does not resolve)' : ''}\n\n` +
+      '  This name EXISTS but realpath(3) cannot follow it, so where a write through it\n' +
+      '  would land is not knowable now — it depends on what the target becomes later.\n' +
+      '  Refused deliberately: treating it as a merely-absent name resolves it away and\n' +
+      '  admits a link that points into the live tree. If you meant a path that does not\n' +
+      "  exist yet, create the TARGET first — the link's own directory is not enough."
+    );
+  }
+
+  const resolved = verdict.path;
+  const live = liveStateRoot();
+  if (isUnderRoot(resolved, live)) {
     return (
       `CTX_ROOT points INSIDE the live state tree:\n    CTX_ROOT=${raw}\n` +
       `    resolves to  ${resolved}\n    which is under ${live}\n\n` +
