@@ -327,16 +327,47 @@ describe('CronScheduler', () => {
     // pre-dispatch marker and this one. Both are asserted by CONTENT below, which is
     // what the test actually cares about; a bare count would pass on the wrong pair.
     expect(mockUpdateCron).toHaveBeenCalledTimes(2);
-    expect(mockUpdateCron).toHaveBeenCalledWith(
+
+    // CALL 1 — the pre-dispatch marker, asserted POSITIONALLY and as an EXACT object.
+    // It carries the attempt marker AND the accounted slot in ONE write, deliberately:
+    // there is then no instant at which disk holds the attempt without the slot, so no
+    // precedence rule between them is needed.
+    expect(mockUpdateCron).toHaveBeenNthCalledWith(
+      1,
       'test-agent',
       'test-cron',
-      expect.objectContaining({ last_fire_attempted_at: expect.any(String) })
+      { last_fire_attempted_at: expect.any(String), last_slot_at: expect.any(String) }
     );
-    expect(mockUpdateCron).toHaveBeenCalledWith(
+
+    // ⛔ WHY nth-call AND AN EXACT OBJECT, AND NOT `toHaveBeenCalledWith(objectContaining(…))`.
+    // (guard round-4 note C1 on PR #41.) The marker at call 1 ALREADY carries
+    // `last_slot_at`. So an order-blind `toHaveBeenCalledWith({ last_slot_at })` is
+    // satisfied by call 1 ON ITS OWN: ⭐ DELETE THE FAILED-DISPATCH WRITE ENTIRELY AND
+    // THAT ASSERTION STILL PASSES. It could never distinguish "the failure path wrote the
+    // accounted slot" from "some call did" — and the only thing that would have noticed
+    // the deletion was the bare count, which guard had already called incidental.
+    // Verified as a mutant before shipping this: with `updateCron(… { last_slot_at })`
+    // removed from the failed branch, the OLD assertion stayed green and this one goes red.
+    const slotFromMarker = mockUpdateCron.mock.calls[0][2].last_slot_at;
+    expect(typeof slotFromMarker).toBe('string');
+
+    // CALL 2 — the failed-dispatch write. EXACT object: `last_slot_at` and nothing else.
+    // A stray `last_fired_at` or `fire_count` here fails the test; `objectContaining`
+    // would have waved either through, and `last_fired_at` on a wholly failed dispatch is
+    // the specific corruption the negative assertion below exists to forbid.
+    expect(mockUpdateCron).toHaveBeenNthCalledWith(
+      2,
       'test-agent',
       'test-cron',
-      expect.objectContaining({ last_slot_at: expect.any(String) })
+      { last_slot_at: slotFromMarker }
     );
+
+    // ⭐ THE SLOT IS PINNED BY EQUALITY TO CALL 1, NOT BY A LITERAL RECOMPUTED HERE.
+    // Re-deriving the expected slot in the test would be a SECOND implementation of
+    // `accountedSlotIso` — which is exactly how three next-fire computations came to
+    // disagree in the first place, and a test that duplicates the production formula
+    // agrees with the code's mistakes. The invariant worth asserting is that BOTH WRITES
+    // NAME THE SAME SLOT, and that is what this pair asserts.
     expect(mockUpdateCron).not.toHaveBeenCalledWith(
       'test-agent',
       'test-cron',
