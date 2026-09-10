@@ -885,6 +885,19 @@ export interface TransitionReadout {
   transitions_no_op: number;
   /** Transitions rejected because an endpoint was not a real `TaskStatus` (e.g. `null`). */
   transitions_invalid_endpoint: number;
+  /**
+   * Transitions ACCEPTED: both endpoints real statuses, different, dated in the past.
+   *
+   * ⛔ THIS IS A SEPARATE FIELD AND NOT AN INFERENCE FROM `epoch`, deliberately.
+   * `epoch` falls back to `created_at` when nothing was accepted, so the obvious
+   * test — `epoch !== createdEpoch` — asks "did the newest transition land on a
+   * different second than creation", which is a question about COINCIDENCE, not
+   * about whether a transition happened. A task created and immediately moved
+   * inside the same second answers "no" and would read as never-worked.
+   * A count cannot be fooled that way, and it distinguishes 0 from "0 accepted
+   * but 3 rejected" — which the rejection counters beside it then explain.
+   */
+  transitions_valid: number;
 }
 
 /**
@@ -925,6 +938,7 @@ export function lastTransition(
   let future = 0;
   let noOp = 0;
   let invalidEndpoint = 0;
+  let valid = 0;
 
   for (const entry of audit.entries) {
     // Not a transition at all, and not malformed either: an annotation carries
@@ -977,6 +991,7 @@ export function lastTransition(
       future++;
       continue;
     }
+    valid++;
     if (epoch > newest) newest = epoch;
   }
 
@@ -988,6 +1003,7 @@ export function lastTransition(
     transitions_future: future,
     transitions_no_op: noOp,
     transitions_invalid_endpoint: invalidEndpoint,
+    transitions_valid: valid,
   };
 }
 
@@ -1057,6 +1073,7 @@ export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
   const report: StaleTaskReport = {
     stale_in_progress: [],
     stale_pending: [],
+    stale_pending_regressed: [],
     stale_blocked: [],
     stale_human: [],
     overdue: [],
@@ -1175,6 +1192,40 @@ export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
     // Stale pending: created_at > 24 hours ago
     if (task.status === 'pending' && createdAge > STALE_PENDING) {
       report.stale_pending.push(task);
+
+      // ⭐ REGRESSED: the subset that was ALREADY WORKED and fell back to pending.
+      //
+      // WHY A SECOND BUCKET RATHER THAN A BETTER THRESHOLD ON THIS ONE. Measured
+      // 2026-09-10 on a 889-task store: `stale_pending` returned 162 rows, and an
+      // alarm that fires 162 times fires zero times. The obvious repair — select on
+      // `updated_at` instead of `created_at` — was MEASURED AND FAILED: 162 -> 159,
+      // because only 56 of the 162 had ever been touched and only 3 inside 24h.
+      // Nobody annotates a backlog, so on a real store "since last touch" collapses
+      // onto "since creation". Raising the constant is worse than useless: the age
+      // histogram has no cliff (3/28/42/3/41/0/45 across <1d..30d), so every
+      // candidate threshold reproduces the same defect at a new number.
+      //
+      // ⛔ THE REASON NO CLOCK CAN WORK: AGE CANNOT TELL "NOBODY STARTED THIS" FROM
+      // "SOMEBODY STARTED THIS AND STOPPED". Both are a row that has not moved, on
+      // every axis, and only the second one is a wedge. So the predicate is not a
+      // duration at all — it is whether the task ever made a real status
+      // transition, which the audit log already records and `lastTransition`
+      // already reads for `stale_in_progress`.
+      //
+      // STRICT SUBSET, and that is load-bearing: this sits INSIDE the
+      // `stale_pending` branch and shares its gate, so every row here is also
+      // there. `stale_pending` keeps all 162. Nothing the shipped check caught is
+      // lost — the add-only rule this function states twice is preserved, and a
+      // consumer that never learns about this field behaves exactly as before.
+      //
+      // A task whose transitions were ALL rejected (future-dated, unparseable,
+      // no-op, invalid endpoint) counts as never-worked here and stays in
+      // `stale_pending` alone — correctly: a rejected line is not evidence of work,
+      // and `clock_anomalies` plus the rejection counters say why without this
+      // bucket having to guess. Measured on the same store: 162 -> 33.
+      if (lastTransition(paths, task, nowEpoch).transitions_valid > 0) {
+        report.stale_pending_regressed.push(task);
+      }
     }
 
     // Stale blocked: updated_at > 4 hours ago. Uses updated_at (not created_at)

@@ -737,6 +737,35 @@ export interface StaleTaskReport {
   stale_in_progress: Task[];
   stale_pending: Task[];
   /**
+   * The subset of `stale_pending` that has ALREADY BEEN WORKED and fell back to
+   * `pending`. Strictly narrower: every row here is also in `stale_pending`.
+   *
+   * Added 2026-09-10. `stale_pending` fired 162 times against a 889-task store,
+   * and an alarm that fires 162 times fires zero times — nothing in it separated
+   * a task WEDGED mid-flight from an idea filed three weeks ago and correctly
+   * waiting. The first fix tried was the obvious one, selecting on `updated_at`
+   * instead of `created_at`, i.e. staleness-since-last-touch. MEASURED, it moved
+   * 162 to 159: only 56 of the 162 rows had ever been touched at all and only 3
+   * inside 24 hours, because nobody annotates a backlog. On this store
+   * "since last touch" collapses onto "since creation".
+   *
+   * ⭐ AGE CANNOT TELL "NOBODY STARTED THIS" FROM "SOMEBODY STARTED THIS AND
+   * STOPPED", on ANY axis, because both look like a row that has not moved.
+   * The discriminator is not a clock at all — it is whether the task ever made a
+   * real status transition. Measured on the same store: 162 -> 33, and the 33 are
+   * exactly the rows whose audit log shows `pending>in_progress` or
+   * `pending>blocked` (several with four or more round-trips). The other 129 were
+   * born pending and have never entered the working set.
+   *
+   * ADDITIVE ON PURPOSE. `stale_pending` is untouched and still returns all 162.
+   * `checkStaleTasks` states twice that its changes may only ever ADD rows and
+   * never remove one the shipped check caught; narrowing the existing bucket
+   * would have removed 129, which is that forbidden direction even though the
+   * 129 are noise. A reader who wants the signal reads this bucket; a reader who
+   * wants the backlog still has the old one, unchanged.
+   */
+  stale_pending_regressed: Task[];
+  /**
    * Tasks sitting in `blocked` longer than the threshold.
    *
    * Added 2026-08-20. `blocked` is a LEGITIMATE state, so nothing alarms on it
