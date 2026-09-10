@@ -156,8 +156,13 @@ RC=$?; echo "kb-ingest rc=$RC"
 #    than by control. The echo stays ABOVE this line — the human-readable reason and the machine
 #    status are different channels and both are needed.
 # ⚠ CONSEQUENCE, STATED BECAUSE IT IS INTENDED AND LOUD: `exit "$RC"` TERMINATES ANY COMPOUND COMMAND
-#    THIS BLOCK IS PASTED INTO. Step 10 is the last executable block in this file (only prose follows),
-#    so it truncates nothing here. If you paste this block somewhere else, that is on you.
+#    THIS BLOCK IS PASTED INTO. If you paste this block somewhere else, that is on you.
+# ⛔ THE CLAIM THAT MAKES THAT SAFE IS PER-FILE, SO HERE IS THE CHECK RATHER THAN THE CONCLUSION:
+#    no ```bash fence follows this line in THIS file — only prose — so it truncates nothing here.
+#    `awk 'NR>ex && /^```bash/' <this file>` returns empty. IT DOES NOT IN `templates/hermes`, where two
+#    blocks follow and the line is a subshell for that reason. A CLAUSE COPIED ACROSS FIVE FILES MAKES A
+#    CLAIM ABOUT EACH OF THEM, and this one was true of four: re-run the check before trusting it in a
+#    sixth. (social, 2026-09-10)
 exit "$RC"
 ```
 
