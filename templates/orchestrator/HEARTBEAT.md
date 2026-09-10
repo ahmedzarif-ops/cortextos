@@ -182,6 +182,21 @@ cortextos bus kb-ingest "${ARGS[@]}" \
   --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private --force
 RC=$?; echo "kb-ingest rc=$RC"
 [ "$RC" -eq 0 ] || echo "KB INGEST FAILED rc=$RC — outcome UNKNOWN, partial writes possible (no rollback); enumerate the collection before any retry"
+
+# ⛔ v2.1 — THE BLOCK MUST CARRY ITS OWN rc. Without this line the block ENDS on the `|| echo` above,
+#    whose echo SUCCEEDS, so a FAILED ingest exits 0. Two seats backgrounded this block and the
+#    harness notification said exit 0 for a failed ingest; both read the verdict line by habit rather
+#    than by control. The echo stays ABOVE this line — the human-readable reason and the machine
+#    status are different channels and both are needed.
+# ⚠ CONSEQUENCE, STATED BECAUSE IT IS INTENDED AND LOUD: `exit "$RC"` TERMINATES ANY COMPOUND COMMAND
+#    THIS BLOCK IS PASTED INTO. If you paste this block somewhere else, that is on you.
+# ⛔ THE CLAIM THAT MAKES THAT SAFE IS PER-FILE, SO HERE IS THE CHECK RATHER THAN THE CONCLUSION:
+#    no ```bash fence follows this line in THIS file — only prose — so it truncates nothing here.
+#    `awk 'NR>ex && /^```bash/' <this file>` returns empty. IT DOES NOT IN `templates/hermes`, where two
+#    blocks follow and the line is a subshell for that reason. A CLAUSE COPIED ACROSS FIVE FILES MAKES A
+#    CLAIM ABOUT EACH OF THEM, and this one was true of four: re-run the check before trusting it in a
+#    sixth. (social, 2026-09-10)
+exit "$RC"
 ```
 
 This runs automatically on every heartbeat cycle. It ensures past experiences, user preferences, and learned patterns are semantically searchable for future tasks. Skip if GEMINI_API_KEY is not configured.

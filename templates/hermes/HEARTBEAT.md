@@ -81,6 +81,26 @@ cortextos bus kb-ingest "${ARGS[@]}" \
   --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private --force
 RC=$?; echo "kb-ingest rc=$RC"
 [ "$RC" -eq 0 ] || echo "KB INGEST FAILED rc=$RC — outcome UNKNOWN, partial writes possible (no rollback); enumerate the collection before any retry"
+
+# ⛔ v2.1 — THE BLOCK MUST CARRY ITS OWN rc. Without this line the block ENDS on the `|| echo` above,
+#    whose echo SUCCEEDS, so a FAILED ingest exits 0. Two seats backgrounded this block and the
+#    harness notification said exit 0 for a failed ingest; both read the verdict line by habit rather
+#    than by control. The echo stays ABOVE this line — the human-readable reason and the machine
+#    status are different channels and both are needed.
+# ⛔ THIS FILE IS THE EXCEPTION, AND IT IS WHY THE LINE BELOW IS A SUBSHELL AND NOT A BARE `exit`.
+#    In the other four templates Step 10 IS the last executable block and a bare `exit "$RC"` truncates
+#    nothing. IN HERMES IT IS NOT LAST: two more bash blocks follow it — Step 7 (Check GOALS.md) and
+#    Step 8 (Resume work) — so a bare `exit` run in one shell would SILENTLY SKIP THIS SEAT'S LAST TWO
+#    STEPS. That is the exact class of defect v2.1 exists to end, and the first version of this block
+#    reintroduced it here while carrying a comment asserting it could not happen. A CLAUSE COPIED
+#    ACROSS FIVE FILES MAKES A CLAIM ABOUT EACH OF THEM; this one was true of four. (social, 2026-09-10)
+# ⚠ WHAT THE SUBSHELL DOES AND DOES NOT PROMISE — measured, not reasoned:
+#    · run as its own unit (the harness case v2.1 was written for): script status = RC. VERIFIED rc=3.
+#    · pasted into one shell with the later steps: Steps 7 and 8 STILL RUN. VERIFIED.
+#    · in that second case the file's FINAL status is whatever the LAST command returns, NOT this RC —
+#      verified 0. That is correct here rather than a gap: when the ingest is not the last thing the
+#      seat does, the seat's exit status is not the ingest's verdict. READ THE `kb-ingest rc=` LINE.
+( exit "$RC" )
 ```
 
 ## Step 7: Check GOALS.md
