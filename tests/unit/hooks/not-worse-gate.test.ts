@@ -28,6 +28,24 @@ import { fileURLToPath } from 'node:url';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const GATE = join(REPO, 'scripts', 'hooks', 'lib', 'not-worse-gate.sh');
+const FUNCTIONS_END_MARKER = '# ---- functions end ----';
+
+// ⛔ THE FIXTURE OWNS ITS OWN node_modules, IN A CACHE OUTSIDE EVERY TREE, AND THIS IS A SAFETY
+// ⛔ PROPERTY RATHER THAN A CONVENIENCE.
+//
+// The gate now PREPARES each side (`npm install`, `npm install --prefix dashboard`, build) before
+// running it. The old fixture symlinked node_modules straight at THIS repo's — so the gate's install
+// would have run against /…/cortextos/node_modules, and a fixture that declares no dependencies
+// entitles npm to prune everything it finds there as extraneous. That is not a risk worth taking to
+// save an install.
+//
+// So: one install per SUITE into a fixture-owned cache (never eleven, never the real repo), and the
+// fixture repo commits `node_modules` as a TRACKED SYMLINK to that cache. Tracked, because the gate
+// creates its head worktree at a path this test does not choose — only a committed symlink survives
+// the checkout into it. Real Vitest still runs in every arm, which is the property guard's fixtures
+// were built for and the one thing not worth trading away for speed.
+let cacheDir: string;
+let cacheModules: string;
 
 // Guard's three fixtures, byte-for-byte.
 const FIXTURES = {
@@ -55,26 +73,71 @@ for (const k of ['PATH', 'HOME', 'TMPDIR', 'USER', 'LOGNAME', 'SHELL', 'LANG']) 
 
 let fixture: string;
 
+const FIXTURE_PKG = {
+  name: 'not-worse-gate-fixture',
+  private: true,
+  scripts: { build: 'node -e "process.exit(0)"', test: 'vitest run' },
+  // ⛔ EXACT PIN, NOT A RANGE, and it is not tidiness. `vitest: "^4.1.2"` makes npm 10.9.8 resolve
+  // the range's peer set and it crashes: `Cannot read properties of null (reading 'edgesOut')` in
+  // arborist's #loadPeerSet, on this machine, with a warm cache and the registry reachable.
+  // Measured: `^4.1.2` rc 1 every time; `4.1.2` with --legacy-peer-deps rc 0, 44 packages, 2s.
+  devDependencies: { vitest: '4.1.2' },
+} as const;
+
+function git(args: string[], cwd: string) {
+  execFileSync('git', args, { cwd, env: { ...ENV, GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'f@x', GIT_COMMITTER_NAME: 'fixture', GIT_COMMITTER_EMAIL: 'f@x' } });
+}
+
 beforeAll(() => {
+  cacheDir = mkdtempSync(join(tmpdir(), 'not-worse-gate-cache-'));
+  writeFileSync(join(cacheDir, 'package.json'), JSON.stringify(FIXTURE_PKG));
+  execFileSync('npm', ['install', '--no-audit', '--no-fund', '--silent', '--legacy-peer-deps'], {
+    cwd: cacheDir,
+    env: ENV,
+  });
+  cacheModules = join(cacheDir, 'node_modules');
+
   fixture = mkdtempSync(join(tmpdir(), 'not-worse-gate-'));
-  execFileSync('git', ['init', '-q', fixture]);
-  symlinkSync(join(REPO, 'node_modules'), join(fixture, 'node_modules'), 'dir');
+  execFileSync('git', ['init', '-q', '-b', 'main', fixture]);
+  symlinkSync(cacheModules, join(fixture, 'node_modules'), 'dir');
+  writeFileSync(join(fixture, 'package.json'), JSON.stringify(FIXTURE_PKG));
+  // ⛔ THE LOCKFILE IS WHAT MAKES THE GATE'S OWN `npm install` A NO-OP RATHER THAN A RESOLUTION.
+  // Without it, prepare_tree's install inside the head worktree re-resolves from the registry and
+  // hits the same arborist crash the exact pin above documents. With it, npm reads the tree it is
+  // told about, finds it satisfied through the symlink, and writes nothing.
+  // MEASURED: cache listing hash identical before and after a plain `npm install` in a tree whose
+  // node_modules is that symlink.
+  writeFileSync(join(fixture, 'package-lock.json'), readFileSync(join(cacheDir, 'package-lock.json'), 'utf-8'));
+  // The gate installs dashboard deps on both sides; the fixture must model a repo that has one.
+  mkdirSync(join(fixture, 'dashboard'), { recursive: true });
   writeFileSync(
-    join(fixture, 'package.json'),
-    JSON.stringify({
-      name: 'not-worse-gate-fixture',
-      private: true,
-      scripts: { build: 'node -e "process.exit(0)"', test: 'vitest run' },
-    }),
+    join(fixture, 'dashboard', 'package.json'),
+    JSON.stringify({ name: 'not-worse-gate-fixture-dashboard', private: true, version: '0.0.0' }),
   );
+  // The gate's prerequisite control runs THIS file as its own invocation on each side. Green here;
+  // case 12 replaces it with a failing one to prove the control refuses and names the side.
+  mkdirSync(join(fixture, 'tests', 'unit'), { recursive: true });
+  writeFileSync(
+    join(fixture, 'tests', 'unit', 'prerequisites.test.ts'),
+    "import { it, expect } from 'vitest'; it('prerequisites present',()=>expect(true).toBe(true));\n",
+  );
+  git(['add', '-A'], fixture);
+  git(['commit', '-qm', 'fixture base'], fixture);
 });
 
 afterAll(() => {
   if (fixture) rmSync(fixture, { recursive: true, force: true });
+  if (cacheDir) rmSync(cacheDir, { recursive: true, force: true });
 });
 
 function run(kind: keyof typeof FIXTURES) {
+  // ⚠ COMMITTED, NOT MERELY WRITTEN. The gate tests HEAD in a worktree now, not the working tree —
+  // a deliberate change (a push carries commits), and an uncommitted fixture would be invisible to
+  // it. The `npm test` companion below still runs in the working tree, which is what makes it a
+  // companion: it establishes the premise independently of the gate.
   writeFileSync(join(fixture, 'gate.test.ts'), FIXTURES[kind]);
+  git(['add', '-A'], fixture);
+  git(['commit', '-qm', `fixture ${kind}`, '--allow-empty'], fixture);
   const npm = spawnSync('npm', ['test'], { cwd: fixture, env: ENV, encoding: 'utf-8' });
   const gate = spawnSync('bash', [GATE], { cwd: fixture, env: ENV, encoding: 'utf-8' });
   return { npmStatus: npm.status, gateStatus: gate.status, out: (gate.stdout ?? '') + (gate.stderr ?? '') };
@@ -85,7 +148,7 @@ describe('not-worse gate: a runner failure is never a green push', () => {
     const r = run('green');
     expect(r.npmStatus, 'the green fixture did not exit 0 — the companion is not green').toBe(0);
     expect(r.gateStatus).toBe(0);
-    expect(r.out).toContain('no failures on the working tree');
+    expect(r.out).toContain('no failures on the head worktree');
   }, 60_000);
 
   it('C2 THE BLOCKING ROW: passing assertions + an unhandled rejection must NOT pass', () => {
@@ -98,8 +161,8 @@ describe('not-worse gate: a runner failure is never a green push', () => {
         'an unhandled rejection with no FAIL line read as "no failures"',
     ).not.toBe(0);
     // WHY it refused, not merely that it did: the UNHANDLED row was extracted and counted.
-    expect(r.out).toContain('working tree has 1 failing entr');
-    expect(r.out).not.toContain('no failures on the working tree');
+    expect(r.out).toContain('head has 1 failing entr');
+    expect(r.out).not.toContain('no failures on the head worktree');
   }, 60_000);
 
   // ⛔ THE ARM THAT ISOLATES THE EXIT STATUS, and it needs a runner that is not Vitest.
@@ -110,32 +173,31 @@ describe('not-worse gate: a runner failure is never a green push', () => {
   // runner that prints a perfectly valid summary and exits 1 with nothing failing. That is exactly
   // "failures I cannot name", and it is reachable ONLY through the retained exit status.
   it('C8 EXIT STATUS ALONE: a valid summary with a non-zero runner exit must fail closed', () => {
+    // ⚠ COMMITTED, like every other fixture mutation: the gate reads HEAD, so a package.json that
+    // only exists in the working tree would leave the gate running the ordinary vitest script and
+    // this arm would pass for the wrong reason.
     writeFileSync(
       join(fixture, 'package.json'),
       JSON.stringify({
-        name: 'not-worse-gate-fixture',
-        private: true,
+        ...FIXTURE_PKG,
         scripts: {
           build: 'node -e "process.exit(0)"',
           test: 'node -e "console.log(\' Test Files  1 passed (1)\');console.log(\'      Tests  1 passed (1)\');process.exit(1)"',
         },
       }),
     );
+    git(['add', '-A'], fixture);
+    git(['commit', '-qm', 'C8 runner exits 1 with a clean summary', '--allow-empty'], fixture);
     try {
       const gate = spawnSync('bash', [GATE], { cwd: fixture, env: ENV, encoding: 'utf-8' });
       const out = (gate.stdout ?? '') + (gate.stderr ?? '');
       expect(gate.status, 'a non-zero runner exit with no nameable failure was accepted').not.toBe(0);
       expect(out).toContain('failures I cannot name');
-      expect(out).not.toContain('no failures on the working tree');
+      expect(out).not.toContain('no failures on the head worktree');
     } finally {
-      writeFileSync(
-        join(fixture, 'package.json'),
-        JSON.stringify({
-          name: 'not-worse-gate-fixture',
-          private: true,
-          scripts: { build: 'node -e "process.exit(0)"', test: 'vitest run' },
-        }),
-      );
+      writeFileSync(join(fixture, 'package.json'), JSON.stringify(FIXTURE_PKG));
+      git(['add', '-A'], fixture);
+      git(['commit', '-qm', 'restore fixture package.json', '--allow-empty'], fixture);
     }
   }, 60_000);
 
@@ -153,7 +215,7 @@ describe('not-worse gate: a runner failure is never a green push', () => {
     expect(r.npmStatus, 'the known fixture did not exit non-zero — the premise is gone').not.toBe(0);
     // It is refused here only because this fixture has no remote to compare against; what this arm
     // pins is that the counts RECONCILE, so the refusal is about the baseline and not about naming.
-    expect(r.out).toContain('working tree has 1 failing entr');
+    expect(r.out).toContain('head has 1 failing entr');
     expect(r.out).not.toContain('could name');
   }, 60_000);
 
@@ -167,14 +229,14 @@ describe('not-worse gate: a runner failure is never a green push', () => {
     ).not.toBe(0);
     // The sentence must carry BOTH numbers, or the reader cannot tell partial from total.
     expect(r.out).toContain('reported 2 runner error(s) and this gate could name 1 of them');
-    expect(r.out).not.toContain('no failures on the working tree');
+    expect(r.out).not.toContain('no failures on the head worktree');
   }, 60_000);
 
   it('C3 ORDINARY FAILURE: still recognised and still refused', () => {
     const r = run('assertion');
     expect(r.npmStatus).not.toBe(0);
     expect(r.gateStatus).not.toBe(0);
-    expect(r.out).toContain('working tree has 1 failing entr');
+    expect(r.out).toContain('head has 1 failing entr');
   }, 60_000);
 });
 
@@ -187,8 +249,18 @@ describe('not-worse gate: a runner failure is never a green push', () => {
  */
 function callFunctions(script: string, outFile: string, content: string) {
   const gateSrc = readFileSync(GATE, 'utf-8');
-  const cut = gateSrc.indexOf('say "building working tree..."');
-  expect(cut, 'cannot locate where the gate stops defining functions and starts running').toBeGreaterThan(0);
+  // ⛔ CUT ON A DECLARED MARKER, NOT ON PROSE. This used to cut at the literal
+  // `say "building working tree..."`. That line was renamed when the gate moved its head build into
+  // a worktree, indexOf returned -1, and EIGHT arms below failed on a LOCATOR while their messages
+  // named assertions — loud, and pointing at the wrong thing. The gate now carries
+  // `# ---- functions end ----` as a declared interface, and the comment beside it forbids moving it
+  // without changing this file in the same commit.
+  const cut = gateSrc.indexOf(FUNCTIONS_END_MARKER);
+  expect(
+    cut,
+    `cannot find ${FUNCTIONS_END_MARKER} in the gate — the marker is an interface between these two ` +
+      'files and something moved it',
+  ).toBeGreaterThan(0);
   const prelude = gateSrc.slice(0, cut);
   writeFileSync(outFile, content);
   return spawnSync('bash', ['-c', `${prelude}\n${script}`], { cwd: fixture, env: ENV, encoding: 'utf-8' });
@@ -311,4 +383,129 @@ describe('not-worse gate: the refusal set', () => {
     const rows = (r.stdout ?? '').trim().split('\n').filter(Boolean);
     expect(rows).toEqual(['UNHANDLED Error: GUARD_UNHANDLED_CONTROL']);
   });
+});
+
+/**
+ * CASES 12-14: the prerequisite control and the population check.
+ *
+ * ⛔ WHY THESE ARE PERMANENT ARMS AND NOT A ONE-TIME RECEIPT (chief's call, and it is the right one):
+ * once the gate installs dashboard deps on BOTH sides, the control can only ever pass in production,
+ * and a green that cannot go red carries no information. These arms are the only place the refusal
+ * is ever exercised again.
+ *
+ * ⛔ AND THE REASON STRING IS ASSERTED, NOT JUST THE EXIT CODE. A control that aborts for ANY reason
+ * is a coincidence: in a fixture there are half a dozen ways to make the gate exit 1, and every one
+ * of them would satisfy `status !== 0`. The arm has to prove it refused for the reason it exists for.
+ */
+describe('not-worse gate: prerequisites and populations', () => {
+  // A self-contained fixture WITH a remote, so the baseline half of the gate is reachable. The
+  // shared fixture above deliberately has none — several of guard's arms depend on the gate dying at
+  // the fetch — so this builds its own rather than changing the premise of an existing control.
+  function remoteFixture() {
+    const root = mkdtempSync(join(tmpdir(), 'not-worse-gate-remote-'));
+    const bare = join(root, 'origin.git');
+    const work = join(root, 'work');
+    execFileSync('git', ['init', '-q', '--bare', '-b', 'main', bare]);
+    execFileSync('git', ['init', '-q', '-b', 'main', work]);
+    symlinkSync(cacheModules, join(work, 'node_modules'), 'dir');
+    writeFileSync(join(work, 'package.json'), JSON.stringify(FIXTURE_PKG));
+    writeFileSync(join(work, 'package-lock.json'), readFileSync(join(cacheDir, 'package-lock.json'), 'utf-8'));
+    mkdirSync(join(work, 'dashboard'), { recursive: true });
+    writeFileSync(
+      join(work, 'dashboard', 'package.json'),
+      JSON.stringify({ name: 'fixture-dashboard', private: true, version: '0.0.0' }),
+    );
+    mkdirSync(join(work, 'tests', 'unit'), { recursive: true });
+    return { root, bare, work };
+  }
+
+  function writePrereq(work: string, green: boolean) {
+    writeFileSync(
+      join(work, 'tests', 'unit', 'prerequisites.test.ts'),
+      green
+        ? "import { it, expect } from 'vitest'; it('prerequisites present',()=>expect(true).toBe(true));\n"
+        : "import { it, expect } from 'vitest'; it('dashboard/ dependencies are installed',()=>expect(false).toBe(true));\n",
+    );
+  }
+
+  function gateOn(work: string) {
+    const gate = spawnSync('bash', [GATE], { cwd: work, env: ENV, encoding: 'utf-8' });
+    return { status: gate.status, out: (gate.stdout ?? '') + (gate.stderr ?? '') };
+  }
+
+  it('case 12 HEAD SIDE: an unprepared head refuses by name, not merely by exit code', () => {
+    const { root, work } = remoteFixture();
+    try {
+      writePrereq(work, false);
+      writeFileSync(join(work, 'gate.test.ts'), FIXTURES.green);
+      git(['add', '-A'], work);
+      git(['commit', '-qm', 'head with a failing prerequisite'], work);
+
+      const r = gateOn(work);
+      expect(r.status, 'a tree whose prerequisites are not met was accepted').not.toBe(0);
+      expect(r.out).toContain('gate-prerequisite-missing side=head');
+      // It must NOT have reached the comparison — the whole point is that this refusal comes first.
+      expect(r.out).not.toContain('no failures on the head worktree');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it('case 12b BASE SIDE: an unprepared BASELINE refuses by name — the fail-open this PR closes', () => {
+    const { root, bare, work } = remoteFixture();
+    try {
+      // origin/main carries the FAILING prerequisites file: this is the real-world shape, where the
+      // baseline is the under-prepared side and its alarm is a base-only row that comm -13 erases.
+      writePrereq(work, false);
+      writeFileSync(join(work, 'gate.test.ts'), FIXTURES.green);
+      git(['add', '-A'], work);
+      git(['commit', '-qm', 'baseline with a failing prerequisite'], work);
+      git(['remote', 'add', 'origin', bare], work);
+      git(['push', '-q', 'origin', 'main'], work);
+
+      // HEAD fixes the prerequisite AND introduces a failure, so the gate must compute a baseline.
+      writePrereq(work, true);
+      writeFileSync(join(work, 'gate.test.ts'), FIXTURES.assertion);
+      git(['add', '-A'], work);
+      git(['commit', '-qm', 'head fixes the prerequisite and adds a failure'], work);
+
+      const r = gateOn(work);
+      expect(r.status).not.toBe(0);
+      expect(r.out).toContain('gate-prerequisite-missing side=base');
+      // ⛔ AND IT MUST NOT HAVE PASSED THE COMPARISON. Before this change the baseline's own alarm
+      // was a base-only row, which `comm -13` drops by construction — the baseline announced its
+      // invalidity and the subtraction turned that into permission.
+      expect(r.out).not.toContain('NOT WORSE');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 180_000);
+
+  it('case 13 POPULATIONS: equal totals with no test-file change reach the comparison', () => {
+    const { root, bare, work } = remoteFixture();
+    try {
+      writePrereq(work, true);
+      writeFileSync(join(work, 'gate.test.ts'), FIXTURES.green);
+      git(['add', '-A'], work);
+      git(['commit', '-qm', 'baseline'], work);
+      git(['remote', 'add', 'origin', bare], work);
+      git(['push', '-q', 'origin', 'main'], work);
+
+      // Same test FILES on both sides, same number of tests — only the outcome changes. The strict
+      // arm therefore applies and must be satisfied, so the gate reaches the set comparison and
+      // refuses on the NEW FAILURE rather than on the populations.
+      writeFileSync(join(work, 'gate.test.ts'), FIXTURES.assertion);
+      git(['add', '-A'], work);
+      git(['commit', '-qm', 'head turns the same test red'], work);
+
+      const r = gateOn(work);
+      expect(r.out).toContain('collected_base=');
+      expect(r.out).toContain('test_files_added_or_removed=0');
+      expect(r.out, 'the populations check fired on two identical suites').not.toContain('populations-differ');
+      expect(r.status, 'a new failure was admitted').not.toBe(0);
+      expect(r.out).toContain('NEW FAILURES NOT PRESENT ON');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 180_000);
 });
