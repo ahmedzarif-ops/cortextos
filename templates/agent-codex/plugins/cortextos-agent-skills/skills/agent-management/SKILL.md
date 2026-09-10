@@ -29,7 +29,7 @@ description: "You need to create a new agent, restart a crashed agent, change an
 # Option A: CLI (recommended)
 
 # STEP 0 — REQUIRED BEFORE SCAFFOLDING — Ask the user which runtime:
-#   "Should this agent run on Claude Code (Anthropic), Codex (OpenAI gpt-5-codex),
+#   "Should this agent run on Claude Code (Anthropic), Codex (OpenAI),
 #    or OpenCode (provider-agnostic TUI, default model openai/gpt-4.1-nano)?"
 # Default to claude-code if the user has no preference. Never silently pick.
 # Codex agents MUST use the agent-codex template; OpenCode agents MUST use the
@@ -42,7 +42,7 @@ description: "You need to create a new agent, restart a crashed agent, change an
 # claude-code path (the common one):
 cortextos add-agent <name> --template agent --org <org> --runtime claude-code
 
-# codex-app-server path (gpt-5-codex via codex CLI app-server JSONRPC):
+# codex-app-server path (codex CLI app-server JSONRPC):
 cortextos add-agent <name> --template agent-codex --org <org> --runtime codex-app-server
 
 # opencode path (provider-agnostic OpenCode TUI; ships the context-handoff
