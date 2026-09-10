@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, mkdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { updateTask, annotateTask, readTaskAudit, lastTransition } from '../../../src/bus/task';
+import { updateTask, annotateTask, readTaskAudit, lastTransition, checkStaleTasks } from '../../../src/bus/task';
 import { atomicWriteSync } from '../../../src/utils/atomic';
 import type { BusPaths, Task } from '../../../src/types';
 
@@ -46,8 +46,14 @@ function writeTask(paths: BusPaths, o: Partial<Task> & { id: string }): Task {
     priority: 'normal',
     project: '',
     kpi_key: null,
-    created_at: now,
-    updated_at: now,
+    // ⛔ HONOUR THE OVERRIDES. These read `now` unconditionally in the first version of this
+    // helper, so the composition arms below — which need a task PAST the 24h stale gate — were
+    // silently given a brand-new task and asserted against an empty bucket. The probe that
+    // originally proved the composition used a different helper that did honour them, so the
+    // finding was real and the port of it was not: A TEST MOVED INTO A NEW FILE INHERITS THAT
+    // FILE'S SETUP, NOT THE ONE IT WAS PROVEN UNDER.
+    created_at: o.created_at ?? now,
+    updated_at: o.updated_at ?? now,
     completed_at: null,
     due_date: null,
     archived: false,
@@ -194,5 +200,71 @@ describe('update-task --desc: revise the live text, keep the old one', () => {
     expect(t.annotations![0].text).toBe('a note that arrived later');
     expect(t.description_history).toHaveLength(1);
     expect(t.description).toBe('new');
+  });
+});
+
+/**
+ * ⛔ THE COMPOSITION ARM — the later change defending the earlier contract.
+ *
+ * The `stale_pending_regressed` bucket keys on `transitions_valid`: has this task ever made a
+ * REAL status transition, which is what separates a wedge from a backlog item. This file adds
+ * an audit line for a description revision. IF THAT LINE COUNTED AS A TRANSITION, EDITING A
+ * DESCRIPTION WOULD PROMOTE A BACKLOG TASK INTO THE WEDGE BUCKET — a monitor you can trip by
+ * correcting a typo, and the alarm would go noisy again through the one route nobody would
+ * think to check.
+ *
+ * ⭐ NEITHER CHANGE'S OWN SUITE CAN SEE THIS. Each was written without the other, so a clean
+ * merge and a green full run stay green whichever way the interaction goes. The composition is
+ * only visible to a test that holds both, which is why this arm lives with the LATER change:
+ * the contract it could break belongs to the earlier one.
+ */
+describe('COMPOSITION: a description revision must not read as lifecycle activity', () => {
+  let tmp: string;
+  let paths: BusPaths;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'descrev-compose-'));
+    const taskDir = join(tmp, 'tasks');
+    mkdirSync(taskDir, { recursive: true });
+    paths = {
+      ctxRoot: tmp, inbox: tmp, inflight: tmp, processed: tmp, logDir: tmp,
+      stateDir: tmp, taskDir, approvalDir: tmp, analyticsDir: tmp, deliverablesDir: tmp,
+    } as BusPaths;
+  });
+  afterEach(() => rmSync(tmp, { recursive: true, force: true }));
+
+  const hoursAgo = (h: number) => iso(new Date(Date.now() - h * 3600e3));
+
+  it('revising a description does NOT promote a born-pending task into stale_pending_regressed', () => {
+    writeTask(paths, {
+      id: 'task_cx1', status: 'pending',
+      created_at: hoursAgo(72), updated_at: hoursAgo(72),
+    });
+
+    updateTask(paths, 'task_cx1', 'pending', 'corrected text');  // no status change; description revised
+
+    const report = checkStaleTasks(paths);
+    expect(report.stale_pending.map((t) => t.id)).toContain('task_cx1');
+    expect(report.stale_pending_regressed.map((t) => t.id)).not.toContain('task_cx1');
+    expect(lastTransition(paths, read(paths, 'task_cx1')).transitions_valid).toBe(0);
+  });
+
+  /**
+   * THE ARM THAT MAKES THE ONE ABOVE MEAN SOMETHING. Without it, "the revision is invisible to
+   * the counter" and "the counter stopped working" are the same observation.
+   */
+  it('still counts real transitions when a revision rides along with one', () => {
+    writeTask(paths, {
+      id: 'task_cx2', status: 'pending',
+      created_at: hoursAgo(72), updated_at: hoursAgo(72),
+    });
+
+    updateTask(paths, 'task_cx2', 'in_progress', 'revised while claiming');
+    updateTask(paths, 'task_cx2', 'pending');
+
+    const t = read(paths, 'task_cx2');
+    expect(lastTransition(paths, t).transitions_valid).toBe(2);   // two status changes, not three
+    expect(t.description_history).toHaveLength(1);
+    expect(checkStaleTasks(paths).stale_pending_regressed.map((x) => x.id)).toContain('task_cx2');
   });
 });
