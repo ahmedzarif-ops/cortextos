@@ -50,6 +50,19 @@ function writeHeartbeatCron(agent: string, schedule: string): void {
   );
 }
 
+/**
+ * Write a crons.json with an EXPLICIT enabled flag, and optionally a second cron, so the
+ * disabled-heartbeat cases can be built without touching the happy-path helper above.
+ */
+function writeCrons(agent: string, crons: Array<Record<string, unknown>>): void {
+  const dir = join(root, '.cortextOS', 'state', 'agents', agent);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'crons.json'),
+    JSON.stringify({ updated_at: new Date().toISOString(), crons }, null, 2),
+  );
+}
+
 async function load() {
   return await import('../../../src/cli/bus');
 }
@@ -100,6 +113,43 @@ describe('resolveStaleThresholdMs', () => {
     expect(a.ms).toBe(b.ms);
     expect(a.derived).toBe(true);
     expect(b.derived).toBe(false);
+  });
+
+  // ── guard's F1 on cortextos #27, and the reason it is a regression test rather than a tidy-up ──
+  // The first version of this function matched `c.name === 'heartbeat'` and did NOT check `enabled`.
+  // A persisted but DISABLED 4h heartbeat therefore derived an 8h threshold from a cron that no
+  // longer fires, and a row 3h old kept its marker off until 8h. That is the SILENT-LATE half of the
+  // original defect — the exact failure this whole change exists to remove — reintroduced by the fix.
+  // The daemon already had it right at src/daemon/agent-manager.ts:1848; the two derivations read the
+  // same file and must agree.
+  it('IGNORES a disabled heartbeat cron — a cron that does not fire cannot set the threshold', async () => {
+    writeCrons('disabledseat', [{ name: 'heartbeat', schedule: '4h', prompt: 'x', enabled: false }]);
+    const { resolveStaleThresholdMs } = await load();
+
+    // Must NOT be { ms: 8h, derived: true }. No ENABLED heartbeat exists, so this is the labelled fallback.
+    expect(resolveStaleThresholdMs('disabledseat')).toEqual({ ms: 2 * 60 * 60 * 1000, derived: false });
+  });
+
+  it('picks the ENABLED heartbeat when a disabled one is listed first', async () => {
+    // Ordering is the part a name-only predicate gets wrong silently: `.find` returns the first match,
+    // so a stale disabled record shadows the live one and the result still reports derived: true.
+    writeCrons('shadowseat', [
+      { name: 'heartbeat', schedule: '4h', prompt: 'x', enabled: false },
+      { name: 'heartbeat', schedule: '30m', prompt: 'x', enabled: true },
+    ]);
+    const { resolveStaleThresholdMs } = await load();
+
+    expect(resolveStaleThresholdMs('shadowseat')).toEqual({ ms: 60 * 60 * 1000, derived: true });
+  });
+
+  it('treats a heartbeat with no `enabled` key as ENABLED — absent is not disabled', async () => {
+    // `enabled !== false` rather than `enabled === true` is deliberate and mirrors the daemon: older
+    // records omit the key entirely, and reading a MISSING flag as "off" would silently stop deriving
+    // for every seat whose crons.json predates it.
+    writeCrons('legacyseat', [{ name: 'heartbeat', schedule: '4h', prompt: 'x' }]);
+    const { resolveStaleThresholdMs } = await load();
+
+    expect(resolveStaleThresholdMs('legacyseat')).toEqual({ ms: 8 * 60 * 60 * 1000, derived: true });
   });
 });
 

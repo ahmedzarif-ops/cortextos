@@ -2243,7 +2243,12 @@ const DEFAULT_STALE_MS = 2 * 60 * 60 * 1000;
  */
 export function resolveStaleThresholdMs(agent: string): { ms: number; derived: boolean } {
   try {
-    const heartbeatCron = readCrons(agent).find(c => c.name === 'heartbeat');
+    // A DISABLED heartbeat cron does not fire, so its interval is not a threshold. Mirrors the
+    // daemon's own predicate at src/daemon/agent-manager.ts:1848 deliberately: two places deriving
+    // the same number from the same file must agree, and the omission here reproduced the exact
+    // silent-late failure this function exists to remove (a persisted disabled 4h heartbeat kept a
+    // 3h-old row unmarked until 8h). No enabled heartbeat falls through to the LABELLED fallback.
+    const heartbeatCron = readCrons(agent).find(c => c.name === 'heartbeat' && c.enabled !== false);
     if (heartbeatCron) {
       const intervalMs = parseDurationMs(heartbeatCron.schedule);
       if (!isNaN(intervalMs) && intervalMs > 0) {
