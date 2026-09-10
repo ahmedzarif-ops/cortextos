@@ -126,7 +126,10 @@ describe('the literal-normal gate — city round 2, and it was a hole INSIDE the
    * refuse for a DIFFERENT reason than they did before — a visible behaviour change,
    * named here so a diff review does not read it as a regression.
    */
-  const forms = ['/', '//', '/.', '/./x'];
+  // '//x' is city's seventh form, found AFTER round 2 and preserved by them as a
+  // regression probe. It is here rather than only in their report: a probe pinned in a
+  // reviewer's report protects one round and nothing after it (the case-14 weakness).
+  const forms = ['/', '//', '/.', '/./x', '//x'];
 
   it('refuses every non-literal form of a dangling link, with its own reason', () => {
     for (const suffix of forms) {
@@ -134,7 +137,10 @@ describe('the literal-normal gate — city round 2, and it was a hole INSIDE the
       // arm would test the bare form four times.
       const raw = join(sandbox, 'dangling') + suffix;
       const v = resolveNonStrict(raw);
-      expect(v.kind, `form ${JSON.stringify(suffix)}`).toBe('not-literal');
+      // ⛔ SOFT, so every form is reported. A hard expect inside a loop stops at the
+      // FIRST failure, so a mutant that breaks four forms names one — and the arm then
+      // cannot tell you which forms it actually covers.
+      expect.soft(v.kind, `form ${JSON.stringify(suffix)}`).toBe('not-literal');
     }
   });
 
@@ -159,13 +165,21 @@ describe('the literal-normal gate — city round 2, and it was a hole INSIDE the
   it('the WALK\'s own disambiguator is fixed too, exercised directly past the gate', () => {
     // The gate makes this unreachable through resolveNonStrict, and a branch that
     // cannot be reached is a branch nobody measures — so the arm calls the walk.
-    for (const suffix of ['/', '//']) {
+    // ⭐ '//x' is the one that matters here and it is NOT a trailing-separator ARGUMENT:
+    // `dirname('/a/dangling//x')` returns `'/a/dangling/'` — WITH a trailing separator —
+    // so the walk MANUFACTURES the trapped form for itself from an argument that did not
+    // end in one. That is city's "walk reaches slash-suffixed intermediate cursor", and
+    // it is why the probe strip is load-bearing INSIDE the walk rather than merely a
+    // second guard on the argument.
+    // (For a gate-PASSING argument this is unreachable: a literal-normal path has no
+    // doubled separator, and dirname only yields a trailing one from a doubled one.)
+    for (const suffix of ['/', '//', '//x']) {
       const raw = join(sandbox, 'dangling') + suffix;
       const v = walkToResolvable(raw);
-      expect(v.kind, `walk on ${JSON.stringify(suffix)}`).toBe('unresolvable');
-      if (v.kind !== 'unresolvable') throw new Error('unreachable');
-      expect(v.at).toBe(join(sandbox, 'dangling')); // names the LINK, separator stripped
-      expect(v.isSymlink).toBe(true);
+      expect.soft(v.kind, `walk on ${JSON.stringify(suffix)}`).toBe('unresolvable');
+      if (v.kind !== 'unresolvable') continue;
+      expect.soft(v.at, `walk on ${JSON.stringify(suffix)}`).toBe(join(sandbox, 'dangling'));
+      expect.soft(v.isSymlink, `walk on ${JSON.stringify(suffix)}`).toBe(true);
     }
   });
 });
