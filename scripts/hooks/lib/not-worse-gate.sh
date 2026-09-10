@@ -136,6 +136,74 @@ run_suite() {
   fi
 }
 
+# ⛔ PREPARE BOTH SIDES IDENTICALLY, AND `dashboard` IS PART OF "IDENTICALLY".
+#
+# MEASURED 2026-09-10 at main 2f4a84a, in a tree built exactly the way this gate built its baseline
+# (root install + build, no dashboard install):
+#     live checkout : rc 0, Tests 2835 passed |  3 skipped (2838)
+#     that tree     : rc 1, Tests    2 failed | 50 skipped (2687), 14 failing FILE rows
+# 151 tests were NEVER COLLECTED and 47 more self-skipped. CLAUDE.md documents the cause in terms:
+# without dashboard/'s install, `next/server` is unresolvable and 47 dashboard-adjacent tests
+# silently self-skip.
+#
+# ⛔⛔ AND THE DIRECTION IS WHY THIS WAS INVISIBLE. `NEW_FAILURES = comm -13 base head` reports
+# failures present HERE and absent THERE, so anything already failing in the BASELINE reads as
+# INHERITED and is admitted. An under-prepared baseline is over-populated with failures, which makes
+# "no worse than base" EASIER to satisfy.
+# ⭐ A NOT-WORSE GATE FAILS TOWARD PASSING BY CONSTRUCTION (social's formulation): a baseline defect
+# here is a fail-open EVERY time and never a false alarm — a gate that can only err toward green has
+# a bug undetectable from its own output. It stayed hidden because the HEAD_COUNT=0 early exit means
+# the baseline is not built at all while the working tree is green.
+prepare_tree() {
+  # $1 = directory, $2 = side label for messages
+  ( cd "$1" && npm install --no-audit --no-fund --silent ) \
+    || die "Dependency install failed on the $2. FAILING CLOSED — an unprepared tree skips tests the other side runs."
+  ( cd "$1" && npm install --prefix dashboard --no-audit --no-fund --silent ) \
+    || die "dashboard/ dependency install failed on the $2. FAILING CLOSED — without it 47 tests self-skip and 13 files fail to load, and this gate would compare two different populations."
+  ( cd "$1" && npm run build --silent ) \
+    || die "Build failed on the $2. FAILING CLOSED — build state is configuration (see the header)."
+}
+
+# THE PREREQUISITE CONTROL. tests/unit/prerequisites.test.ts already encodes the two prerequisites
+# (dashboard deps, dist/) and fails loudly when either is absent — it exists because "the
+# honest-looking green was the failure mode". Run it on BOTH sides BEFORE any comparison.
+# ⭐ WITHOUT THIS, THE NEXT MISSING PREREQUISITE REPRODUCES TONIGHT'S INCIDENT EXACTLY. Fixing the
+# dashboard install alone fixes THIS instance; the control is what makes the CLASS fail closed.
+#
+# ⛔⛔ AND IT MUST RUN **OUTSIDE** THE COMPARED POPULATION. THIS IS THE WHOLE REASON IT IS A
+# ⛔⛔ SEPARATE INVOCATION THAT CALLS `die`, AND NOT "one more failing row we would have noticed".
+# (social's catch, and it is the sharpest thing said about this defect.) prerequisites.test.ts is
+# DELIBERATELY not `skipIf` — its own header says a silent skip would reproduce the defect under
+# test — so in an under-prepared baseline it FAILS, loudly, in-band. And that alarm is precisely
+# what `NEW_FAILURES = comm -13 base head` throws away: it emits rows unique to HEAD, and a
+# prerequisites failure present ONLY in the baseline is a base-only row.
+# ⇒ ***THE SUBTRACTION IS WHAT ERASES THE ALARM.*** The baseline announces its own invalidity and
+# the comparison converts that announcement into permission. A prerequisite check that lives inside
+# the compared population is CANCELLED BY THE COMPARISON, however loudly it is written — the repo
+# already shipped the loud-test version, and this gate was defeating it.
+assert_prerequisites() {
+  # $1 = directory, $2 = side label ("base" or "head")
+  # ⛔ THE OUTPUT MUST NOT LIVE INSIDE THE TREE BEING CHECKED. First version wrote it to
+  # "$1/.gate-prereq-output", and the EXIT trap that removes the scratch worktree deleted it on the
+  # way out — so the refusal named a path that no longer existed by the time anyone read it. That is
+  # a dangling reference produced by the cleanup, i.e. this repo's own "listed above" defect wearing
+  # a filename. Caught on the first real run of this control, by following its own pointer.
+  pout="$(mktemp)"
+  ( cd "$1" && npx vitest run tests/unit/prerequisites.test.ts ) > "$pout" 2>&1
+  prc=$?
+  grep -qE '^[[:space:]]*Test Files[[:space:]]' "$pout" \
+    || die "gate-prerequisite-missing side=$2 — the prerequisite suite produced no summary. FAILING CLOSED: an unreadable result is not a passing one. Output: $pout"
+  [ "$prc" -eq 0 ] \
+    || die "gate-prerequisite-missing side=$2 — tests/unit/prerequisites.test.ts is not green (rc=$prc). This gate compares two trees, and an unprepared one silently collects FEWER TESTS rather than failing. Output: $pout"
+}
+
+# The TOTAL COLLECTED count, from the parenthesised total on vitest's `Tests` summary line
+# (`Tests  2835 passed | 3 skipped (2838)`). This is the population size — the number the incident
+# moved by 151 while every other reported figure still looked plausible.
+collected_tests() {
+  sed -nE 's/^[[:space:]]*Tests[[:space:]]+.*\(([0-9]+)\)[[:space:]]*$/\1/p' "$1" | tail -1
+}
+
 # ⛔ FAIL CLOSED ON ANYTHING THIS GATE CANNOT NAME.
 #
 # The contract is "compare the failures HERE against the failures THERE", and it is meaningful
@@ -175,23 +243,75 @@ assert_nameable() {
   fi
 }
 
-# --- 1. the branch under test -------------------------------------------------------------------
-say "building working tree..."
-npm run build --silent || die "Build failed. Fix the build before pushing — a not-worse gate cannot compare a tree that does not compile."
+# ---- functions end ----
+# ⛔ THAT MARKER IS AN INTERFACE, NOT A COMMENT. tests/unit/hooks/not-worse-gate.test.ts sources only
+# the definitions above it, by cutting this file at this exact line. It used to cut at the PROSE
+# string `say "building working tree..."`; that line was renamed during this change, `indexOf`
+# returned -1, and EIGHT arms failed on a LOCATOR while naming assertions — loud, and pointing at
+# the wrong thing. A structural cut needs a structural anchor. Do not move, reword or delete this
+# line without changing that test in the same commit.
 
-say "running suite on the working tree..."
+# --- 1. the branch under test, IN ITS OWN WORKTREE ----------------------------------------------
+#
+# ⛔ THIS USED TO RUN `npm run build` IN $REPO_ROOT — THE LIVE CHECKOUT — WHICH MADE `git push` A
+# ⛔ DEPLOY ON ANY MACHINE WHERE dist/ IS THE INSTALLED CLI.
+# MEASURED 2026-09-10 on this repo: ~/.local/bin/cortextos -> ../lib/node_modules/cortextos/dist/cli.js
+# and ~/.local/lib/node_modules/cortextos -> the checkout, so a push shipped the PUSHED BRANCH to
+# every running agent instantly. dist/cli.js changed hash across a push of an unmerged branch and the
+# live CLI began answering with that branch's behaviour. The gate never restored it.
+# ⭐ A GATE IS TRUSTED PRECISELY BECAUSE IT IS BELIEVED TO BE READ-ONLY, so its WRITES are the ones
+# nobody audits. The baseline half of this file was already isolated in a worktree; the head half was
+# not, in the same file, for the same purpose.
+#
+# ⛔ SNAPSHOT-AND-RESTORE WAS CONSIDERED AND REJECTED, and the reason is recorded so nobody
+# re-proposes it: a gate that saves dist/, mutates it and restores it afterwards leaves the MUTATED
+# version live whenever it dies or is interrupted — fail-open, silent, and indistinguishable from an
+# ordinary refused push. That is the incident itself, with a smaller window.
+HEAD_SHA="$(git rev-parse HEAD)"
+HEAD_DIR="$BASELINE_ROOT/head-$HEAD_SHA"
+say "preparing a head worktree at $HEAD_SHA (own install, own build — nothing writes the live tree)"
+rm -rf "$HEAD_DIR"
+mkdir -p "$BASELINE_ROOT"
+git worktree add --detach --quiet "$HEAD_DIR" "$HEAD_SHA" \
+  || die "Could not create the head worktree at $HEAD_SHA. FAILING CLOSED."
+# The head worktree is scratch: remove it however this script exits, so a failed gate cannot leave
+# a half-prepared tree behind to be reused as if it were sound.
+# ⛔ THE TRAP MUST COVER THE BASELINE TOO, AND THE OLD INLINE CLEANUPS COULD NOT.
+# `die()` ends with `exit 1` IN THIS SHELL, so `prepare_tree ... || { git worktree remove ...; }`
+# is unreachable by construction: the `||` arm never runs because the left side never returns.
+# A half-prepared baseline left on disk is worse than none — it is keyed by sha and the next push
+# reuses it as if it were sound. BASE_DIR_PENDING is cleared only once its cache file is written.
+BASE_DIR_PENDING=""
+cleanup_worktrees() {
+  git worktree remove --force "$HEAD_DIR" 2>/dev/null
+  [ -n "$BASE_DIR_PENDING" ] && git worktree remove --force "$BASE_DIR_PENDING" 2>/dev/null
+  return 0
+}
+trap cleanup_worktrees EXIT
+prepare_tree "$HEAD_DIR" "head"
+
+# ⚠ THE GATE NOW TESTS **HEAD**, NOT THE WORKING TREE. Said out loud because it is a real change in
+# what is being gated: uncommitted changes are no longer included. For a PRE-PUSH gate that is the
+# more honest subject — a push carries commits, not the working tree — but a reader who expects the
+# old behaviour would otherwise discover it by surprise.
+assert_prerequisites "$HEAD_DIR" "head"
+
+say "running suite on the head worktree..."
 HEAD_OUT="$(mktemp)"
-run_suite "$REPO_ROOT" "$HEAD_OUT"
+run_suite "$HEAD_DIR" "$HEAD_OUT"
 HEAD_RC=$SUITE_RC
 extract_failures "$HEAD_OUT" > "${HEAD_OUT}.fails"
-assert_nameable "$HEAD_OUT" "${HEAD_OUT}.fails" "$HEAD_RC" "working tree"
+assert_nameable "$HEAD_OUT" "${HEAD_OUT}.fails" "$HEAD_RC" "head worktree"
 HEAD_COUNT=$(wc -l < "${HEAD_OUT}.fails" | tr -d ' ')
+HEAD_COLLECTED=$(collected_tests "$HEAD_OUT")
 
 if [ "$HEAD_COUNT" -eq 0 ]; then
-  say "no failures on the working tree — nothing to compare. PASS."
+  # Safe to stop here ONLY because the prerequisite control above already ran on this side: a green
+  # run over a silently smaller population is exactly what that control refuses.
+  say "no failures on the head worktree (collected_head=${HEAD_COLLECTED:-unknown}) — nothing to compare. PASS."
   exit 0
 fi
-say "working tree has $HEAD_COUNT failing entr(ies); computing the $REMOTE/$BASE_REF baseline to see whether they are new..."
+say "head has $HEAD_COUNT failing entr(ies); computing the $REMOTE/$BASE_REF baseline to see whether they are new..."
 
 # --- 2. the baseline, pinned by REF at gate time ------------------------------------------------
 git fetch --quiet "$REMOTE" "$BASE_REF" 2>/dev/null \
@@ -203,6 +323,9 @@ say "baseline ref $REMOTE/$BASE_REF = $BASE_SHA"
 
 BASE_DIR="$BASELINE_ROOT/$BASE_SHA"
 CACHED_FAILS="$BASE_DIR/.not-worse-failures"
+# The POPULATION SIZE is cached beside the failure set, because a cache hit skips the suite run and
+# the count would otherwise be unavailable on exactly the fast path most pushes take.
+CACHED_COLLECTED="$BASE_DIR/.not-worse-collected"
 
 if [ -f "$CACHED_FAILS" ]; then
   say "reusing cached baseline for $BASE_SHA (keyed by sha, so it cannot go stale against a moving main)"
@@ -212,10 +335,9 @@ else
   mkdir -p "$BASELINE_ROOT"
   git worktree add --detach --quiet "$BASE_DIR" "$BASE_SHA" \
     || die "Could not create the baseline worktree at $BASE_SHA. FAILING CLOSED."
-  ( cd "$BASE_DIR" && npm install --no-audit --no-fund --silent ) \
-    || { git worktree remove --force "$BASE_DIR" 2>/dev/null; die "Baseline dependency install failed. FAILING CLOSED — an unbuilt baseline skips tests the branch runs (see the skipIf note at the top of this file)."; }
-  ( cd "$BASE_DIR" && npm run build --silent ) \
-    || { git worktree remove --force "$BASE_DIR" 2>/dev/null; die "Baseline build failed. FAILING CLOSED for the same reason."; }
+  BASE_DIR_PENDING="$BASE_DIR"
+  prepare_tree "$BASE_DIR" "baseline"
+  assert_prerequisites "$BASE_DIR" "base"
 
   BASE_OUT="$BASE_DIR/.not-worse-output"
   say "running suite on the baseline..."
@@ -232,11 +354,50 @@ else
     git worktree remove --force "$BASE_DIR" 2>/dev/null
     exit 1
   }
+  collected_tests "$BASE_OUT" > "$CACHED_COLLECTED"
   mv "$BASE_OUT.fails" "$CACHED_FAILS"
+  # The baseline is sound and cached from here on; the trap must stop treating it as scratch.
+  BASE_DIR_PENDING=""
 fi
 
 BASE_COUNT=$(wc -l < "$CACHED_FAILS" | tr -d ' ')
+BASE_COLLECTED=$(cat "$CACHED_COLLECTED" 2>/dev/null)
 say "baseline has $BASE_COUNT failing entr(ies)"
+
+# --- 2b. THE POPULATIONS MUST BE THE SAME POPULATION ----------------------------------------------
+#
+# A set comparison is only as honest as the equality of the two populations behind it. Both sides can
+# be individually correct and the comparison still false, and nothing in the comparison's own output
+# says which. So state the sizes, and refuse when they differ for a reason the diff cannot explain.
+#
+# ⚠ THE BOUND IS DELIBERATELY NOT A THRESHOLD. "Allow a difference proportional to the test files the
+# diff touches" compares TESTS to FILES: one added file carrying twenty cases would refuse an
+# ordinary PR, and a gate that refuses ordinary work teaches people the bypass — which this file's
+# own header exists to prevent. A false-positive rate is a correctness property of a check.
+# So: when the diff adds or removes NO test files the expectation is EXACT and is enforced; when it
+# does, a file count cannot bound a test count in either direction, so the counts are REPORTED and
+# the refusal is left to the prerequisite control above. No invented number.
+# ⛔ ANY CHANGE TO A TEST PATH COUNTS AS TOUCHING IT — A/M/D/R, not just A and D.
+# (guard's P2, reproduced: base=2 head=3, test_files_added_or_removed=0, rc 1 on a VALID push.)
+# The first version counted only ADDED and DELETED files, so a diff that MODIFIES a test file to add
+# one green test read as "no test files changed" and hit the STRICT arm — which then refused the
+# push for a collected-count difference the diff fully explains.
+# ⭐ That is the false positive this block's own comment warns about, committed in the block that
+# warns about it: a gate that refuses ordinary work teaches the bypass. The strict arm is only
+# honest when the diff touches NO test path at all.
+TEST_FILE_DELTA="$(git diff --name-status "$BASE_SHA" "$HEAD_SHA" -- '*.test.ts' '*.test.tsx' 2>/dev/null | grep -c .)"
+say "collected_base=${BASE_COLLECTED:-unknown} collected_head=${HEAD_COLLECTED:-unknown} test_paths_changed=${TEST_FILE_DELTA:-0}"
+if [ -z "$BASE_COLLECTED" ] || [ -z "$HEAD_COLLECTED" ]; then
+  die "populations-unknown — could not read a collected-test total from one of the runs. FAILING CLOSED: a comparison whose population sizes are unknown is not a comparison."
+fi
+if [ "${TEST_FILE_DELTA:-0}" -eq 0 ] && [ "$BASE_COLLECTED" != "$HEAD_COLLECTED" ]; then
+  die "populations-differ base=$BASE_COLLECTED head=$HEAD_COLLECTED while the diff touches NO test path at all (added, modified, deleted or renamed). FAILING CLOSED: the two sides ran different numbers of tests, so 'no new failures' is a statement about two different suites. This is the exact shape of the 151-test dashboard gap this control was added for."
+fi
+if [ "${TEST_FILE_DELTA:-0}" -gt 0 ] && [ "$BASE_COLLECTED" != "$HEAD_COLLECTED" ]; then
+  say "⚠ FINDING: collected totals differ ($BASE_COLLECTED vs $HEAD_COLLECTED) and the diff touches $TEST_FILE_DELTA test path(s):"
+  git diff --name-status "$BASE_SHA" "$HEAD_SHA" -- '*.test.ts' '*.test.tsx' 2>/dev/null | grep -E '^[AD]' | sed 's/^/    /'
+  say "   Not a refusal: a file count cannot bound a test count. The prerequisite control on both sides is what refuses an under-prepared tree."
+fi
 
 # --- 3. compare SETS ------------------------------------------------------------------------------
 NEW_FAILURES="$(comm -13 "$CACHED_FAILS" "${HEAD_OUT}.fails")"
