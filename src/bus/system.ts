@@ -402,6 +402,23 @@ export function checkGoalStaleness(
  *
  * Mirrors bash bus/post-activity.sh.
  */
+export function activityChannelEnvCandidates(
+  orgDir: string,
+  ctxRoot: string,
+  org: string,
+): string[] {
+  // EXPORTED so the CLI's failure message can name the paths this function
+  // actually opens. The message used to say "secrets.env or .env" — two files
+  // postActivity has never read — and on a live org where ACTIVITY_CHAT_ID
+  // WAS set in secrets.env it sent the operator to a file where the setting
+  // provably does nothing. One list, one truth: a second hand-written copy in
+  // the CLI is a copy that goes stale the next time this one moves.
+  return [
+    join(orgDir, 'activity-channel.env'),
+    join(ctxRoot, 'orgs', org, 'activity-channel.env'),
+  ];
+}
+
 export async function postActivity(
   orgDir: string,
   ctxRoot: string,
@@ -410,10 +427,7 @@ export async function postActivity(
   replyMarkup?: object,
 ): Promise<boolean> {
   // Look for activity-channel.env
-  const candidates = [
-    join(orgDir, 'activity-channel.env'),
-    join(ctxRoot, 'orgs', org, 'activity-channel.env'),
-  ];
+  const candidates = activityChannelEnvCandidates(orgDir, ctxRoot, org);
 
   let configPath: string | null = null;
   for (const candidate of candidates) {

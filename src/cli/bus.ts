@@ -8,7 +8,7 @@ import { annotateTask, createTask, updateTask, completeTask, claimTask, readTask
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
-import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../bus/system.js';
+import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity, activityChannelEnvCandidates } from '../bus/system.js';
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
 import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
@@ -936,7 +936,21 @@ busCommand
     if (success) {
       console.log('Activity posted');
     } else {
-      console.error('Failed to post activity. Check that ACTIVITY_CHAT_ID is set in your org secrets.env or .env file.');
+      // A failed BROADCAST is worse than a failed 1:1 send: a failed 1:1
+      // leaves one party waiting, a failed broadcast leaves EVERYONE
+      // believing they were told. postActivity's boolean is invisible to a
+      // shell caller, and this command exited 0 on failure — so `RC=$?` read
+      // 0 and the operator stopped watching for a message that was never
+      // sent. Exit non-zero: a known failure costs a resend, an unknown one
+      // costs the obligation.
+      const searched = activityChannelEnvCandidates(orgDir, env.ctxRoot, env.org);
+      console.error(
+        'Failed to post activity. This command reads activity-channel.env ONLY, and that file ' +
+        'must define BOTH ACTIVITY_BOT_TOKEN and ACTIVITY_CHAT_ID. Searched:\n' +
+        searched.map((p) => `  ${p}`).join('\n') + '\n' +
+        'Setting ACTIVITY_CHAT_ID in secrets.env or .env has no effect on this command.',
+      );
+      process.exitCode = 1;
     }
   });
 
