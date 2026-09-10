@@ -1,6 +1,6 @@
 import { lstatSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, normalize, sep } from 'node:path';
 
 /**
  * Suite precondition: CTX_FRAMEWORK_ROOT must not be set in the environment the
@@ -157,18 +157,64 @@ export type ContainmentVerdict =
   | { kind: 'resolved'; path: string }
   | { kind: 'not-absolute' }
   | { kind: 'dotdot-component' }
+  | { kind: 'not-literal'; normalized: string }
   | { kind: 'unresolvable'; at: string; isSymlink: boolean };
+
+/**
+ * ⛔⛔ THE THIRD HOLE, AND IT WAS INSIDE THE FIX FOR THE SECOND — one character wide.
+ * MEASURED by city at head `8cd41091`, chief reproduced: `lstat` on a path ending in
+ * `/`, `//` or `/.` FOLLOWS a symlink (POSIX directory semantics), so on a DANGLING
+ * link every one of those forms throws `ENOENT` exactly as an absent name does:
+ *
+ *     lstat(link)      -> OK              lstat(link + '/')   -> THREW ENOENT
+ *     lstat(link + '/.')-> THREW ENOENT   lstat(link + '//')  -> THREW ENOENT
+ *
+ * ⇒ the disambiguator that exists to tell "unresolvable link" from "absent name"
+ * COULD NOT, `dirname` then stripped the separator, the link was re-joined unresolved,
+ * and `CTX_ROOT=<sandbox>/dangling/` was **ACCEPTED** while `<sandbox>/dangling` was
+ * refused. **Fail-open, and every other arm on that same link refused — so the suite
+ * agreed with the defect.**
+ *
+ * ⭐ RULED FIX (chief): REJECT, DO NOT NORMALISE — the same stance the sibling ops #4
+ * change is built on, arriving here for a third reason. Require the argument to be
+ * LITERAL-NORMAL before the walk ever runs, so no resolver is ever handed a form whose
+ * meaning depends on which call resolves it.
+ * ⚠ AND `path.normalize` ALONE IS NOT THE PREDICATE — measured, not assumed:
+ * `normalize('/a/b/') === '/a/b/'`, so equality with `normalize` PRESERVES a trailing
+ * separator and would have admitted the exact input that produced the hole. The three
+ * conditions are separate on purpose and each names a different form.
+ * `mktemp -d` output satisfies all three.
+ */
+export function isLiteralNormal(raw: string): boolean {
+  if (raw !== normalize(raw)) return false;                 // '//', '/./', collapses
+  if (raw.length > 1 && raw.endsWith(sep)) return false;    // trailing separator
+  return !raw
+    .split(sep)
+    .slice(1)
+    .some((c) => c === '' || c === '.' || c === '..');      // empty / '.' / '..'
+}
 
 export function resolveNonStrict(raw: string): ContainmentVerdict {
   // (1) Reject the forms that no resolver can be trusted with, BEFORE resolving.
-  //     Order matters: both of these are properties of the STRING, and once any
-  //     resolver has touched it the information is already gone.
+  //     These are properties of the STRING, and once any resolver has touched it the
+  //     information is already gone.
   if (!isAbsolute(raw)) return { kind: 'not-absolute' };
   if (raw.split(sep).includes('..')) return { kind: 'dotdot-component' };
+  if (!isLiteralNormal(raw)) return { kind: 'not-literal', normalized: normalize(raw) };
+  return walkToResolvable(raw);
+}
 
-  // (2) Walk up to the deepest ancestor `.native` actually RESOLVES, collecting the
-  //     unresolved tail. `.native` calls realpath(3), so it follows symlinks the way
-  //     the kernel does — which is the only definition of "where a write lands".
+/**
+ * The deepest-existing-ancestor walk, exported SEPARATELY so its own disambiguator can
+ * be exercised directly. After `resolveNonStrict`'s literal-normal gate this function
+ * can never receive a trailing-separator form through the ordinary path — and a branch
+ * that cannot be reached is a branch nobody measures (rule 210), so the arms call it
+ * here instead of assuming the gate makes it moot.
+ */
+export function walkToResolvable(raw: string): ContainmentVerdict {
+  // Walk up to the deepest ancestor `.native` actually RESOLVES, collecting the
+  // unresolved tail. `.native` calls realpath(3), so it follows symlinks the way the
+  // kernel does — which is the only definition of "where a write lands".
   const tail: string[] = [];
   let cursor = raw;
   for (;;) {
@@ -176,15 +222,30 @@ export function resolveNonStrict(raw: string): ContainmentVerdict {
       const base = realpathSync.native(cursor);
       return { kind: 'resolved', path: tail.length === 0 ? base : join(base, ...tail) };
     } catch {
+      // ⛔⛔ PROBE THE NAME ITSELF, WITH TRAILING SEPARATORS STRIPPED. `lstat` on a
+      // path ending in `/` follows the link (POSIX directory semantics), so a
+      // DANGLING link probed as `link/` throws exactly as an absent name does —
+      // and the disambiguator that exists to tell those two apart CANNOT.
+      // MEASURED (city, PR #47 round 2, at head 8cd41091): on the same dangling link,
+      //     lstat(link)   -> OK          lstat(link + '/')  -> THREW ENOENT
+      //     lstat(link + '//') -> THREW ENOENT
+      // so `CTX_ROOT=<sandbox>/dangling` was REFUSED while `CTX_ROOT=<sandbox>/dangling/`
+      // was ACCEPTED: the walk read it as a missing NAME, dropped to the parent,
+      // re-joined the tail and reported a safe path.
+      // ⭐ THE HOLE WAS IN THE FIX FOR THE HOLE, one character wide, and every OTHER
+      // arm on that link (bare, `/child`, `/.`) refused — so the suite agreed with the
+      // defect. Stripping is safe where collapsing `..` is not: a trailing separator
+      // cannot move between directories, it only asserts directory-ness.
+      const probe = cursor.replace(/\/+$/, '') || sep;
       let exists: boolean;
       let isSymlink = false;
       try {
-        isSymlink = lstatSync(cursor).isSymbolicLink();
+        isSymlink = lstatSync(probe).isSymbolicLink();
         exists = true;
       } catch {
         exists = false;
       }
-      if (exists) return { kind: 'unresolvable', at: cursor, isSymlink };
+      if (exists) return { kind: 'unresolvable', at: probe, isSymlink };
       const parent = dirname(cursor);
       // `dirname('/') === '/'`: the filesystem root is the termination condition, and
       // it is unreachable in practice because `/` always resolves. Without it a root
@@ -254,6 +315,20 @@ function ctxRootFailure(): string | null {
       '  place under path.resolve() — measured: path.resolve reports INSIDE a sandbox\n' +
       '  while realpath(3) reports OUTSIDE it. Any containment answer computed after\n' +
       '  that collapse is an answer about a path that was never the argument.'
+    );
+  }
+
+  if (verdict.kind === 'not-literal') {
+    return (
+      `CTX_ROOT is not a LITERAL path:\n    CTX_ROOT=${raw}\n` +
+      `    would normalise to  ${verdict.normalized}\n\n` +
+      '  A trailing separator, a doubled separator, or a "." component changes which\n' +
+      '  syscall answers a question about it — lstat(2) FOLLOWS a symlink when the path\n' +
+      '  ends in "/", so a dangling link written as "link/" is indistinguishable from a\n' +
+      '  name that does not exist, and the containment walk resolves it away.\n' +
+      '  Refused rather than normalised: normalising it here would make this check answer\n' +
+      '  about a path that is not the one the writers will be handed.\n' +
+      `  Pass the literal form instead:  ${verdict.normalized.replace(/\/+$/, '') || sep}`
     );
   }
 

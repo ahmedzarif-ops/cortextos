@@ -1,8 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
-import setup, { isUnderRoot, liveStateRoot, resolveNonStrict } from '../../require-isolated-env.js';
+import { join, normalize, sep } from 'node:path';
+import setup, {
+  isLiteralNormal,
+  isUnderRoot,
+  liveStateRoot,
+  resolveNonStrict,
+  walkToResolvable,
+} from '../../require-isolated-env.js';
 
 /**
  * PERMANENT ARMS for the CTX_ROOT containment check (city, PR #47 round 1: "add
@@ -92,6 +98,75 @@ describe('resolveNonStrict — the seven cases', () => {
   it('7. a relative path is refused rather than resolved against the cwd', () => {
     expect(resolveNonStrict('relative/sandbox')).toEqual({ kind: 'not-absolute' });
     expect(resolveNonStrict('.')).toEqual({ kind: 'not-absolute' });
+  });
+});
+
+describe('the literal-normal gate — city round 2, and it was a hole INSIDE the fix for a hole', () => {
+  /**
+   * ⛔ MEASURED, not relayed. On a DANGLING link, `lstat` FOLLOWS the link when the
+   * path ends in a separator, so `link/` throws ENOENT exactly as an absent name does
+   * and the walk resolved it away. Pre-fix behaviour, re-measured from this seat form
+   * by form rather than taken from the report:
+   *
+   *   bare      -> REFUSED  (lstat(link) succeeds, .native throws)
+   *   '/'       -> ACCEPTED  ⛔ the hole
+   *   '//'      -> ACCEPTED  ⛔ the hole
+   *   '/.'      -> REFUSED  (dirname drops the '.', the next cursor IS the link)
+   *   '/./x'    -> REFUSED  (two dirname steps reach the link)
+   *   '/child'  -> REFUSED
+   *
+   * ⭐ EXACTLY TWO OF THE SIX FORMS BYPASSED, AND THE OTHER FOUR REFUSED — so the
+   * suite agreed with the defect. A relayed list of "all these forms are accepted"
+   * would have had me write four arms that pass for the wrong reason; city measured
+   * `/.` refusing and said so, and re-measuring here confirmed it.
+   * ⇒ **A CORRECTION THAT MAKES A REPORT SMALLER IS WORTH MORE THAN ONE THAT MAKES IT
+   * BIGGER, because it is the one nobody is rewarded for sending.**
+   *
+   * The ruled fix rejects all four non-literal forms up front, so `/.` and `/./x` now
+   * refuse for a DIFFERENT reason than they did before — a visible behaviour change,
+   * named here so a diff review does not read it as a regression.
+   */
+  const forms = ['/', '//', '/.', '/./x'];
+
+  it('refuses every non-literal form of a dangling link, with its own reason', () => {
+    for (const suffix of forms) {
+      // RAW STRING CONCATENATION. path.join would normalise the suffix away and the
+      // arm would test the bare form four times.
+      const raw = join(sandbox, 'dangling') + suffix;
+      const v = resolveNonStrict(raw);
+      expect(v.kind, `form ${JSON.stringify(suffix)}`).toBe('not-literal');
+    }
+  });
+
+  it('the bare dangling link still refuses through the WALK, not the gate', () => {
+    expect(isLiteralNormal(join(sandbox, 'dangling'))).toBe(true);
+    expect(resolveNonStrict(join(sandbox, 'dangling')).kind).toBe('unresolvable');
+  });
+
+  it('isLiteralNormal accepts what mktemp -d produces and the ordinary sandbox forms', () => {
+    const fresh = mkdtempSync(join(tmpdir(), 'ctxroot-lit-'));
+    expect(isLiteralNormal(fresh)).toBe(true);
+    expect(isLiteralNormal(realpathSync.native(fresh))).toBe(true);
+    expect(isLiteralNormal(join(sandbox, 'not-created-yet', 'deeper'))).toBe(true);
+    rmSync(fresh, { recursive: true, force: true });
+    // ⚠ `path.normalize` ALONE IS NOT THE PREDICATE: normalize('/a/b/') === '/a/b/',
+    // so an equality-with-normalize test would ADMIT the exact form that caused the
+    // hole. The trailing-separator condition is separate for that reason.
+    expect(normalize('/a/b/')).toBe('/a/b/');
+    expect(isLiteralNormal('/a/b/')).toBe(false);
+  });
+
+  it('the WALK\'s own disambiguator is fixed too, exercised directly past the gate', () => {
+    // The gate makes this unreachable through resolveNonStrict, and a branch that
+    // cannot be reached is a branch nobody measures — so the arm calls the walk.
+    for (const suffix of ['/', '//']) {
+      const raw = join(sandbox, 'dangling') + suffix;
+      const v = walkToResolvable(raw);
+      expect(v.kind, `walk on ${JSON.stringify(suffix)}`).toBe('unresolvable');
+      if (v.kind !== 'unresolvable') throw new Error('unreachable');
+      expect(v.at).toBe(join(sandbox, 'dangling')); // names the LINK, separator stripped
+      expect(v.isSymlink).toBe(true);
+    }
   });
 });
 
