@@ -377,16 +377,24 @@ say "baseline has $BASE_COUNT failing entr(ies)"
 # So: when the diff adds or removes NO test files the expectation is EXACT and is enforced; when it
 # does, a file count cannot bound a test count in either direction, so the counts are REPORTED and
 # the refusal is left to the prerequisite control above. No invented number.
-TEST_FILE_DELTA="$(git diff --name-status "$BASE_SHA" "$HEAD_SHA" -- '*.test.ts' '*.test.tsx' 2>/dev/null | grep -cE '^[AD]')"
-say "collected_base=${BASE_COLLECTED:-unknown} collected_head=${HEAD_COLLECTED:-unknown} test_files_added_or_removed=${TEST_FILE_DELTA:-0}"
+# ⛔ ANY CHANGE TO A TEST PATH COUNTS AS TOUCHING IT — A/M/D/R, not just A and D.
+# (guard's P2, reproduced: base=2 head=3, test_files_added_or_removed=0, rc 1 on a VALID push.)
+# The first version counted only ADDED and DELETED files, so a diff that MODIFIES a test file to add
+# one green test read as "no test files changed" and hit the STRICT arm — which then refused the
+# push for a collected-count difference the diff fully explains.
+# ⭐ That is the false positive this block's own comment warns about, committed in the block that
+# warns about it: a gate that refuses ordinary work teaches the bypass. The strict arm is only
+# honest when the diff touches NO test path at all.
+TEST_FILE_DELTA="$(git diff --name-status "$BASE_SHA" "$HEAD_SHA" -- '*.test.ts' '*.test.tsx' 2>/dev/null | grep -c .)"
+say "collected_base=${BASE_COLLECTED:-unknown} collected_head=${HEAD_COLLECTED:-unknown} test_paths_changed=${TEST_FILE_DELTA:-0}"
 if [ -z "$BASE_COLLECTED" ] || [ -z "$HEAD_COLLECTED" ]; then
   die "populations-unknown — could not read a collected-test total from one of the runs. FAILING CLOSED: a comparison whose population sizes are unknown is not a comparison."
 fi
 if [ "${TEST_FILE_DELTA:-0}" -eq 0 ] && [ "$BASE_COLLECTED" != "$HEAD_COLLECTED" ]; then
-  die "populations-differ base=$BASE_COLLECTED head=$HEAD_COLLECTED while the diff adds or removes NO test files. FAILING CLOSED: the two sides ran different numbers of tests, so 'no new failures' is a statement about two different suites. This is the exact shape of the 151-test dashboard gap this control was added for."
+  die "populations-differ base=$BASE_COLLECTED head=$HEAD_COLLECTED while the diff touches NO test path at all (added, modified, deleted or renamed). FAILING CLOSED: the two sides ran different numbers of tests, so 'no new failures' is a statement about two different suites. This is the exact shape of the 151-test dashboard gap this control was added for."
 fi
 if [ "${TEST_FILE_DELTA:-0}" -gt 0 ] && [ "$BASE_COLLECTED" != "$HEAD_COLLECTED" ]; then
-  say "⚠ FINDING: collected totals differ ($BASE_COLLECTED vs $HEAD_COLLECTED) and the diff adds/removes $TEST_FILE_DELTA test file(s):"
+  say "⚠ FINDING: collected totals differ ($BASE_COLLECTED vs $HEAD_COLLECTED) and the diff touches $TEST_FILE_DELTA test path(s):"
   git diff --name-status "$BASE_SHA" "$HEAD_SHA" -- '*.test.ts' '*.test.tsx' 2>/dev/null | grep -E '^[AD]' | sed 's/^/    /'
   say "   Not a refusal: a file count cannot bound a test count. The prerequisite control on both sides is what refuses an under-prepared tree."
 fi

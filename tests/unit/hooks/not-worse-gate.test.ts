@@ -485,24 +485,76 @@ describe('not-worse gate: prerequisites and populations', () => {
     const { root, bare, work } = remoteFixture();
     try {
       writePrereq(work, true);
+      // ⛔ THE OUTCOME MUST CHANGE WITHOUT ANY TEST PATH CHANGING, or this arm cannot reach the
+      // strict branch at all. So the test imports a helper and the DIFF TOUCHES ONLY THE HELPER.
+      // (An earlier version of this arm rewrote gate.test.ts itself, which is a MODIFIED test path
+      // under the corrected predicate — it was exercising the loose arm while claiming the strict
+      // one, and only guard's P2 on the predicate made that visible.)
+      writeFileSync(join(work, 'helper.ts'), 'export const VALUE = 1;\n');
+      writeFileSync(
+        join(work, 'gate.test.ts'),
+        "import { it, expect } from 'vitest'; import { VALUE } from './helper'; it('reads the helper',()=>expect(VALUE).toBe(1));\n",
+      );
+      git(['add', '-A'], work);
+      git(['commit', '-qm', 'baseline'], work);
+      git(['remote', 'add', 'origin', bare], work);
+      git(['push', '-q', 'origin', 'main'], work);
+
+      // Only the NON-TEST file changes: same test files, same number of tests, different outcome.
+      // The strict arm therefore applies and must be satisfied, so the gate reaches the set
+      // comparison and refuses on the NEW FAILURE rather than on the populations.
+      writeFileSync(join(work, 'helper.ts'), 'export const VALUE = 2;\n');
+      git(['add', '-A'], work);
+      git(['commit', '-qm', 'head changes the helper so the same test goes red'], work);
+
+      const r = gateOn(work);
+      expect(r.out).toContain('collected_base=');
+      expect(r.out).toContain('test_paths_changed=0');
+      expect(r.out, 'the populations check fired on two identical suites').not.toContain('populations-differ');
+      expect(r.status, 'a new failure was admitted').not.toBe(0);
+      expect(r.out).toContain('NEW FAILURES NOT PRESENT ON');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 180_000);
+
+  // ⛔ CASE 14 — THE FALSE POSITIVE GUARD FOUND, PINNED. (guard's P2 on this PR.)
+  // A diff that only MODIFIES a test file, adding one green test, changes the collected total while
+  // adding and deleting nothing. The first predicate counted only A and D, so it read
+  // "no test files changed" and hit the STRICT arm, refusing a perfectly valid push for a
+  // difference the diff fully explains.
+  // ⭐ This is the arm that keeps the predicate honest in the direction that costs a contributor
+  // something. The refusal arms cost nobody anything when they are wrong.
+  it('case 14 M-ONLY: modifying a test file to add a green test is reported, never refused', () => {
+    const { root, bare, work } = remoteFixture();
+    try {
+      writePrereq(work, true);
       writeFileSync(join(work, 'gate.test.ts'), FIXTURES.green);
       git(['add', '-A'], work);
       git(['commit', '-qm', 'baseline'], work);
       git(['remote', 'add', 'origin', bare], work);
       git(['push', '-q', 'origin', 'main'], work);
 
-      // Same test FILES on both sides, same number of tests — only the outcome changes. The strict
-      // arm therefore applies and must be satisfied, so the gate reaches the set comparison and
-      // refuses on the NEW FAILURE rather than on the populations.
-      writeFileSync(join(work, 'gate.test.ts'), FIXTURES.assertion);
+      // MODIFY the same file: one extra passing test, plus a failing one so the gate is forced past
+      // the early exit and actually reaches the populations block.
+      writeFileSync(
+        join(work, 'gate.test.ts'),
+        FIXTURES.green +
+          "import { it as it2, expect as e2 } from 'vitest'; it2('added green',()=>e2(1).toBe(1));\n" +
+          "import { it as it3, expect as e3 } from 'vitest'; it3('added red',()=>e3(1).toBe(2));\n",
+      );
       git(['add', '-A'], work);
-      git(['commit', '-qm', 'head turns the same test red'], work);
+      git(['commit', '-qm', 'modify the test file: +1 green, +1 red'], work);
 
       const r = gateOn(work);
-      expect(r.out).toContain('collected_base=');
-      expect(r.out).toContain('test_files_added_or_removed=0');
-      expect(r.out, 'the populations check fired on two identical suites').not.toContain('populations-differ');
-      expect(r.status, 'a new failure was admitted').not.toBe(0);
+      // The diff MODIFIES a test path, so the strict arm must not apply.
+      expect(r.out).toContain('test_paths_changed=1');
+      expect(
+        r.out,
+        'a modified test file was treated as "no test paths changed" and refused on the populations',
+      ).not.toContain('populations-differ');
+      // It still refuses — on the NEW FAILURE, which is the gate doing its job.
+      expect(r.status).not.toBe(0);
       expect(r.out).toContain('NEW FAILURES NOT PRESENT ON');
     } finally {
       rmSync(root, { recursive: true, force: true });
