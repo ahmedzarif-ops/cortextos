@@ -167,20 +167,81 @@ Full reference: `.claude/skills/knowledge-base/SKILL.md`
 Keep your memory collection searchable and current:
 
 ```bash
-# both-UTC-day-files AND all-or-nothing path set (task_1788799237155_49135842):
-#   (a) at a UTC boundary the daily holding the evening's work is no longer "today" — measured
-#       2026-09-08, 60 chunks left unsearchable after a fully compliant run;
-#   (b) kb-ingest ABORTS THE WHOLE PATH SET if any path is missing (rc=1, nothing ingested at all),
-#       and predecessor-absent days are real: 14 of 80 seat-days, ALL SIX seats on 2026-09-02.
-# So yesterday's daily is appended ONLY when it exists. BSD date first, GNU fallback.
-# Array form on purpose — an empty-string argument aborts the whole ingest (wrapper bug 00011630).
+# ══ Step 10 KB ingest — v2 ══
+# v1 → v2: today's daily is APPENDED ONLY IF PRESENT and its absence is reported as a FINDING;
+#          a guardrail event fires on the absent branch; GUARDRAILS.md is ingested only when its
+#          CONTENT changed; the stamp is written only after a successful ingest.
+
+# Array form on purpose — an empty-string argument aborts the whole ingest.
+ARGS=(./MEMORY.md)
+
+# ── today's daily MUST already exist: STEP 5 creates it. Step 10 only DETECTS its absence. ──
+# kb-ingest ABORTS THE WHOLE PATH SET on one missing path (rc=1, NOTHING written) while any gate
+# line above it still reads healthy ⇒ A PASS UPSTREAM OF AN ABORT READS AS A PASS.
+# The live case is the FIRST HEARTBEAT AFTER A UTC BOUNDARY: "today" is a date with no file yet.
+# Measured 2026-09-10 across the deployed agents: one had a daily only because of post-midnight
+# appends and another had none at all, and that run would have written NOTHING behind a healthy
+# "CHANGED" line. v2.1's `exit "$RC"` makes it loud — but it is attributed as "ingest failed",
+# NOT as "Step 5 never ran", which is the fact a reader needs. Hence the explicit finding below.
+TD="./memory/$(date -u +%Y-%m-%d).md"
+if [ ! -f "$TD" ]; then
+  echo "STEP-10 FINDING: $TD ABSENT — STEP 5 DID NOT RUN THIS CYCLE. This is a FINDING, not a skip."
+  echo "  DO NOT create an empty file to make the ingest pass: the absence IS the evidence."
+  echo "  Ingesting the paths that DO exist; today's work is UNSEARCHABLE until Step 5 runs."
+  # Unmissable WITHOUT overloading rc — rc must keep meaning "the ingest failed".
+  cortextos bus log-event action guardrail_triggered info \
+    --meta '{"agent":"'$CTX_AGENT_NAME'","guardrail":"step5-skipped-daily-absent","context":"step 10 found today daily absent; ingested surviving paths only"}'
+else
+  ARGS+=("$TD")
+fi
+
+# Yesterday's daily appended ONLY when it exists — predecessor-absent days are real (measured: 14 of
+# 80 agent-days, and every agent on one of them). BSD date first, GNU fallback.
 Y="./memory/$(date -u -v-1d +%Y-%m-%d 2>/dev/null || date -u -d yesterday +%Y-%m-%d).md"
-# Handoff documents under memory/handoffs/ are EXCLUDED from the knowledge base by chief ruling 2026-09-08 (task 64087460): they restate dailies that are already indexed, and a vector store has no supersession model, so a retired handoff would return with the same confidence as the live one. Never add them to ARGS.
-ARGS=(./MEMORY.md "./memory/$(date -u +%Y-%m-%d).md")
 [ -f "$Y" ] && ARGS+=("$Y")
+# Handoffs under memory/handoffs/ are EXCLUDED: they restate dailies that are already indexed, and a
+# vector store has no supersession model, so a retired handoff would come back with the same
+# confidence as the live one. Never add them to ARGS.
+
+# ── GUARDRAILS.md joins ARGS ONLY WHEN CHANGED ──
+# ⛔ THE GATE IS sha256 (CONTENT), NEVER mtime. `-nt` is the obvious implementation and it is WRONG:
+#    a checkout, a branch switch or a state sync all bump mtime while rewriting bytes identically,
+#    which would re-embed the whole file every cycle — the exact spend this gate exists to prevent.
+#    `touch` -> SKIPPED is the proof the gate is content-addressed; load-bearing, not a footnote.
+GR="./GUARDRAILS.md"
+GR_STAMP="${CTX_ROOT}/state/${CTX_AGENT_NAME}/.kb-guardrails-sha256"
+GR_IN_ARGS=0
+if [ -f "$GR" ]; then
+  GR_NOW=$(shasum -a 256 "$GR" 2>/dev/null | awk '{print $1}')
+  [ -n "$GR_NOW" ] || GR_NOW=$(sha256sum "$GR" | awk '{print $1}')
+  GR_WAS=$(cat "$GR_STAMP" 2>/dev/null || true)
+  if [ "$GR_NOW" != "$GR_WAS" ]; then
+    ARGS+=("$GR"); GR_IN_ARGS=1
+    echo "GUARDRAILS: CHANGED -> ingesting (was=${GR_WAS:-<no stamp>} now=$GR_NOW)"
+  else
+    echo "GUARDRAILS: unchanged -> skipped (sha $GR_NOW)"
+  fi
+else
+  echo "GUARDRAILS: FILE ABSENT — not added; this is a FINDING, not a skip"
+fi
+
+# ⛔ NEVER PIPE THE INGEST. `RC=$?` after a pipe is the LAST command's status, so a piped ingest turns
+#    stamp-after-success into stamp-after-tail-succeeded — unconditional, which silently converts the
+#    crash-consistent ordering below into NO ordering at all. Two agents hit this within one hour,
+#    one piping through `tail` and one reading rc from `cut`: same mechanism, different command.
 cortextos bus kb-ingest "${ARGS[@]}" \
   --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private --force
 RC=$?; echo "kb-ingest rc=$RC"
+
+# ⛔ STAMP AFTER SUCCESS ONLY — CRASH-CONSISTENCY, NOT TIDINESS. Proven by a real kill: a daemon
+# restart killed an ingest MID-EMBED; because the stamp writes only on rc=0 it stayed absent and the
+# next cycle re-ingested. Had it stamped first, the file would read as indexed while never landing,
+# and this gate would answer "unchanged -> skipped" FOREVER — a silent, permanent gap.
+if [ "$GR_IN_ARGS" -eq 1 ] && [ "$RC" -eq 0 ]; then
+  printf '%s' "$GR_NOW" > "$GR_STAMP"; echo "GUARDRAILS stamp updated -> $GR_NOW"
+elif [ "$GR_IN_ARGS" -eq 1 ]; then
+  echo "GUARDRAILS stamp NOT updated (rc=$RC) — will retry next cycle, by design"
+fi
 [ "$RC" -eq 0 ] || echo "KB INGEST FAILED rc=$RC — outcome UNKNOWN, partial writes possible (no rollback); enumerate the collection before any retry"
 
 # ⛔ v2.1 — THE BLOCK MUST CARRY ITS OWN rc. Without this line the block ENDS on the `|| echo` above,
@@ -195,7 +256,7 @@ RC=$?; echo "kb-ingest rc=$RC"
 #    `awk 'NR>ex && /^```bash/' <this file>` returns empty. IT DOES NOT IN `templates/hermes`, where two
 #    blocks follow and the line is a subshell for that reason. A CLAUSE COPIED ACROSS FIVE FILES MAKES A
 #    CLAIM ABOUT EACH OF THEM, and this one was true of four: re-run the check before trusting it in a
-#    sixth. (social, 2026-09-10)
+#    sixth. (found in review, 2026-09-10)
 exit "$RC"
 ```
 
