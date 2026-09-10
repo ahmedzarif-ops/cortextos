@@ -462,6 +462,15 @@ cortextos bus submit-community-item <item-name> <item-type> "<description>" [--d
 
 
 ### Peekaboo (macOS Desktop Automation)
+
+> ⚠ **OPTIONAL THIRD-PARTY TOOL — cortextOS DOES NOT INSTALL IT, AND MAY NOT BE PRESENT.**
+> The lines below describe an interface, **not an available capability**. On a fleet measured
+> 2026-09-10 the binary was **absent** and every claim here — including the *permissions granted*
+> line, which asserts a state of a binary that is not on the machine — read as confirmation that the
+> tool was set up.
+> ⛔ **VERIFY BY EXECUTION BEFORE RELYING ON IT: run the binary and check `rc`.** Do **not** use
+> `which` alone, and do **not** read a `127` from a wrapper as a fact about this tool —
+> **`rc=127` is a statement about the command you typed, never about its argument.**
 - **Binary**: `peekaboo`
 - **Use for**: Screenshot capture, UI clicking, typing, drag, window/app management, desktop automation
 - **Permissions**: Screen Recording + Accessibility granted to the process (permissions inherited from daemon)
@@ -471,6 +480,15 @@ cortextos bus submit-community-item <item-name> <item-type> "<description>" [--d
 
 
 ### gogcli (Google Workspace CLI)
+
+> ⚠ **OPTIONAL THIRD-PARTY TOOL — cortextOS DOES NOT INSTALL IT, AND MAY NOT BE PRESENT.**
+> The lines below describe an interface, **not an available capability**. On a fleet measured
+> 2026-09-10 the binary was **absent** and every claim here — including the *permissions granted*
+> line, which asserts a state of a binary that is not on the machine — read as confirmation that the
+> tool was set up.
+> ⛔ **VERIFY BY EXECUTION BEFORE RELYING ON IT: run the binary and check `rc`.** Do **not** use
+> `which` alone, and do **not** read a `127` from a wrapper as a fact about this tool —
+> **`rc=127` is a statement about the command you typed, never about its argument.**
 - **Binary**: `gog`
 - **Use for**: Gmail (search, send, archive, labels, drafts, filters), Calendar (list/create/update events, free/busy, conflicts), Drive (list/upload/download), Contacts, Tasks, Sheets, Docs
 - **Auth**: OAuth via `gog auth credentials` + `gog auth add`
