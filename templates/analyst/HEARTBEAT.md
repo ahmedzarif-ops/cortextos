@@ -122,6 +122,54 @@ If you learned something this cycle that should persist across sessions:
 - System behaviors noted
 - Append to MEMORY.md
 
+## Step 9: Re-ingest memory to knowledge base
+
+> ⚠ **NUMBERED 9 HERE, AND THE FLEET CALLS IT "THE STEP-10 BLOCK".** That is not a mistake in
+> either place: this variant's step list ends at 8, while `agent`, `agent-codex`, `agent-opencode`,
+> `hermes` and `orchestrator` carry a guardrail self-check that this one does not, which puts the
+> same block at 10 there. **The number is a position in a file, not a name for the block.** Numbering
+> it 10 here to match the fleet's phrase would leave a file whose steps run 1, 2, 3, 3b, 4-8, 10.
+
+Full reference: `.claude/skills/knowledge-base/SKILL.md`
+
+Keep your memory collection searchable and current:
+
+```bash
+# both-UTC-day-files AND all-or-nothing path set:
+#   (a) at a UTC boundary the daily holding the evening's work is no longer "today" — measured
+#       2026-09-08, 60 chunks left unsearchable after a fully compliant run;
+#   (b) kb-ingest ABORTS THE WHOLE PATH SET if any path is missing (rc=1, nothing ingested at all),
+#       and predecessor-absent days are real: 14 of 80 seat-days, all six seats on 2026-09-02.
+# So yesterday's daily is appended ONLY when it exists. BSD date first, GNU fallback.
+# Array form on purpose — an empty-string argument aborts the whole ingest.
+Y="./memory/$(date -u -v-1d +%Y-%m-%d 2>/dev/null || date -u -d yesterday +%Y-%m-%d).md"
+# Handoff documents under memory/handoffs/ are EXCLUDED from the knowledge base by chief ruling
+# 2026-09-08: they restate dailies that are already indexed, and a vector store has no supersession
+# model, so a retired handoff would return with the same confidence as the live one. Never add them.
+ARGS=(./MEMORY.md "./memory/$(date -u +%Y-%m-%d).md")
+[ -f "$Y" ] && ARGS+=("$Y")
+cortextos bus kb-ingest "${ARGS[@]}" \
+  --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private --force
+RC=$?; echo "kb-ingest rc=$RC"
+[ "$RC" -eq 0 ] || echo "KB INGEST FAILED rc=$RC — outcome UNKNOWN, partial writes possible (no rollback); enumerate the collection before any retry"
+
+# ⛔ v2.1 — THE BLOCK MUST CARRY ITS OWN rc. Without this line the block ENDS on the `|| echo` above,
+#    whose echo SUCCEEDS, so a FAILED ingest exits 0. Two seats backgrounded this block and the
+#    harness notification said exit 0 for a failed ingest; both read the verdict line by habit rather
+#    than by control. The echo stays ABOVE this line — the human-readable reason and the machine
+#    status are different channels and both are needed.
+# ⚠ CONSEQUENCE, STATED BECAUSE IT IS INTENDED AND LOUD: `exit "$RC"` TERMINATES ANY COMPOUND COMMAND
+#    THIS BLOCK IS PASTED INTO. If you paste this block somewhere else, that is on you.
+# ⛔ THE CLAIM THAT MAKES THAT SAFE IS PER-FILE, SO HERE IS THE CHECK RATHER THAN THE CONCLUSION:
+#    no ```bash fence follows this line in THIS file — only prose — so it truncates nothing here.
+#    `awk 'NR>ex && /^```bash/' <this file>` returns empty. IT DOES NOT IN `templates/hermes`, where
+#    two blocks follow and the line is a subshell for that reason. A CLAUSE COPIED ACROSS FILES MAKES
+#    A CLAIM ABOUT EACH OF THEM: re-run the check before trusting it in a new variant.
+exit "$RC"
+```
+
+This runs automatically on every heartbeat cycle. It ensures past experiences, user preferences, and learned patterns are semantically searchable for future tasks. Skip if GEMINI_API_KEY is not configured.
+
 ---
 
 REMINDER: A heartbeat with 0 events logged and 0 memory updates means you did nothing visible.
