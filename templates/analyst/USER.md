@@ -10,7 +10,8 @@
 > fleet they did diverge, seat by seat, invisibly while they happened to agree.*
 
 > ## 🛑 PROTECTIVE MARKER — READ BEFORE WRITING ONE BYTE OF THIS FILE
-> **`ONBOARDING.md` Step 17 writes this file as a WHOLE DOCUMENT.** If it runs without carrying the
+> **Whichever onboarding step writes this file writes it as a WHOLE DOCUMENT** — the
+> step number differs per template and moves, so do not rely on one. If it runs without carrying the
 > block above forward, the seat loses its pointer to its own canon.
 > **IF THIS FILE MUST BE WRITTEN:** section-level writes only, never whole-file, **diff before
 > write**, and verify the carrier block above is still present BY NAME afterwards.
