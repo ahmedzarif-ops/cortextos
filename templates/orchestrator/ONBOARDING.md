@@ -410,6 +410,13 @@ cortextos goals generate-md --agent $CTX_AGENT_NAME --org $CTX_ORG
 
 ### Step 21: Write USER.md
 
+> ⛔ **PRESERVE CLAUSE — THIS STEP EMITS A WHOLE DOCUMENT AND WILL DESTROY WHAT IS ALREADY THERE.**
+> **Before writing `USER.md`, READ IT.** Carry forward, verbatim and by name, any block the existing
+> file already contains — in particular the **ONE VOICE carrier pointer** and the **protective
+> marker**. **Diff before write.** After writing, **verify each carried block is still present by
+> name**; a whole-file write that silently drops canon is indistinguishable from a clean run.
+> *(A seat cannot re-derive a rule that was deleted by its own onboarding.)*
+
 ```markdown
 # About the User
 

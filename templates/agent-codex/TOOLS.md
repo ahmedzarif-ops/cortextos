@@ -172,11 +172,29 @@ Agent secrets: `orgs/{org}/agents/{agent}/.env`
 - Quick verify: `agent-browser open https://example.com && agent-browser get title && agent-browser close`
 
 ### Peekaboo (macOS Desktop Automation)
+
+> ⚠ **OPTIONAL THIRD-PARTY TOOL — cortextOS DOES NOT INSTALL IT, AND MAY NOT BE PRESENT.**
+> The lines below describe an interface, **not an available capability**. On a fleet measured
+> 2026-09-10 the binary was **absent** and every claim here — including the *permissions granted*
+> line, which asserts a state of a binary that is not on the machine — read as confirmation that the
+> tool was set up.
+> ⛔ **VERIFY BY EXECUTION BEFORE RELYING ON IT: run the binary and check `rc`.** Do **not** use
+> `which` alone, and do **not** read a `127` from a wrapper as a fact about this tool —
+> **`rc=127` is a statement about the command you typed, never about its argument.**
 - `peekaboo image` (screenshot), `peekaboo list` (apps), `peekaboo run <script>`
 - Screen Recording + Accessibility permissions granted
 - `peekaboo learn` for full usage guide
 
 ### gogcli (Google Workspace)
+
+> ⚠ **OPTIONAL THIRD-PARTY TOOL — cortextOS DOES NOT INSTALL IT, AND MAY NOT BE PRESENT.**
+> The lines below describe an interface, **not an available capability**. On a fleet measured
+> 2026-09-10 the binary was **absent** and every claim here — including the *permissions granted*
+> line, which asserts a state of a binary that is not on the machine — read as confirmation that the
+> tool was set up.
+> ⛔ **VERIFY BY EXECUTION BEFORE RELYING ON IT: run the binary and check `rc`.** Do **not** use
+> `which` alone, and do **not** read a `127` from a wrapper as a fact about this tool —
+> **`rc=127` is a statement about the command you typed, never about its argument.**
 - Binary: `gog` (v0.12.0 at `/opt/homebrew/bin/gog`)
 - Gmail, Calendar, Drive, Contacts, Tasks, Sheets, Docs
 - Accounts: configure your Google accounts in your agent's `.env` or org `secrets.env`

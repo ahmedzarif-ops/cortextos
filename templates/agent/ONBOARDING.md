@@ -327,6 +327,13 @@ Do NOT rewrite TOOLS.md from memory. The template contains the authoritative ref
    ```
 
 17. **Write USER.md** based on their answers:
+
+    > ⛔ **PRESERVE CLAUSE — THIS STEP EMITS A WHOLE DOCUMENT AND WILL DESTROY WHAT IS ALREADY THERE.**
+    > **Before writing `USER.md`, READ IT.** Carry forward, verbatim and by name, any block the file
+    > already contains — in particular the **ONE VOICE carrier pointer** and the **protective marker**.
+    > **Diff before write.** Afterwards, **verify each carried block is still present BY NAME**; a
+    > whole-file write that silently drops canon is indistinguishable from a clean run.
+    > *(A seat cannot re-derive a rule that was deleted by its own onboarding.)*
     ```
     # About the User
 
