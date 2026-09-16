@@ -14,6 +14,17 @@ export const notifyAgentCommand = new Command('notify-agent')
     const paths = resolvePaths(options.from, options.instance);
     const ctxRoot = join(homedir(), '.cortextos', options.instance);
 
-    notifyAgent(paths, options.from, name, message, ctxRoot);
-    console.log(`Signal sent to ${name}`);
+    // This QUEUES a signal (a file the daemon polls, plus a bus message). It does not
+    // deliver anything, so it must not claim to — see the note on `notifyAgent`.
+    const outcome = notifyAgent(paths, options.from, name, message, ctxRoot);
+    console.log(`Urgent signal QUEUED for ${name}:`);
+    console.log(`  signal file: written`);
+    console.log(`  message bus: ${outcome.busQueued ? 'queued' : `FAILED — ${outcome.busError ?? 'unknown error'}`}`);
+    console.log(
+      `  NOTE: this confirms the signal was QUEUED, not that ${name} received, read ` +
+      `or acted on it. The daemon injects it on a later poll.`,
+    );
+    if (!outcome.busQueued) {
+      process.exitCode = 1;
+    }
   });

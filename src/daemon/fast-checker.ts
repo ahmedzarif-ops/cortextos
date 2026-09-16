@@ -46,6 +46,21 @@ const WORKFILL_MARGIN = 10;
  */
 export class FastChecker {
   private agent: AgentProcess;
+
+  /**
+   * Consecutive failed injection attempts for the CURRENT `.urgent-signal`.
+   * Reset whenever the signal file is consumed. Bounded by
+   * {@link FastChecker.URGENT_SIGNAL_MAX_RETRIES} so a permanently-down agent
+   * cannot spin the poll loop or the log indefinitely.
+   */
+  private urgentSignalRetries = 0;
+
+  /**
+   * How many polls an undeliverable urgent signal is retained for before it is
+   * dropped loudly. `.urgent-signal` is a single-slot file that a newer signal
+   * overwrites, so retention always retries the NEWEST signal, never a backlog.
+   */
+  private static readonly URGENT_SIGNAL_MAX_RETRIES = 10;
   private paths: BusPaths;
   private running: boolean = false;
   private pollInterval: number;
@@ -1062,16 +1077,66 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     if (existsSync(urgentPath)) {
       try {
         const content = readFileSync(urgentPath, 'utf-8').trim();
+
+        // An empty signal file carries nothing to deliver. Consume it — retaining it
+        // would retry forever against a payload that can never be injected.
+        if (!content) {
+          unlinkSync(urgentPath);
+          this.urgentSignalRetries = 0;
+          return;
+        }
+
         this.log(`Urgent signal detected: ${content}`);
-        unlinkSync(urgentPath);
 
         // Inject the urgent message — fence the body unescapably (#592 follow-up)
         // so a signal payload carrying its own fence can't break out and forge
         // daemon containment headers.
-        if (content) {
-          const urgentMsg = `=== URGENT SIGNAL ===\n${wrapFenceSafe(content)}\n\n`;
-          this.agent.injectMessage(urgentMsg);
+        const urgentMsg = `=== URGENT SIGNAL ===\n${wrapFenceSafe(content)}\n\n`;
+
+        // ⛔ THE UNLINK USED TO HAPPEN HERE, BEFORE THE INJECT.
+        // The signal was therefore consumed whether or not anything downstream
+        // worked, so a failed injection lost the message permanently and silently —
+        // with no retry possible, because the only copy had already been deleted.
+        // An urgent signal is the one message class where silent loss is least
+        // acceptable, and it was the one class with no retry at all.
+        //
+        // `injectMessageDetailed` is used rather than the boolean wrapper because the
+        // two failure codes must NOT be treated alike:
+        //   NOT_RUNNING — the agent has no live PTY. Nothing was delivered. RETAIN and
+        //                 retry on the next poll; the condition is transient by nature.
+        //   DEDUPED     — the content collapsed against the dedup window, i.e. this
+        //                 exact signal was already injected. CONSUME it. Retaining a
+        //                 deduped signal would retry forever, because every retry is by
+        //                 construction another duplicate.
+        const result = this.agent.injectMessageDetailed(urgentMsg);
+
+        if (!result.ok && result.code === 'NOT_RUNNING') {
+          this.urgentSignalRetries += 1;
+          if (this.urgentSignalRetries >= FastChecker.URGENT_SIGNAL_MAX_RETRIES) {
+            // Bounded so a permanently-down agent cannot spin the poll loop or the log
+            // forever. Giving up is still LOUD — the whole defect being fixed here is a
+            // loss that said nothing.
+            this.log(
+              `Urgent signal DROPPED after ${this.urgentSignalRetries} failed injection attempts ` +
+              `(${result.message}). The signal is discarded and WILL NOT be retried: ${content}`,
+            );
+            unlinkSync(urgentPath);
+            this.urgentSignalRetries = 0;
+          } else {
+            this.log(
+              `Urgent signal NOT injected (${result.message}) — RETAINED for retry ` +
+              `${this.urgentSignalRetries}/${FastChecker.URGENT_SIGNAL_MAX_RETRIES} on the next poll`,
+            );
+          }
+          return;
         }
+
+        if (!result.ok) {
+          this.log(`Urgent signal deduped (${result.message}) — treating as already delivered`);
+        }
+
+        unlinkSync(urgentPath);
+        this.urgentSignalRetries = 0;
       } catch (err) {
         this.log(`Error processing urgent signal: ${err}`);
       }

@@ -1889,12 +1889,34 @@ busCommand
     };
     writeFileSync(join(signalDir, '.urgent-signal'), JSON.stringify(signal));
 
-    // Also send via normal message bus for persistence
+    // Also send via normal message bus for persistence.
+    // The failure used to be swallowed entirely, so a notify whose bus copy failed
+    // was indistinguishable from one where both arms succeeded.
+    let busQueued = false;
+    let busError = '';
     try {
       sendMessage(paths, me, targetAgent, 'urgent', message);
-    } catch { /* signal already written */ }
+      busQueued = true;
+    } catch (err) {
+      busError = err instanceof Error ? err.message : String(err);
+    }
 
-    console.log(`Signal sent to ${targetAgent}`);
+    // ⛔ THIS USED TO READ `Signal sent to <agent>`, PRINTED UNCONDITIONALLY.
+    // Nothing above this line delivers anything: it writes a file that the daemon
+    // picks up on a later poll, and queues a bus message. "Sent" was a receipt for
+    // an event that had not happened, and operators reasonably read it as "the agent
+    // has been woken" — including when the agent never processed the signal at all.
+    // Report what was actually confirmed, and nothing more.
+    console.log(`Urgent signal QUEUED for ${targetAgent}:`);
+    console.log(`  signal file: written`);
+    console.log(`  message bus: ${busQueued ? 'queued' : `FAILED — ${busError}`}`);
+    console.log(
+      `  NOTE: this confirms the signal was QUEUED, not that ${targetAgent} received, ` +
+      `read or acted on it. The daemon injects it on a later poll.`,
+    );
+    if (!busQueued) {
+      process.exitCode = 1;
+    }
   });
 
 busCommand

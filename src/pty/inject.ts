@@ -64,6 +64,7 @@ export function injectMessage(
   write: (data: string) => void,
   content: string,
   enterDelay: number = 300,
+  onEnterError?: (message: string) => void,
 ): void {
   // For very large messages, chunk the write to avoid overwhelming the PTY buffer
   const MAX_CHUNK = 4096;
@@ -93,7 +94,20 @@ export function injectMessage(
       write(KEYS.ENTER);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.warn(`[inject] deferred Enter failed (pty likely torn down): ${msg}`);
+      // ⛔ THE ENTER IS THE SUBMIT, AND WITHOUT IT THE CONTENT IS NOT DELIVERED —
+      // it sits in the runtime's composer, unsent, until some LATER injection's Enter
+      // flushes it. Observed: content pasted here surfaced 73 minutes later, prepended
+      // to the next injection, inside a single turn.
+      // This used to be a bare `console.warn`, which meant the one step that actually
+      // submits could fail while every layer above reported success. The callback lets
+      // a caller that has a real logger or an operator-visible surface record it;
+      // `console.warn` remains the default so existing callers are unaffected.
+      const line = `[inject] deferred Enter failed — content was written but NOT submitted: ${msg}`;
+      if (onEnterError) {
+        onEnterError(line);
+      } else {
+        console.warn(line);
+      }
     }
   }, enterDelay);
 }
