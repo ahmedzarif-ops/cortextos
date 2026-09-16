@@ -65,3 +65,26 @@ export const CRON_EXECUTION_LOG_FILENAME = 'cron-execution.log';
 export function cronExecutionLogPathFor(agentName: string): string {
   return join(CRONS_DIRECTORY, agentName, CRON_EXECUTION_LOG_FILENAME);
 }
+
+/**
+ * File name for the per-agent cron dispatch receipt log (JSONL format).
+ *
+ * Sits beside `cron-execution.log` in the same per-agent state directory, because
+ * every existing consumer of cron history already knows that directory. A receipt
+ * answers a different question from an execution-log line — see
+ * {@link CronDispatchReceipt} — so it is a separate file rather than extra keys on
+ * a line every reader on disk already parses.
+ *
+ * @example "cron-dispatch-receipts.jsonl"
+ */
+export const CRON_DISPATCH_RECEIPTS_FILENAME = 'cron-dispatch-receipts.jsonl';
+
+/**
+ * Return the path to an agent's cron dispatch receipt log relative to CTX_ROOT.
+ *
+ * @param agentName - The agent's directory name.
+ * @returns `.cortextOS/state/agents/{agentName}/cron-dispatch-receipts.jsonl`
+ */
+export function cronDispatchReceiptsPathFor(agentName: string): string {
+  return join(CRONS_DIRECTORY, agentName, CRON_DISPATCH_RECEIPTS_FILENAME);
+}

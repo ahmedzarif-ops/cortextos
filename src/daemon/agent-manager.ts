@@ -28,6 +28,7 @@ import { stripBom } from '../utils/strip-bom.js';
 import { BuzzRelayClient, BuzzDispatcher, loadBuzzConfig, type NostrEvent } from '../buzz/index.js';
 import { computeDormancy, parseHeartbeatIntervalMs } from '../utils/dormancy.js';
 import { CRONS_DIRECTORY, CRONS_FILENAME } from '../bus/crons-schema.js';
+import { dispatchCron } from './cron-dispatch.js';
 
 type LogFn = (msg: string) => void;
 
@@ -2085,7 +2086,7 @@ export class AgentManager {
       }
     }
 
-    const onFire = async (cron: CronDefinition): Promise<void> => {
+    const onFire = async (cron: CronDefinition, dueAtIso?: string): Promise<void> => {
       if (entry.process['config']?.runtime === 'hermes') {
         assertNoHermesNativeCronCollision(
           entry.process['config']?.hermes_profile,
@@ -2093,6 +2094,26 @@ export class AgentManager {
           process.env['HERMES_HOME'],
         );
       }
+      // ── ISOLATED DISPATCH ──────────────────────────────────────────────────
+      // Present only when the operator opted this cron in. The seat is not woken
+      // and nothing is injected; the prompt runs as one bounded turn on the named
+      // model and a receipt is written.
+      //
+      // ⛔ THERE IS NO FALLBACK TO THE SEAT, DELIBERATELY. dispatchCron throws on
+      // any non-zero outcome and the throw propagates: fireWithRetry records
+      // status:"failed" with the reason in cron-execution.log. Catching it here and
+      // injecting instead would spend the premium seat budget that dispatch exists
+      // to protect — unattended, on a schedule, and logged as a normal fire.
+      if (cron.dispatch) {
+        const { receipt } = await dispatchCron({ agentName, cron, dueAt: dueAtIso });
+        console.log(
+          `[daemon] Cron "${cron.name}" dispatched to ${receipt.model} ` +
+          `(served ${receipt.model_served ?? 'unreported'}, ${receipt.tokens_out ?? '?'} out, ` +
+          `$${receipt.cost_usd ?? '?'}, ${receipt.duration_ms}ms) — seat "${agentName}" not injected`
+        );
+        return;
+      }
+      // ── DEFAULT PATH — unchanged. Everything below this line predates dispatch.
       // DELIBERATE EXCEPTION to the identity rule: this fires on a timer long
       // after any await and injects by NAME, so a cron fires into whichever
       // instance currently holds the name. That is the intended routing — a cron

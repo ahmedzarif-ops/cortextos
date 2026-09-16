@@ -557,6 +557,87 @@ export interface CronDefinition {
    * @default false (manual fire is allowed by default — opt-out model)
    */
   manualFireDisabled?: boolean;
+
+  /**
+   * OPTIONAL isolated dispatch target.
+   *
+   * ⛔ ABSENT IS THE DEFAULT AND THE DEFAULT IS UNCHANGED. When this field is
+   * missing the daemon behaves exactly as it always has: it injects the cron
+   * prompt into the agent's PTY session and the cron runs on the SEAT's model.
+   * Nothing in the dispatch path executes, and no receipt is written.
+   *
+   * When PRESENT, the fire does NOT touch the seat at all. The daemon runs the
+   * prompt as a single isolated bounded turn against the named model through the
+   * sanctioned Hermes wrapper, and writes a receipt. See
+   * {@link CronDispatch} and `src/daemon/cron-dispatch.ts`.
+   *
+   * WHY IT EXISTS (owner directive 2026-09-16): fleet workflows should be able to
+   * run on a cheap model (e.g. `deepseek/deepseek-v4.1-flash`) without spending a
+   * premium seat's budget. Before this field, a `model` key in {@link metadata}
+   * was INERT — the daemon never read metadata, so a cron always ran on its seat
+   * model no matter what the JSON said.
+   */
+  dispatch?: CronDispatch;
+}
+
+/**
+ * Isolated per-cron dispatch target.
+ *
+ * ⚠ ONE MODEL FIELD, NOT TWO. The originating task asked for "runtime/model/
+ * provider". `provider` is deliberately NOT a separate field: the Hermes API
+ * names models with the vendor prefix already inside the id
+ * (`deepseek/deepseek-v4.1-flash`, `x-ai/grok-4.6`), so a separate `provider`
+ * string could disagree with the id and nothing would catch it. The vendor is
+ * read from the id when it is needed. `runtime` is the typed axis — it selects
+ * the dispatch MECHANISM, and is the extension point for a second provider path.
+ */
+export interface CronDispatch {
+  /**
+   * Which dispatch mechanism runs this cron.
+   *
+   * `"hermes"` — a single `/chat/completions` turn through the sanctioned
+   * `hermes-call.sh` wrapper, which owns the ledger and the spend gate.
+   *
+   * A union of one, on purpose: an unknown value must fail at validation rather
+   * than fall through to a default, because falling back to the seat is exactly
+   * the outcome this field exists to prevent.
+   */
+  runtime: 'hermes';
+
+  /**
+   * Exact, fully-qualified model id, as the provider names it.
+   *
+   * ⛔ NEVER an alias. `*-latest` and `~`-prefixed ids are REJECTED at validation
+   * (knowledge.md #173a): the model changes underneath the pin and every receipt
+   * afterwards describes something other than what ran.
+   *
+   * @example "deepseek/deepseek-v4.1-flash"
+   */
+  model: string;
+
+  /**
+   * Output-token ceiling for the bounded turn. This is a COST BOUND, not a
+   * quality knob — the spend gate projects the whole budget as billed output
+   * before it decides whether to allow the call.
+   *
+   * @default 4096
+   */
+  max_tokens?: number;
+
+  /**
+   * Ledger attribution — which cap this cron's spend is charged against.
+   * Passed through to the wrapper as `--project`.
+   *
+   * @default "fleet"
+   */
+  project?: string;
+
+  /**
+   * Free-text reason recorded on every ledger row and receipt. The ledger is
+   * useless without it, so the wrapper refuses a call that has none; when this
+   * is absent the daemon supplies `cron:<name>`.
+   */
+  purpose?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -605,6 +686,76 @@ export interface CronExecutionLogEntry {
   duration_ms: number;
   /** Error message if status is "retried" or "failed"; null otherwise. */
   error: string | null;
+}
+
+/**
+ * One line of `.cortextOS/state/agents/{agent}/cron-dispatch-receipts.jsonl`.
+ *
+ * WHY A SECOND LOG. `cron-execution.log` answers "did the fire happen"; it has no
+ * room for what the fire COST or which model actually served it. A dispatch that
+ * fires perfectly and silently runs on the wrong model is indistinguishable in
+ * that log from one that ran on the model asked for — which is the failure this
+ * whole field exists to make visible. The receipt is written on EVERY dispatch
+ * attempt, including refusals and failures, because a refusal is the outcome an
+ * operator most needs to see.
+ *
+ * ⛔ WHAT A RECEIPT DOES NOT PROVE. `cost_usd` is computed by the wrapper from
+ * the REQUESTED model's price row; if `model_served` differs from `model`, the
+ * cost is priced off the wrong model and is an ESTIMATE. Both ids are recorded
+ * side by side so the gap is readable rather than hidden in one number.
+ */
+export interface CronDispatchReceipt {
+  /** ISO 8601 UTC timestamp written when the dispatch attempt completed. */
+  ts: string;
+  /** ISO 8601 UTC instant the fire was SCHEDULED for, when the scheduler knows it. */
+  due_at?: string;
+  /** Cron name (matches CronDefinition.name). */
+  cron: string;
+  /** Agent the cron belongs to — the seat whose budget was NOT spent. */
+  agent: string;
+  /** Correlation id passed to the wrapper as `--task`; joins this receipt to its ledger row. */
+  correlation_id: string;
+  /** Model id the cron ASKED for. */
+  model: string;
+  /**
+   * Model id the gateway said it RAN, read back from the ledger row.
+   * `null` when no row could be joined (the call never dispatched, or the
+   * ledger was unreadable) — never silently equal to {@link model}.
+   */
+  model_served: string | null;
+  /**
+   * Prompt/input tokens billed, from the ledger row. `null` when unknown.
+   * ⚠ This is TOTAL input. The wrapper's ledger does not record a fresh/cached
+   * split, so a cache breakdown cannot be reported here and is not invented.
+   */
+  tokens_in: number | null;
+  /**
+   * Cached-input tokens. ALWAYS `null` today, and present as a field on purpose:
+   * the upstream ledger has no cache column, so the honest value is "unknown",
+   * not "0". Omitting the key would let a reader assume no caching happened.
+   */
+  tokens_cached: number | null;
+  /** Completion/output tokens billed, from the ledger row. `null` when unknown. */
+  tokens_out: number | null;
+  /** Cost in USD from the ledger row. `null` when the call never billed or is unmeasured. */
+  cost_usd: number | null;
+  /** Exit code of the wrapper. 0 = a completed turn. Any non-zero is a loud failure. */
+  rc: number;
+  /**
+   * Coarse outcome, derived from {@link rc} so a reader does not have to memorise
+   * the wrapper's exit codes: `ok` (0), `refused` (64/65/66/67 — malformed or
+   * unpriced call, nothing dispatched), `spend_refused` (73 — the gate blocked
+   * it), `call_failed` (68 — dispatched and the gateway failed; MAY have billed),
+   * `empty_output` (72 — billed and produced nothing), `ledger_failed` (70/71),
+   * `timeout`, `wrapper_missing`, or `error` for anything else.
+   */
+  outcome: string;
+  /** Wall-clock duration of the dispatch attempt in milliseconds. */
+  duration_ms: number;
+  /** First 500 chars of the wrapper's stderr. The refusal text lives here — keep it. */
+  stderr_head: string;
+  /** Number of characters the model returned on stdout. 0 on any non-zero rc. */
+  output_chars: number;
 }
 
 export interface OrgContext {
