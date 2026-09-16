@@ -9,10 +9,20 @@ import type { BusPaths, TelegramCallbackQuery } from '../../../src/types';
 
 // Minimal mock for AgentProcess
 function createMockAgent(name = 'test-agent') {
+  const injectMessage = vi.fn().mockReturnValue(true);
   return {
     name,
     hasEverBootstrapped: vi.fn().mockReturnValue(true),
-    injectMessage: vi.fn().mockReturnValue(true),
+    injectMessage,
+    // The urgent-signal path uses `injectMessageDetailed` rather than the boolean
+    // wrapper, because it must tell NOT_RUNNING (retain the signal and retry) from
+    // DEDUPED (consume it — retaining a deduped signal retries a duplicate forever).
+    // The double records through `injectMessage` so assertions written against the
+    // wrapper keep describing the same observable: what content was injected.
+    injectMessageDetailed: vi.fn((content: string) => {
+      injectMessage(content);
+      return { ok: true as const };
+    }),
     write: vi.fn(),
   } as any;
 }
