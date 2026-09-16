@@ -25,7 +25,7 @@ import { IPCClient } from '../daemon/ipc-server.js';
 import { describeSchedulerClock, schedulerClockNotes } from '../utils/scheduler-clock.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
-import type { Priority, Task, TaskStatus, EventCategory, EventSeverity, ApprovalCategory, ApprovalStatus, OrgContext, CronDefinition } from '../types/index.js';
+import type { Priority, Task, TaskStatus, EventCategory, EventSeverity, ApprovalCategory, ApprovalStatus, OrgContext, CronDefinition, CronDispatch } from '../types/index.js';
 import { TASK_STATUSES } from '../types/index.js';
 
 /**
@@ -2302,7 +2302,12 @@ busCommand
   .argument('<interval>', 'Schedule: interval ("6h", "30m", "1d") or 5-field cron expr ("0 8 * * *")')
   .argument('<prompt...>', 'Prompt text injected when the cron fires (all remaining words joined)')
   .option('--desc <description>', 'Human-readable description (optional)')
-  .action(async (agent: string, name: string, interval: string, promptWords: string[], opts: { desc?: string }) => {
+  .option('--dispatch-runtime <r>', 'Run this cron OFF the seat, as one isolated bounded turn. Only "hermes" is implemented.')
+  .option('--dispatch-model <id>', 'Exact model id for --dispatch-runtime (e.g. deepseek/deepseek-v4.1-flash). Aliases are refused.')
+  .option('--dispatch-max-tokens <n>', 'Output-token ceiling for the dispatched turn (default 4096). This is a COST BOUND.')
+  .option('--dispatch-project <p>', 'Ledger/spend-cap bucket the dispatched turn is charged to (default "fleet").')
+  .option('--dispatch-purpose <p>', 'Reason recorded on every ledger row and receipt (default "cron:<name>").')
+  .action(async (agent: string, name: string, interval: string, promptWords: string[], opts: { desc?: string; dispatchRuntime?: string; dispatchModel?: string; dispatchMaxTokens?: string; dispatchProject?: string; dispatchPurpose?: string }) => {
     // Validate agent name format
     try { validateAgentName(agent); } catch (err) { console.error(String(err)); process.exit(1); }
 
@@ -2319,6 +2324,35 @@ busCommand
     try { schedule = validateSchedule(interval); } catch (err) { console.error(String(err)); process.exit(1); }
 
     const prompt = promptWords.join(' ');
+
+    // Build the optional dispatch block. Shape errors are thrown by
+    // validateCronDispatch inside addCron below; what is checked HERE is the
+    // CLI-only failure of naming one half of the pair — a runtime with no model
+    // (or a model with no runtime) is an operator typo, and defaulting either
+    // half would create a cron that runs somewhere nobody asked for.
+    let dispatch: CronDispatch | undefined;
+    if (opts.dispatchRuntime !== undefined || opts.dispatchModel !== undefined) {
+      if (opts.dispatchRuntime === undefined || opts.dispatchModel === undefined) {
+        console.error('Error: --dispatch-runtime and --dispatch-model must be given together.');
+        process.exit(1);
+      }
+      let maxTokens: number | undefined;
+      if (opts.dispatchMaxTokens !== undefined) {
+        maxTokens = Number(opts.dispatchMaxTokens);
+        if (!Number.isInteger(maxTokens) || maxTokens <= 0) {
+          console.error(`Error: --dispatch-max-tokens must be a positive integer, got '${opts.dispatchMaxTokens}'.`);
+          process.exit(1);
+        }
+      }
+      dispatch = {
+        runtime: opts.dispatchRuntime as CronDispatch['runtime'],
+        model: opts.dispatchModel,
+        ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
+        ...(opts.dispatchProject !== undefined ? { project: opts.dispatchProject } : {}),
+        ...(opts.dispatchPurpose !== undefined ? { purpose: opts.dispatchPurpose } : {}),
+      };
+    }
+
     const cron: CronDefinition = {
       name,
       prompt,
@@ -2326,6 +2360,7 @@ busCommand
       enabled: true,
       created_at: new Date().toISOString(),
       ...(opts.desc ? { description: opts.desc } : {}),
+      ...(dispatch ? { dispatch } : {}),
     };
 
     try {
@@ -2337,6 +2372,16 @@ busCommand
 
     await signalCronReload(agent, env.instanceId);
     console.log(`Added cron '${name}' for ${agent}`);
+    if (dispatch) {
+      console.log(
+        `  dispatch: ${dispatch.runtime} -> ${dispatch.model} (isolated turn; the ${agent} seat is NOT injected).`
+      );
+      console.log(
+        '  NOTE: dispatch needs the sanctioned hermes-call.sh wrapper, which this repo does not ship. ' +
+        'Set CORTEXTOS_HERMES_CALL or install it at $CTX_ROOT/.cortextOS/bin/hermes-call.sh — ' +
+        'until then this cron FAILS LOUDLY on every fire and is never silently run on the seat.'
+      );
+    }
   });
 
 busCommand
@@ -2462,12 +2507,26 @@ busCommand
   .option('--prompt <p>', 'New prompt text')
   .option('--enabled <bool>', 'Enable (true) or disable (false) the cron')
   .option('--desc <d>', 'New description')
-  .action(async (agent: string, name: string, opts: { interval?: string; cronExpr?: string; prompt?: string; enabled?: string; desc?: string }) => {
+  .option('--dispatch-runtime <r>', 'Set the isolated dispatch runtime ("hermes"). Requires --dispatch-model.')
+  .option('--dispatch-model <id>', 'Set the isolated dispatch model id. Requires --dispatch-runtime.')
+  .option('--dispatch-max-tokens <n>', 'Set the dispatched turn output-token ceiling.')
+  .option('--dispatch-project <p>', 'Set the dispatched turn ledger/spend bucket.')
+  .option('--dispatch-purpose <p>', 'Set the reason recorded on ledger rows and receipts.')
+  .option('--dispatch-clear', 'Remove the dispatch block — the cron goes back to running on its seat.')
+  .action(async (agent: string, name: string, opts: { interval?: string; cronExpr?: string; prompt?: string; enabled?: string; desc?: string; dispatchRuntime?: string; dispatchModel?: string; dispatchMaxTokens?: string; dispatchProject?: string; dispatchPurpose?: string; dispatchClear?: boolean }) => {
     try { validateAgentName(agent); } catch (err) { console.error(String(err)); process.exit(1); }
 
     const rawSchedule = opts.interval ?? opts.cronExpr;
-    if (!rawSchedule && opts.prompt === undefined && opts.enabled === undefined && opts.desc === undefined) {
-      console.error('Error: at least one of --interval, --cron-expr, --prompt, --enabled, or --desc is required.');
+    const anyDispatchFlag = opts.dispatchRuntime !== undefined || opts.dispatchModel !== undefined
+      || opts.dispatchMaxTokens !== undefined || opts.dispatchProject !== undefined
+      || opts.dispatchPurpose !== undefined || opts.dispatchClear === true;
+    if (!rawSchedule && opts.prompt === undefined && opts.enabled === undefined && opts.desc === undefined && !anyDispatchFlag) {
+      console.error('Error: at least one of --interval, --cron-expr, --prompt, --enabled, --desc, or a --dispatch-* flag is required.');
+      process.exit(1);
+    }
+    if (opts.dispatchClear && (opts.dispatchRuntime !== undefined || opts.dispatchModel !== undefined
+      || opts.dispatchMaxTokens !== undefined || opts.dispatchProject !== undefined || opts.dispatchPurpose !== undefined)) {
+      console.error('Error: --dispatch-clear cannot be combined with other --dispatch-* flags. Removing and setting are different requests.');
       process.exit(1);
     }
 
@@ -2490,7 +2549,47 @@ busCommand
       patch.description = opts.desc;
     }
 
-    const ok = updateCronDef(agent, name, patch);
+    if (opts.dispatchClear) {
+      // `undefined` here is how the key is REMOVED, not how it is left alone: the
+      // patch is spread over the stored cron and then JSON.stringify drops keys
+      // whose value is undefined. `updateCron` skips validation for an undefined
+      // dispatch, so this path deliberately writes no dispatch block at all.
+      patch.dispatch = undefined;
+    } else if (anyDispatchFlag) {
+      const current = getCronByName(agent, name)?.dispatch;
+      const runtime = opts.dispatchRuntime ?? current?.runtime;
+      const model = opts.dispatchModel ?? current?.model;
+      if (runtime === undefined || model === undefined) {
+        console.error(
+          'Error: this cron has no dispatch block yet, so --dispatch-runtime and --dispatch-model must both be supplied ' +
+          'before the other --dispatch-* flags can refine it.'
+        );
+        process.exit(1);
+      }
+      let maxTokens = current?.max_tokens;
+      if (opts.dispatchMaxTokens !== undefined) {
+        maxTokens = Number(opts.dispatchMaxTokens);
+        if (!Number.isInteger(maxTokens) || maxTokens <= 0) {
+          console.error(`Error: --dispatch-max-tokens must be a positive integer, got '${opts.dispatchMaxTokens}'.`);
+          process.exit(1);
+        }
+      }
+      patch.dispatch = {
+        runtime: runtime as CronDispatch['runtime'],
+        model,
+        ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
+        ...((opts.dispatchProject ?? current?.project) !== undefined ? { project: (opts.dispatchProject ?? current?.project) as string } : {}),
+        ...((opts.dispatchPurpose ?? current?.purpose) !== undefined ? { purpose: (opts.dispatchPurpose ?? current?.purpose) as string } : {}),
+      };
+    }
+
+    let ok: boolean;
+    try {
+      ok = updateCronDef(agent, name, patch);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
     if (!ok) {
       console.error(`Error: cron '${name}' not found for agent '${agent}'.`);
       process.exit(1);

@@ -19,7 +19,7 @@ import { join, dirname } from 'path';
 import type { CronDefinition, CronExecutionLogEntry } from '../types/index.js';
 import { CRONS_DIRECTORY, CRONS_FILENAME, cronExecutionLogPathFor } from './crons-schema.js';
 import { atomicWriteSync } from '../utils/atomic.js';
-import { validateCronPrompt } from '../utils/validate.js';
+import { validateCronPrompt, validateCronDispatch } from '../utils/validate.js';
 import { withFileLockSync } from '../utils/lock.js';
 
 // ---------------------------------------------------------------------------
@@ -231,6 +231,10 @@ export function writeCrons(agentName: string, crons: CronDefinition[]): void {
 export function addCron(agentName: string, cron: CronDefinition): void {
   // Same boundary as updateCron: refuse before the lock, so a rejected add writes nothing.
   validateCronPrompt(cron.prompt);
+  // Optional field, so validated only when supplied — but validated HERE rather than
+  // in the CLI, so every writer is covered. A malformed dispatch that reached disk
+  // would not fail until the cron next fired, unattended, with the operator gone.
+  if (cron.dispatch !== undefined) validateCronDispatch(cron.dispatch);
   withFileLockSync(lockDirFor(agentName), () => {
     const existing = readCrons(agentName);
     const collision = existing.find(c => c.name === cron.name);
@@ -279,6 +283,10 @@ export function updateCron(
   // enabled-only update and must keep working. An absent field and an empty one are different
   // requests, and only the second is an error.
   if (patch.prompt !== undefined) validateCronPrompt(patch.prompt);
+  // Same rule for dispatch. `undefined` means "not part of this patch" and is left
+  // alone; clearing a dispatch is done by writing the cron without the key (see the
+  // CLI's --dispatch-clear), which is a different request from patching it badly.
+  if (patch.dispatch !== undefined) validateCronDispatch(patch.dispatch);
   return withFileLockSync(lockDirFor(agentName), () => {
     const existing = readCrons(agentName);
     const idx = existing.findIndex(c => c.name === name);

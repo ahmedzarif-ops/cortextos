@@ -193,7 +193,7 @@ const RETRY_DELAYS_MS = [1_000, 4_000, 16_000];
 async function fireWithRetry(
   cron: CronDefinition,
   agentName: string,
-  onFire: (c: CronDefinition) => Promise<void> | void,
+  onFire: (c: CronDefinition, dueAtIso?: string) => Promise<void> | void,
   logger: (msg: string) => void,
   /**
    * The instant this fire was DUE, threaded down purely so the execution log can
@@ -206,7 +206,7 @@ async function fireWithRetry(
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const start = Date.now();
     try {
-      await Promise.resolve(onFire(cron));
+      await Promise.resolve(onFire(cron, dueAtIso));
       appendExecutionLog(agentName, {
         ts: new Date().toISOString(),
         due_at: dueAtIso,
@@ -266,13 +266,22 @@ function sleep(ms: number): Promise<void> {
 
 export interface CronSchedulerOptions {
   agentName: string;
-  onFire: (cron: CronDefinition) => Promise<void> | void;
+  /**
+   * Called when a cron is due.
+   *
+   * `dueAtIso` is the instant the fire was SCHEDULED for, not the instant it
+   * actually ran — the two differ by the lateness, which on a sleeping host has
+   * been observed at 15m29s against a 30s tick. It is OPTIONAL in the signature
+   * so a one-argument callback stays assignable: every existing caller ignores it
+   * and is unaffected.
+   */
+  onFire: (cron: CronDefinition, dueAtIso?: string) => Promise<void> | void;
   logger?: (msg: string) => void;
 }
 
 export class CronScheduler {
   private readonly agentName: string;
-  private readonly onFire: (cron: CronDefinition) => Promise<void> | void;
+  private readonly onFire: (cron: CronDefinition, dueAtIso?: string) => Promise<void> | void;
   private readonly logger: (msg: string) => void;
 
   /** In-memory schedule, keyed by cron name. */

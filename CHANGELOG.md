@@ -2,6 +2,55 @@
 
 ## [Unreleased]
 
+### Added — per-cron model dispatch: run one cron off the seat, on a named model
+
+A cron had exactly one way to run: the daemon injected its prompt into the
+agent's PTY, so it ran on the SEAT's model. A `model` key in `cron.metadata` was
+**inert** — nothing read metadata — so a cheap recurring job could not be routed
+to a cheap model, and every fire spent premium-seat tokens.
+
+`CronDefinition` now takes an optional typed `dispatch` block:
+
+```bash
+cortextos bus add-cron sentinel nightly-digest "0 3 * * *" "Summarise the lanes." \
+  --dispatch-runtime hermes \
+  --dispatch-model deepseek/deepseek-v4.1-flash \
+  --dispatch-max-tokens 512 --dispatch-project fleet
+```
+
+When it is present the fire never reaches the seat: the prompt runs as one
+isolated bounded turn through the sanctioned `hermes-call.sh` wrapper, and a
+receipt is appended to
+`.cortextOS/state/agents/{agent}/cron-dispatch-receipts.jsonl` with the observed
+`model_served`, tokens, cost, `rc` and outcome. `update-cron` gains the same
+flags plus `--dispatch-clear`.
+
+**The absent-field path is unchanged**, which is asserted rather than assumed:
+a cron with no `dispatch` block still calls `injectAgent` with the same
+`[CRON FIRED <iso>] <name>: <prompt>` string, and writes no receipt
+(`tests/unit/daemon/cron-dispatch-fire-path.test.ts`).
+
+**There is no fallback to the seat, deliberately.** Any non-zero outcome — a
+missing wrapper, an unknown model, a spend refusal, a billed-but-failed call —
+throws, so the scheduler records the fire as failed rather than as `fired`, and
+the reason lands on the receipt. A silent fallback would spend exactly the budget
+this field exists to protect, unattended and on a schedule.
+
+⛔ **What a green receipt does not prove.** `cost_usd` is priced off the
+REQUESTED model, so it is an estimate whenever `model_served` differs — both ids
+are recorded side by side rather than reconciled into one number. The wrapper's
+spend gate sums only calls made through the wrapper, so a pass means "the wrapper
+path is under cap", never "the account is under cap". `tokens_cached` is always
+`null` because the ledger has no cache column; the key is present so nobody reads
+its absence as "no caching happened".
+
+⚠ **The wrapper is not shipped in this repository.** Dispatch resolves it from
+`$CORTEXTOS_HERMES_CALL` or `$CTX_ROOT/.cortextOS/bin/hermes-call.sh` at fire
+time and fails loudly, naming every path it searched, when neither exists. This
+is a caller, never a second implementation: the ledger, the spend gate and the
+alias ban stay in one place, because two spend gates drift and the fleet then
+believes the friendlier number.
+
 ### Fixed — `GET /api/workflows/crons` re-read each agent's execution log once per cron
 
 `readLastExecution(agent, cronName)` re-read and re-parsed the agent's entire

@@ -1,4 +1,4 @@
-import type { Priority, EventCategory, EventSeverity, ApprovalCategory } from '../types/index.js';
+import type { Priority, EventCategory, EventSeverity, ApprovalCategory, CronDispatch } from '../types/index.js';
 import { VALID_PRIORITIES } from '../types/index.js';
 
 const AGENT_NAME_REGEX = /^[a-z0-9_-]+$/;
@@ -255,5 +255,87 @@ export function validateCronPrompt(prompt: string): void {
       'Cron prompt is empty. A cron must carry at least one non-whitespace character, ' +
       'or it fires on schedule and injects nothing while reporting success.'
     );
+  }
+}
+
+/**
+ * Dispatch runtimes this build can actually execute.
+ *
+ * ⛔ THE POINT OF THE LIST IS THE REFUSAL, NOT THE MEMBERSHIP. An unrecognised
+ * runtime must throw here, at write time, where an operator is watching. If it
+ * were allowed through and only noticed at fire time, the least-bad thing the
+ * daemon could do is fall back to the seat — which is the exact spend the field
+ * exists to avoid, and it would happen silently, on a schedule, at 3am.
+ */
+export const VALID_CRON_DISPATCH_RUNTIMES = ['hermes'] as const;
+
+/**
+ * Validate a cron's optional {@link CronDispatch} block.
+ *
+ * Throws on anything it cannot vouch for. It deliberately does NOT try to decide
+ * whether the model EXISTS: this process has no price list and no model catalogue,
+ * so the only honest check here is shape. Existence is settled by the wrapper at
+ * fire time (it refuses an unpriced id with exit 65) and that refusal is recorded
+ * on the receipt. ⚠ Reading a pass here as "the model is real" is the mistake this
+ * comment exists to prevent.
+ */
+export function validateCronDispatch(dispatch: unknown): asserts dispatch is CronDispatch {
+  if (dispatch === null || typeof dispatch !== 'object' || Array.isArray(dispatch)) {
+    throw new Error('Invalid cron dispatch: expected an object with at least { runtime, model }.');
+  }
+  const d = dispatch as Record<string, unknown>;
+
+  if (typeof d['runtime'] !== 'string' || !VALID_CRON_DISPATCH_RUNTIMES.includes(d['runtime'] as 'hermes')) {
+    throw new Error(
+      `Invalid cron dispatch runtime '${String(d['runtime'])}'. Must be one of: ` +
+      `${VALID_CRON_DISPATCH_RUNTIMES.join(', ')}. An unknown runtime is refused rather than ` +
+      'defaulted — a cron that cannot be dispatched must never quietly run on the seat model instead.'
+    );
+  }
+
+  if (typeof d['model'] !== 'string' || d['model'].trim() === '') {
+    throw new Error('Invalid cron dispatch: `model` is required and must be a non-empty model id.');
+  }
+  const model = d['model'];
+  // Alias ban, mirroring hermes-call.sh (knowledge.md #173a). Checked HERE as well
+  // as in the wrapper on purpose: catching it at write time tells the operator who
+  // typed it, while catching it at fire time only tells whoever reads the receipt.
+  if (/-latest$/.test(model) || model.startsWith('~')) {
+    throw new Error(
+      `Invalid cron dispatch model '${model}': that is a floating ALIAS. Pin a dated or plain id — ` +
+      'an alias moves under the pin and every receipt afterwards describes something other than what ran.'
+    );
+  }
+  validateModel(model);
+  // ⚠ MEASURED GAP, GUARDED HERE RATHER THAN WIDENED THERE. `validateModel`'s
+  // character class allows `.`, so every segment of `../../etc/passwd` passes it
+  // (verified 2026-09-16). That is harmless on the paths validateModel guards
+  // today — a model id there is argv and a JSON body, never a filename — so this
+  // PR does not change a shared validator that other callers depend on. It closes
+  // the hole for the field it introduces and reports the rest as a follow-up.
+  if (model.split('/').some(seg => seg === '.' || seg === '..')) {
+    throw new Error(
+      `Invalid cron dispatch model '${model}': a path segment of '.' or '..' is not a model id.`
+    );
+  }
+
+  if (d['max_tokens'] !== undefined) {
+    const mt = d['max_tokens'];
+    if (typeof mt !== 'number' || !Number.isInteger(mt) || mt <= 0) {
+      throw new Error(`Invalid cron dispatch max_tokens '${String(mt)}'. Must be a positive integer.`);
+    }
+  }
+
+  if (d['project'] !== undefined) {
+    if (typeof d['project'] !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(d['project'])) {
+      throw new Error(
+        `Invalid cron dispatch project '${String(d['project'])}'. Expected 1-64 lowercase letters, ` +
+        'numbers, underscores or hyphens — it is a ledger key and a spend-cap bucket, not free text.'
+      );
+    }
+  }
+
+  if (d['purpose'] !== undefined && (typeof d['purpose'] !== 'string' || d['purpose'].trim() === '')) {
+    throw new Error('Invalid cron dispatch purpose: when present it must be a non-empty string.');
   }
 }
