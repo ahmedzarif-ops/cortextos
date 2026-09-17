@@ -56,6 +56,24 @@ export class FastChecker {
   private urgentSignalRetries = 0;
 
   /**
+   * Identity of the signal {@link FastChecker.urgentSignalRetries} is counting for:
+   * a hash of the payload the count was accrued against, or `null` when no count
+   * is outstanding.
+   *
+   * ⛔ THE COUNT ALONE IS NOT ENOUGH. `.urgent-signal` is a single-slot file, so a
+   * newer signal can OVERWRITE an undeliverable one mid-retry. Without an identity
+   * the fresh signal inherits the old count and can be dropped after a SINGLE
+   * attempt of its own — the retention this class exists to provide, spent on a
+   * payload that is already gone. The count is therefore keyed to the payload and
+   * restarts whenever the payload changes.
+   *
+   * A re-written signal with IDENTICAL content deliberately keeps the count: the
+   * bound is about how many attempts a given payload is worth, and delivering that
+   * text once satisfies every writer of it.
+   */
+  private urgentSignalKey: string | null = null;
+
+  /**
    * How many polls an undeliverable urgent signal is retained for before it is
    * dropped loudly. `.urgent-signal` is a single-slot file that a newer signal
    * overwrites, so retention always retries the NEWEST signal, never a backlog.
@@ -1082,11 +1100,19 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
         // would retry forever against a payload that can never be injected.
         if (!content) {
           unlinkSync(urgentPath);
-          this.urgentSignalRetries = 0;
+          this.resetUrgentSignalRetries();
           return;
         }
 
         this.log(`Urgent signal detected: ${content}`);
+
+        // Key the retry count to THIS payload. A newer signal that overwrote an
+        // undeliverable one must start its own retention, not inherit a spent count.
+        const signalKey = createHash('sha256').update(content).digest('hex');
+        if (signalKey !== this.urgentSignalKey) {
+          this.urgentSignalRetries = 0;
+          this.urgentSignalKey = signalKey;
+        }
 
         // Inject the urgent message — fence the body unescapably (#592 follow-up)
         // so a signal payload carrying its own fence can't break out and forge
@@ -1121,7 +1147,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
               `(${result.message}). The signal is discarded and WILL NOT be retried: ${content}`,
             );
             unlinkSync(urgentPath);
-            this.urgentSignalRetries = 0;
+            this.resetUrgentSignalRetries();
           } else {
             this.log(
               `Urgent signal NOT injected (${result.message}) — RETAINED for retry ` +
@@ -1136,11 +1162,21 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
         }
 
         unlinkSync(urgentPath);
-        this.urgentSignalRetries = 0;
+        this.resetUrgentSignalRetries();
       } catch (err) {
         this.log(`Error processing urgent signal: ${err}`);
       }
     }
+  }
+
+  /**
+   * Clear the retry count AND the payload identity it was keyed to. Both move
+   * together: a count without its key would be inherited by the next signal,
+   * which is the defect the key exists to prevent.
+   */
+  private resetUrgentSignalRetries(): void {
+    this.urgentSignalRetries = 0;
+    this.urgentSignalKey = null;
   }
 
   /**

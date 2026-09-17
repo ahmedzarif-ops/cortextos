@@ -131,4 +131,53 @@ describe('FastChecker urgent signal is not consumed unless it was injected', () 
     expect(injected).toHaveLength(0);
     rmSync(root, { recursive: true, force: true });
   });
+  // The retry count used to be a bare counter on the checker, not keyed to anything.
+  // `.urgent-signal` is a single-slot file, so a NEWER signal overwriting an
+  // undeliverable one inherited the old count and could be dropped after a single
+  // attempt of its own — the retention spent on a payload that was already gone.
+  it('RESTARTS the count when a newer signal overwrites the one being retried', () => {
+    const { stateDir, signalPath, root } = sandbox();
+    writeFileSync(signalPath, JSON.stringify({ from: 'orchestrator', message: 'first payload' }));
+    const { fc, logs } = makeChecker(stateDir, [DOWN]);
+    const call = () => (fc as unknown as { checkUrgentSignal(): void }).checkUrgentSignal();
+
+    for (let i = 0; i < 9; i += 1) call();
+    expect(logs.join('\n')).toContain('RETAINED for retry 9/10');
+
+    // A newer signal lands mid-retry, overwriting the old one.
+    writeFileSync(signalPath, JSON.stringify({ from: 'orchestrator', message: 'second payload' }));
+    call();
+
+    // Under the defect this was attempt 10/10 and the NEW signal was dropped after
+    // one attempt. It must be retained, counting from 1.
+    expect(existsSync(signalPath)).toBe(true);
+    expect(readFileSync(signalPath, 'utf-8')).toContain('second payload');
+    const text = logs.join('\n');
+    expect(text).toContain('RETAINED for retry 1/10');
+    expect(text).not.toContain('DROPPED');
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  // CONTROL for the test above: without it, an implementation that reset the count on
+  // EVERY poll would pass — and would retry a permanently-undeliverable signal forever,
+  // which is the bound this class also has to keep.
+  it('KEEPS the count when the signal is rewritten with identical content', () => {
+    const { stateDir, signalPath, root } = sandbox();
+    const payload = JSON.stringify({ from: 'orchestrator', message: 'never deliverable' });
+    writeFileSync(signalPath, payload);
+    const { fc, logs } = makeChecker(stateDir, [DOWN]);
+    const call = () => (fc as unknown as { checkUrgentSignal(): void }).checkUrgentSignal();
+
+    for (let i = 0; i < 9; i += 1) {
+      writeFileSync(signalPath, payload); // rewritten every poll, same bytes
+      call();
+    }
+    expect(existsSync(signalPath)).toBe(true);
+
+    writeFileSync(signalPath, payload);
+    call();
+    expect(existsSync(signalPath)).toBe(false);
+    expect(logs.join('\n')).toContain('DROPPED after 10 failed injection attempts');
+    rmSync(root, { recursive: true, force: true });
+  });
 });
