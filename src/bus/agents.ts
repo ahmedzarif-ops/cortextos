@@ -232,9 +232,17 @@ function buildAgentInfo(
 }
 
 /**
- * Send an urgent notification to an agent.
- * Writes .urgent-signal file and sends a bus message.
- * Mirrors bash notify-agent.sh behavior.
+ * Queue an urgent notification for an agent.
+ *
+ * ⚠ THIS QUEUES; IT DOES NOT DELIVER. Two arms are written here — a `.urgent-signal`
+ * file that the daemon's fast-checker picks up on a LATER POLL, and a bus message for
+ * persistence. Neither arm injects anything into the agent, and nothing in this
+ * function can observe whether the agent ever reads it. Callers must not report the
+ * return of this function as a delivery.
+ *
+ * The bus arm's failure used to be swallowed outright, which made a half-failed notify
+ * indistinguishable from a fully successful one. It is now returned so the caller can
+ * say which arms actually landed.
  */
 export function notifyAgent(
   paths: BusPaths,
@@ -242,7 +250,7 @@ export function notifyAgent(
   targetAgent: string,
   message: string,
   ctxRoot: string,
-): void {
+): { signalWritten: true; busQueued: boolean; busError?: string } {
   // Write signal file to state dir
   const signalDir = join(ctxRoot, 'state', targetAgent);
   ensureDir(signalDir);
@@ -255,10 +263,17 @@ export function notifyAgent(
 
   atomicWriteSync(join(signalDir, '.urgent-signal'), JSON.stringify(signal));
 
-  // Also send via normal message bus for persistence
+  // Also send via normal message bus for persistence.
+  // A failure here is no longer swallowed: the signal file remains the primary
+  // mechanism, but the caller is told that the persistent copy did not land.
   try {
     sendMessage(paths, from, targetAgent, 'urgent', message);
-  } catch {
-    // Ignore bus send failures - signal file is the primary mechanism
+    return { signalWritten: true, busQueued: true };
+  } catch (err) {
+    return {
+      signalWritten: true,
+      busQueued: false,
+      busError: err instanceof Error ? err.message : String(err),
+    };
   }
 }
