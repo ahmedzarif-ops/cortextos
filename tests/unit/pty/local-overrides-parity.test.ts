@@ -219,3 +219,80 @@ describe('size cap: DROP LOUDLY, never truncate', () => {
     expect(out).not.toContain('<local-overrides');
   });
 });
+
+/**
+ * F2 — THE ARM THAT DID NOT EXIST.
+ *
+ * ⛔ Before this, "the parity test exists" meant AgentPTY (claude) vs CodexAppServerPTY.
+ * Hermes and opencode appeared NOWHERE in it, so a fix for those two adapters would have
+ * landed against a test that never looked at them. Measured 2026-09-20: `hermes --help` has
+ * no `--append-system-prompt` and `opencode --help` has only `--prompt`, so neither can use
+ * the claude mechanism at all; both carry the overrides as a boot TURN, like codex.
+ */
+const { HermesPTY } = await import('../../../src/pty/hermes-pty.js');
+const { OpencodePTY } = await import('../../../src/pty/opencode-pty.js');
+
+function hermesBoot(agentDir: string): string {
+  const pty = new HermesPTY(mockEnv(agentDir), { hermes_profile: 'default' } as any);
+  return (pty as unknown as { withLocalOverrides(p: string): string }).withLocalOverrides('BOOT_PROMPT');
+}
+
+function opencodeBoot(agentDir: string): string {
+  const pty = new OpencodePTY(mockEnv(agentDir), {} as any);
+  return (pty as unknown as { withLocalOverrides(p: string): string }).withLocalOverrides('BOOT_PROMPT');
+}
+
+describe('F2 adapter parity: hermes and opencode carry local/*.md too', () => {
+  it('THE FIXTURE IS REAL (vacuous-pass guard): the overrides are non-empty', () => {
+    const o = readLocalOverrides(AGENT_DIR);
+    expect(o.content.length).toBeGreaterThan(0);
+    expect(o.files).toEqual(['a.md', 'b.md']);
+  });
+
+  it('hermes delivers the SAME BYTES claude does', () => {
+    const args = agentPtyArgs(AGENT_DIR);
+    const claudeContent = args[args.indexOf('--append-system-prompt') + 1]!;
+    expect(hermesBoot(AGENT_DIR)).toContain(claudeContent);
+  });
+
+  it('opencode delivers the SAME BYTES claude does', () => {
+    const args = agentPtyArgs(AGENT_DIR);
+    const claudeContent = args[args.indexOf('--append-system-prompt') + 1]!;
+    expect(opencodeBoot(AGENT_DIR)).toContain(claudeContent);
+  });
+
+  it('the boot prompt is preserved, not replaced', () => {
+    expect(hermesBoot(AGENT_DIR)).toContain('BOOT_PROMPT');
+    expect(opencodeBoot(AGENT_DIR)).toContain('BOOT_PROMPT');
+  });
+
+  it('the DELIVERY CAVEAT travels with the content on BOTH runtimes', () => {
+    for (const text of [hermesBoot(AGENT_DIR), opencodeBoot(AGENT_DIR)]) {
+      expect(text).toContain('CONVERSATION TURN, not as a system prompt');
+      expect(text).toContain('RE-READ {agentDir}/local/*.md AT EVERY HEARTBEAT');
+    }
+    // and each names its own runtime, so a seat can tell which limit it is under
+    expect(hermesBoot(AGENT_DIR)).toContain('(hermes interim)');
+    expect(opencodeBoot(AGENT_DIR)).toContain('(opencode interim)');
+  });
+
+  it('the caveat is the SAME TEXT codex ships — one wording, so it cannot drift per adapter', () => {
+    const codex = codexBootPrompt(AGENT_DIR);
+    const shared = 'MAY BE COMPACTED AWAY later in this session, and nothing will announce that it has gone.';
+    expect(codex).toContain(shared);
+    expect(hermesBoot(AGENT_DIR)).toContain(shared);
+    expect(opencodeBoot(AGENT_DIR)).toContain(shared);
+  });
+
+  it('DOES NOT RECURSE — the nested marker never reaches either runtime', () => {
+    expect(hermesBoot(AGENT_DIR)).not.toContain(DEEP_MARKER);
+    expect(opencodeBoot(AGENT_DIR)).not.toContain(DEEP_MARKER);
+  });
+
+  it('no local/ at all: the boot prompt is returned UNCHANGED on both', () => {
+    const bare = join(ROOT, 'bare-agent');
+    mkdirSync(bare, { recursive: true });
+    expect(hermesBoot(bare)).toBe('BOOT_PROMPT');
+    expect(opencodeBoot(bare)).toBe('BOOT_PROMPT');
+  });
+});
