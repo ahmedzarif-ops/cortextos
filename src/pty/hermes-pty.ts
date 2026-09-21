@@ -13,6 +13,15 @@ import {
 import { readLocalOverrides, composeTurnOverrideBlock } from '../utils/local-overrides.js';
 
 export { assertHermesProfileExists, hermesDbExists, hermesProfileHome } from '../utils/hermes-runtime.js';
+import { HermesContextReporter } from './hermes-context-reporter.js';
+
+/**
+ * Hermes emits no token event, so this is a poll. 20s, deliberately SLOWER than
+ * the OpenCode reporter's 5s: each tick is a sqlite3 subprocess against a
+ * multi-megabyte live database, and the consumer is a heartbeat-scale gate, not
+ * a UI. Fast enough that a stall is visible well inside the reader's age-out.
+ */
+const CONTEXT_REPORT_INTERVAL_MS = 20000;
 
 // Hermes bootstrap signal: the prompt character that appears when Hermes is
 // ready for input. The full prompt is "⚔ ❯ " but we check for "❯" as a
@@ -43,12 +52,16 @@ export class HermesPTY extends AgentPTY {
   private startupPrompt: string = '';
   private agentDir: string;
   private agentName: string;
+  private stateDir: string;
+  private contextReporter: HermesContextReporter | null = null;
+  private contextReportTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(env: CtxEnv, config: AgentConfig, logPath?: string) {
     super(env, config, logPath, HERMES_BOOTSTRAP_PATTERN);
     // Store agentDir here since AgentPTY.env is private
     this.agentDir = config.working_directory || env.agentDir;
     this.agentName = env.agentName;
+    this.stateDir = join(env.ctxRoot, 'state', env.agentName);
   }
 
   /**
@@ -123,6 +136,10 @@ export class HermesPTY extends AgentPTY {
     this.writeStartupFile(bootPrompt);
     // Spawn Hermes (base class handles PTY setup, env injection, exit handler)
     await super.spawn(mode, prompt);
+    // Nothing else writes context_status.json for this runtime. Without this
+    // the daemon's context gate reads a file that never changes, and a Hermes
+    // seat approaching exhaustion can never trip a handoff.
+    this.startContextReporter(mode);
     // After `❯` appears, inject the read command — base class spawn() returns
     // as soon as the PTY is set up, not when Hermes is ready. We schedule
     // the injection asynchronously so spawn() can return quickly.
@@ -209,6 +226,51 @@ export class HermesPTY extends AgentPTY {
     }
     // Timeout: Hermes took too long to boot. Inject anyway and let it handle.
     this.write(`Read ${STARTUP_PROMPT_FILE} and follow the instructions there.\r`);
+  }
+
+  /**
+   * Stop the context reporter before the PTY goes down.
+   *
+   * Without this the 20s interval keeps writing `context_status.json` for a session that no
+   * longer exists, so the daemon's context gate reads a FRESH file for a DEAD seat — the same
+   * "at rest is indistinguishable from failed" shape this reporter exists to remove, reappearing
+   * at the other end of the lifecycle. A restart makes it cumulative: the new instance's
+   * `startContextReporter` can only stop its OWN timer, so each restart leaves another live
+   * reporter writing the same path.
+   *
+   * `timer.unref()` is not a substitute: it stops the timer holding the process open, not the
+   * timer firing, and this object lives as long as the daemon.
+   *
+   * Mirrors `OpencodePTY.kill()`. (guard, cortextos PR #61 review, 2026-09-21)
+   */
+  override kill(): void {
+    this.stopContextReporter();
+    super.kill();
+  }
+
+  private startContextReporter(mode: 'fresh' | 'continue'): void {
+    this.stopContextReporter();
+    this.contextReporter = new HermesContextReporter({
+      stateDir: this.stateDir,
+      profileHome: hermesProfileHome(this.getPins().profile, process.env['HERMES_HOME'], this.agentName),
+      // A fresh session must not inherit the previous session's row. On
+      // `--continue` the session predates this spawn, so any start time would
+      // exclude the very session we are reporting on.
+      startedAtMs: mode === 'fresh' ? Date.now() : 0,
+    });
+    this.contextReporter.reportOnce();
+    this.contextReportTimer = setInterval(() => {
+      this.contextReporter?.reportOnce();
+    }, CONTEXT_REPORT_INTERVAL_MS);
+    this.contextReportTimer.unref?.();
+  }
+
+  private stopContextReporter(): void {
+    if (this.contextReportTimer) {
+      clearInterval(this.contextReportTimer);
+      this.contextReportTimer = null;
+    }
+    this.contextReporter = null;
   }
 
   private getPins() {
