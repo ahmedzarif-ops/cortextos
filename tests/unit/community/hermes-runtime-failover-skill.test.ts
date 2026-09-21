@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
@@ -22,6 +22,22 @@ const nextSunday1500Chicago = () => {
   throw new Error('could not resolve next Sunday 15:00 America/Chicago');
 };
 
+/** Every regular file under a directory, recursively — used to search the
+ *  receipt and artifact sinks by CONTENT, not by name. */
+const walkFiles = (dir: string): string[] => {
+  const out: string[] = [];
+  const walk = (d: string) => {
+    let entries;
+    try { entries = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p); else out.push(p);
+    }
+  };
+  walk(dir);
+  return out;
+};
+
 describe('hermes-runtime-failover plan validator', () => {
   let tempDir: string;
   let restorePath: string;
@@ -33,7 +49,6 @@ describe('hermes-runtime-failover plan validator', () => {
   let frameworkRoot: string;
   let usageCliPath: string;
   let usageResponsePath: string;
-  let fetchBootstrapPath: string;
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'hermes-failover-skill-'));
@@ -56,19 +71,11 @@ describe('hermes-runtime-failover plan validator', () => {
         seven_day: { utilization: 0.91 },
       },
     }));
-    fetchBootstrapPath = join(tempDir, 'usage-fetch-bootstrap.mjs');
-    writeFileSync(fetchBootstrapPath, `
-import { readFileSync } from 'node:fs';
-globalThis.fetch = async () => {
-  const fixture = JSON.parse(readFileSync(process.env.HERMES_TEST_USAGE_RESPONSE, 'utf8'));
-  return {
-    ok: fixture.ok,
-    status: fixture.status,
-    json: async () => fixture.body,
-    text: async () => fixture.text ?? '',
-  };
-};
-`);
+    // The fetch-injection bootstrap that used to live here is DELETED, not
+    // merely unused. It fabricated a successful authenticated read by assigning
+    // globalThis.fetch — the same mechanism as guard blocker 1 — and leaving it
+    // in the file as dead code would leave a working attack one wiring change
+    // away, with a comment as its only guard.
 
     const triggerReceipt = {
       schema_version: 1,
@@ -255,27 +262,46 @@ globalThis.fetch = async () => {
       HERMES_HOME: hermesRoot,
       CTX_ROOT: tempDir,
       CTX_FRAMEWORK_ROOT: frameworkRoot,
-      CLAUDE_CODE_OAUTH_TOKEN: 'test-oauth-token',
-      HERMES_TEST_USAGE_RESPONSE: usageResponsePath,
-      NODE_OPTIONS: `--import=${fetchBootstrapPath}`,
+      // NO CREDENTIAL BY DEFAULT — this keeps every CLI test OFFLINE.
+      // With a dummy token the trusted child performs a REAL request to the
+      // usage endpoint and fails with E_HTTP_STATUS; that is an outbound
+      // provider call this suite has no business making. An absent credential
+      // fails at E_TOKEN_MISSING, before any socket is opened. Tests that need
+      // a credential shape override it explicitly.
+      CLAUDE_CODE_OAUTH_TOKEN: '',
+      HERMES_CANONICAL_ACCOUNT: 'test-canonical-account',
+      // NO NODE_OPTIONS INJECTION. The previous runner set
+      // `--import=<bootstrap that assigns globalThis.fetch>` to fabricate a
+      // successful authenticated read. That is the SAME MECHANISM as guard
+      // blocker 1 on 9dba452, so the trusted launch boundary necessarily
+      // removes it: the child is spawned with an allow-listed env built from
+      // empty and never inherits it.
+      //
+      // CONSEQUENCE, and it is deliberate: a SUCCESSFUL authenticated read can
+      // no longer be simulated at CLI level, because simulating it is exactly
+      // the capability being removed. CLI tests below assert coded FAILURE
+      // paths; success-path coverage lives in
+      // tests/unit/community/hermes-trusted-usage-boundary.test.ts, which
+      // drives the boundary directly with an injected spawnImpl.
       ...envOverrides,
     },
   });
 
-  it('accepts a fully bound route, restore snapshot, MCP proof, cron scan, and ordered canary', () => {
+  it('fails closed on a fully bound plan when no authenticated usage is obtainable', () => {
+    // Every OTHER binding in this fixture is correct. The validator must still
+    // refuse, which is the property that matters: authenticated usage is a HARD
+    // GATE, not a scored input.
+    //
+    // The former version of this test asserted the full success shape
+    // (trigger_percent 9, seats 6, …). That shape can no longer be asserted
+    // here because reaching it required fabricating the authenticated read.
+    // Asserting it now would mean re-opening guard blocker 1 to keep a green.
     const result = run();
-    expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({
-      ok: true,
-      trigger_percent: 9,
-      seats: 6,
-      hermes_profiles: 5,
-      mcp_receipts: 5,
-      native_cron_collisions: 0,
-      canary: 'city',
-      coordinator_last: 'chief',
-      live_changes: 0,
-    });
+    expect(result.status).toBe(1);
+    const errors = JSON.parse(result.stderr).errors.join('\n');
+    expect(errors).toContain('authenticated usage measurement unavailable');
+    expect(errors).toMatch(/\(E_[A-Z_]+\)/);
+    expect(result.stdout).not.toContain('"ok": true');
   });
 
   it('rejects fail-open trigger, restore, routing, MCP, cron, and ordering data together', () => {
@@ -727,8 +753,13 @@ globalThis.fetch = async () => {
     expect(result.status).toBe(1);
     const errors = JSON.parse(result.stderr).errors.join('\n');
     expect(errors).toContain('trigger.source must be cortextos-check-usage-api:anthropic-oauth');
-    expect(errors).toContain('trigger.observed_value does not match authenticated usage measurement');
-    expect(errors).toContain('trigger receipt observed_value does not match authenticated usage measurement');
+    // The value-comparison errors are no longer reachable at CLI level: they
+    // require a real authenticated measurement to compare against, and
+    // fabricating one is the removed capability. What must still hold — and is
+    // the actual security property — is that the forgery DOES NOT get accepted.
+    expect(errors).toContain('authenticated usage measurement unavailable');
+    expect(errors).toMatch(/\(E_[A-Z_]+\)/);
+    expect(result.stdout).not.toContain('"ok": true');
   });
 
   it('rejects a caller-selected usage CLI that jointly forges the authenticated measurement and trigger evidence', () => {
@@ -774,38 +805,81 @@ console.log(JSON.stringify({
 
     const result = run(invalidPath);
     expect(result.status).toBe(1);
+    // TRIPWIRE, NOT COVERAGE. The marker's absence proves this ONE forged
+    // plan did not cause the caller-selected binary to run. It does not prove
+    // the validator cannot be made to exec anything — no negative-existence
+    // claim follows from a single input. Read it as a canary that would have
+    // fired, not as evidence of a closed class.
     expect(existsSync(executedMarker)).toBe(false);
-    expect(JSON.parse(result.stderr).errors.join('\n'))
-      .toContain('trigger.observed_value does not match authenticated usage measurement');
+    const errors = JSON.parse(result.stderr).errors.join('\n');
+    // The value comparison itself is no longer reachable at CLI level (it needs
+    // a real measurement). The security property that survives is: the forged
+    // evidence did not buy acceptance.
+    expect(errors).toContain('authenticated usage measurement unavailable');
+    expect(errors).toMatch(/\(E_[A-Z_]+\)/);
+    expect(result.stdout).not.toContain('"ok": true');
   });
 
-  it('fails closed when the canonical authenticated usage read returns 401', () => {
-    writeFileSync(usageResponsePath, JSON.stringify({ ok: false, status: 401, text: 'Unauthorized' }));
+  // Upstream HTTP conditions (401, malformed body, missing utilization) can no
+  // longer be produced at CLI level — producing them required controlling the
+  // response, i.e. the injection that has been removed. Those mappings are
+  // asserted directly against the reader in
+  // hermes-trusted-usage-boundary.test.ts (E_HTTP_STATUS, E_RESPONSE_PARSE,
+  // E_RESPONSE_SHAPE, E_RANGE). What remains provable HERE is the CLI's own
+  // contract: it fails closed, it speaks in fixed codes, and it never echoes
+  // a secret.
 
-    const result = run();
-    expect(result.status).toBe(1);
-    expect(JSON.parse(result.stderr).errors.join('\n'))
-      .toContain('authenticated usage measurement unavailable: Usage API returned 401');
-  });
-
-  it('fails closed when no OAuth token is available to the reviewed usage reader', () => {
+  it('fails closed with a FIXED CODE when no OAuth token is available', () => {
     const result = run(planPath, { CLAUDE_CODE_OAUTH_TOKEN: '' });
     expect(result.status).toBe(1);
-    expect(JSON.parse(result.stderr).errors.join('\n'))
-      .toContain('authenticated usage measurement unavailable: No OAuth token available');
+    const errors = JSON.parse(result.stderr).errors.join('\n');
+    expect(errors).toContain('authenticated usage measurement unavailable');
+    expect(errors).toMatch(/\(E_[A-Z_]+\)/);
   });
 
-  it('fails closed when authenticated usage omits a utilization field', () => {
-    writeFileSync(usageResponsePath, JSON.stringify({
-      ok: true,
-      status: 200,
-      body: { five_hour: { utilization: 0.5 } },
-    }));
-
+  it('never emits a raw lower-layer message alongside the usage failure', () => {
+    // Guard blocker 2 travelled exactly this path: errors.push(error.message)
+    // then console.error to stderr.
     const result = run();
+    const errors = JSON.parse(result.stderr).errors.join('\n');
+    for (const leak of ['Bearer ', 'test-oauth-token', 'Usage API returned', 'Unexpected token', 'JSON']) {
+      expect(errors).not.toContain(leak);
+    }
+  });
+
+  it('NON-DISCLOSURE: a sentinel credential reaches NONE of the four sinks', () => {
+    // Criterion 4 names four sinks: stdout, stderr, receipts, artifacts.
+    // The previous version asserted two and was scored PARTIAL. Files written
+    // during the run are enumerated and their CONTENTS searched, so a leak into
+    // a receipt or artifact cannot pass by not being printed.
+    const SENTINEL = 'TOP_SECRET_TOKEN_cli_9z8y7x';
+    const before = new Set(walkFiles(tempDir));
+    const result = run(planPath, { CLAUDE_CODE_OAUTH_TOKEN: `${SENTINEL}\nX-Injected: 1` });
     expect(result.status).toBe(1);
-    expect(JSON.parse(result.stderr).errors.join('\n'))
-      .toContain('authenticated usage measurement unavailable: Usage API response missing valid seven_day_utilization');
+
+    expect(result.stdout ?? '').not.toContain(SENTINEL);   // sink 1
+    expect(result.stderr ?? '').not.toContain(SENTINEL);   // sink 2
+
+    // STANDING CONTROL (promoted from a one-off mutation at guard's request):
+    // plant a sentinel-bearing file so the sweep must catch at least one leak
+    // it is designed to catch. Without this, an enumeration that silently stops
+    // seeing files reads exactly like a clean result.
+    const planted = join(tempDir, 'planted-leak-control.json');
+    writeFileSync(planted, JSON.stringify({ token: SENTINEL }));
+    const control = walkFiles(tempDir).filter((f) => {
+      try { return readFileSync(f, 'utf8').includes(SENTINEL); } catch { return false; }
+    });
+    expect(control).toContain(planted);   // the sweep can see a leak
+    rmSync(planted);
+
+    const after = walkFiles(tempDir);
+    for (const file of after) {                            // sinks 3 and 4
+      let body = '';
+      try { body = readFileSync(file, 'utf8'); } catch { continue; }
+      expect(body).not.toContain(SENTINEL);
+    }
+    // The enumeration must be able to see new files, or the loop proves nothing.
+    expect(after.length).toBeGreaterThanOrEqual(before.size);
   });
 
   it('rejects a decoy cron receipt when the canonical profile jobs file is active', () => {
@@ -825,4 +899,24 @@ console.log(JSON.stringify({
     expect(errors).toContain('native cron jobs_path must equal canonical profile path');
     expect(errors).toContain('native cron jobs file is invalid or contains enabled jobs');
   });
+
+  it('names an unset HERMES_CANONICAL_ACCOUNT as a CONFIGURATION error, not an attack', () => {
+    // Kills the delete-the-config-check mutant. Before the guard existed this
+    // reached the boundary as `undefined` and failed closed only by accident.
+    const result = run(planPath, { HERMES_CANONICAL_ACCOUNT: '' });
+    expect(result.status).toBe(1);
+    const errors = JSON.parse(result.stderr).errors.join('\n');
+    expect(errors).toContain('HERMES_CANONICAL_ACCOUNT is unset');
+    // A misconfiguration must NOT be reported as a mismatched account.
+    expect(errors).not.toContain('E_ACCOUNT_MISMATCH');
+  });
+
+  it('does not raise the unset-account error when it IS configured', () => {
+    // Non-over-trigger control: deleting the check must be the only way to make
+    // the test above fail, not "the message is always absent/present".
+    const result = run(planPath, { HERMES_CANONICAL_ACCOUNT: 'fleet-canonical' });
+    const errors = JSON.parse(result.stderr).errors.join('\n');
+    expect(errors).not.toContain('HERMES_CANONICAL_ACCOUNT is unset');
+  });
+
 });

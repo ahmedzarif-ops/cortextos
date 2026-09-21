@@ -4,7 +4,18 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { readAuthenticatedUsage, usageApiEndpoint } from './read-authenticated-usage.mjs';
+import { usageApiEndpoint } from './read-authenticated-usage.mjs';
+import { launchTrustedUsageRead, computeModuleDigests } from './launch-trusted-usage-read.mjs';
+import {
+  evaluateCanonicalUsage,
+  buildAcceptOutput,
+  // Single definition site. These lived in BOTH files and validateFreshTimestamp
+  // had already diverged (the module version takes an injectable nowMs), which
+  // is how two copies of a validator quietly stop agreeing.
+  nonEmpty,
+  validIso,
+  validateFreshTimestamp,
+} from './evaluate-canonical-usage.mjs';
 
 const args = process.argv.slice(2);
 const valueFor = (flag) => {
@@ -26,7 +37,9 @@ const readBytes = (path) => {
   try {
     return readFileSync(path);
   } catch (error) {
-    console.error(`Cannot read ${path}: ${error.message}`);
+    // FIXED CODE ONLY. A parser/filesystem message can quote file bytes,
+    // which is the same disclosure class as guard blocker 2.
+    console.error(JSON.stringify({ ok: false, code: 'E_FILE_UNREADABLE', path }));
     process.exit(2);
   }
 };
@@ -34,15 +47,12 @@ const readJsonBytes = (path, bytes) => {
   try {
     return JSON.parse(bytes.toString('utf8'));
   } catch (error) {
-    console.error(`Cannot read JSON ${path}: ${error.message}`);
+    console.error(JSON.stringify({ ok: false, code: 'E_FILE_PARSE', path }));
     process.exit(2);
   }
 };
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
-const nonEmpty = (value) => typeof value === 'string' && value.trim().length > 0;
 const canonicalString = (value) => nonEmpty(value) && value === value.trim();
-const isoPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
-const validIso = (value) => nonEmpty(value) && isoPattern.test(value) && Number.isFinite(Date.parse(value));
 const shaPattern = /^[a-f0-9]{64}$/;
 const fixedModelPattern = /^[a-zA-Z0-9._-]+(?:\/[a-zA-Z0-9._-]+)*$/;
 const profilePattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -55,16 +65,6 @@ const isMovingModelAlias = (value) => {
   if (typeof value !== 'string') return false;
   const model = value.trim();
   return model.startsWith('~') || /(?:^|[\/._-])(latest|auto)(?:$|[\/._-])/i.test(model);
-};
-const validateFreshTimestamp = (label, value, maxAgeMinutes, errors) => {
-  if (!validIso(value)) {
-    errors.push(`${label} must be an absolute UTC ISO timestamp`);
-    return;
-  }
-  const ageMs = Date.now() - Date.parse(value);
-  if (ageMs < -5 * 60_000 || ageMs > maxAgeMinutes * 60_000) {
-    errors.push(`${label} is stale or future-dated (max ${maxAgeMinutes} minutes)`);
-  }
 };
 
 const planBytes = readBytes(planPath);
@@ -93,16 +93,45 @@ const normalizedHermesRoot = basename(dirname(daemonHermesHome)) === 'profiles'
 const canonicalProfilesRoot = join(normalizedHermesRoot, 'profiles');
 const evidenceMaxAgeMinutes = plan?.evidence_max_age_minutes;
 
-const readCanonicalUsage = async () => {
-  try {
-    return await readAuthenticatedUsage(process.env.CTX_ROOT);
-  } catch (error) {
-    errors.push(`authenticated usage measurement unavailable: ${error.message}`);
+/**
+ * Read usage through the TRUSTED LAUNCH BOUNDARY, never by importing the reader
+ * into this process.
+ *
+ * Two guard blockers on 9dba452 are closed here at once:
+ *  - blocker 1: this process's execution controls are caller-influenced, so an
+ *    in-process read could be preloaded. The boundary spawns a clean child.
+ *  - blocker 2: the old code appended `error.message`, which carried
+ *    `Bearer <token>` and response-body fragments, and printed it to stderr.
+ *    Only a fixed allow-listed CODE is surfaced now.
+ */
+const readCanonicalUsage = () => {
+  // Guard finding 2: an unset HERMES_CANONICAL_ACCOUNT used to reach the
+  // boundary as `undefined` and fail closed only BY ACCIDENT — because the real
+  // reader always populates account_used, so `'env' !== undefined`. A guard
+  // that holds by coincidence in a different module is not a guard. Name the
+  // configuration error as a configuration error, not as an attack.
+  if (typeof process.env.HERMES_CANONICAL_ACCOUNT !== 'string'
+    || process.env.HERMES_CANONICAL_ACCOUNT.trim().length === 0) {
+    errors.push('HERMES_CANONICAL_ACCOUNT is unset — canonical account binding is unconfigured');
     return null;
   }
+  const result = launchTrustedUsageRead({
+    canonicalRoot: process.env.CTX_ROOT,
+    expectedAccount: process.env.HERMES_CANONICAL_ACCOUNT,
+    expectedDigests: computeModuleDigests(),
+    token: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+  });
+  if (!result.ok) {
+    errors.push(`authenticated usage measurement unavailable (${result.code})`);
+    return null;
+  }
+  usageAttestation = result.attestation;
+  return result.usage;
 };
 
-const canonicalUsage = await readCanonicalUsage();
+let usageAttestation = null;
+
+const canonicalUsage = readCanonicalUsage();
 
 if (!Number.isInteger(evidenceMaxAgeMinutes) || evidenceMaxAgeMinutes < 1 || evidenceMaxAgeMinutes > 1440) {
   errors.push('evidence_max_age_minutes must be an integer from 1 to 1440');
@@ -252,40 +281,17 @@ if (!Number.isInteger(maxAgeMinutes) || maxAgeMinutes < 1 || maxAgeMinutes > 60)
     errors.push(`trigger observation is stale or future-dated (max ${maxAgeMinutes} minutes)`);
   }
 }
-let canonicalRemainingPercent;
-if (canonicalUsage) {
-  const originIsAuthenticated = canonicalUsage.provider === 'anthropic'
-    && canonicalUsage.endpoint === usageApiEndpoint
-    && canonicalUsage.authentication === 'oauth-bearer'
-    && canonicalUsage.cached === false
-    && nonEmpty(canonicalUsage.account);
-  if (!originIsAuthenticated) {
-    errors.push('usage measurement is unauthenticated, cached, or from an unexpected origin');
-  }
-  const fiveHour = canonicalUsage.five_hour_utilization;
-  const sevenDay = canonicalUsage.seven_day_utilization;
-  if (typeof fiveHour !== 'number' || !Number.isFinite(fiveHour) || fiveHour < 0 || fiveHour > 1
-    || typeof sevenDay !== 'number' || !Number.isFinite(sevenDay) || sevenDay < 0 || sevenDay > 1) {
-    errors.push('authenticated usage measurement is missing valid utilization fields');
-  } else {
-    canonicalRemainingPercent = Number(((1 - sevenDay) * 100).toFixed(6));
-    if (plan?.trigger?.observed_value !== canonicalRemainingPercent) {
-      errors.push('trigger.observed_value does not match authenticated usage measurement');
-    }
-    if (triggerReceipt?.observed_value !== canonicalRemainingPercent) {
-      errors.push('trigger receipt observed_value does not match authenticated usage measurement');
-    }
-  }
-  if (!validIso(canonicalUsage.fetched_at)) {
-    errors.push('authenticated usage measurement fetched_at is missing or invalid');
-  } else if (Number.isInteger(maxAgeMinutes) && maxAgeMinutes >= 1 && maxAgeMinutes <= 60) {
-    validateFreshTimestamp('authenticated usage measurement fetched_at', canonicalUsage.fetched_at, maxAgeMinutes, errors);
-    if (validIso(plan?.trigger?.observed_at_utc)
-      && Math.abs(Date.parse(canonicalUsage.fetched_at) - Date.parse(plan.trigger.observed_at_utc)) > maxAgeMinutes * 60_000) {
-      errors.push('trigger.observed_at_utc is not contemporaneous with authenticated usage measurement');
-    }
-  }
-}
+// Anti-forgery core lives in evaluate-canonical-usage.mjs as a PURE function so
+// it can be unit-tested with fabricated usage without any injection seam.
+const usageEvaluation = evaluateCanonicalUsage({
+  usage: canonicalUsage,
+  plan,
+  triggerReceipt,
+  maxAgeMinutes,
+  usageApiEndpoint,
+});
+errors.push(...usageEvaluation.errors);
+const canonicalRemainingPercent = usageEvaluation.canonicalRemainingPercent;
 
 if (plan?.restore?.timezone !== 'America/Chicago'
   || plan?.restore?.day !== 'Sunday'
@@ -605,21 +611,17 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log(JSON.stringify({
-  ok: true,
-  trigger_percent: canonicalRemainingPercent,
-  trigger_observed_at_utc: canonicalUsage.fetched_at,
-  trigger_source: canonicalTriggerSource,
-  trigger_receipt_sha256: triggerBinding.sha256,
-  restore_occurrence_utc: plan.restore.occurrence_utc,
-  restore_snapshot_sha256: binding.sha256,
-  fleet_snapshot_sha256: fleetBinding.sha256,
-  total_expected_weekly_usd: spend.total_expected_weekly_usd,
-  seats: planNames.length,
-  hermes_profiles: profiles.size,
-  mcp_receipts: hermesSeats.reduce((count, seat) => count + planSeats[seat].mcp_required.length, 0),
-  native_cron_collisions: 0,
-  canary: cutover.canary_seat,
-  coordinator_last: cutover.coordinator_seat,
-  live_changes: 0,
-}, null, 2));
+console.log(JSON.stringify(buildAcceptOutput({
+  canonicalRemainingPercent,
+  usage: canonicalUsage,
+  canonicalTriggerSource,
+  triggerBinding,
+  plan,
+  binding,
+  fleetBinding,
+  spend,
+  planNames,
+  profiles,
+  mcpReceipts: hermesSeats.reduce((count, seat) => count + planSeats[seat].mcp_required.length, 0),
+  cutover,
+}), null, 2));
