@@ -6,6 +6,7 @@ import { KEYS } from './inject.js';
 import { OpencodeContextReporter } from './opencode-context-reporter.js';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { stripControlChars } from '../utils/validate.js';
+import { readLocalOverrides, composeTurnOverrideBlock } from '../utils/local-overrides.js';
 
 const OPENCODE_BOOTSTRAP_PATTERN = 'Ask anything';
 const OPENCODE_SESSION_MARKER = 'opencode-session.json';
@@ -315,8 +316,28 @@ cortextos bus send-telegram ${chatId} '<your reply>'
 Keep the reply concise. Do not just write the answer in the OpenCode chat.`;
   }
 
+  /**
+   * Prepend `{agentDir}/local/*.md`, with its delivery caveat.
+   *
+   * ⛔ NOT `--append-system-prompt`: measured 2026-09-20, `opencode --help` offers `--prompt`
+   * and nothing else of that kind. ⚠️ Delivered as a TURN, so it restores the instructions at
+   * boot and does NOT survive a compaction — see `composeTurnOverrideBlock`.
+   */
+  private withLocalOverrides(prompt: string): string {
+    const overrides = readLocalOverrides(this.agentDir);
+    if (overrides.skipped.length > 0) {
+      console.warn(
+        `[opencode-pty] ${this.env.agentName}: local/ overrides SKIPPED ` +
+          `(${overrides.skipped.length}): ${overrides.skipped.join(', ')}`,
+      );
+    }
+    const { text, note } = composeTurnOverrideBlock('opencode', overrides, prompt);
+    if (note) console.warn(note);
+    return text;
+  }
+
   private prepareStartupPrompt(prompt: string): string {
-    const safePrompt = stripControlChars(prompt).replace(/\r\n?/g, '\n').trim();
+    const safePrompt = stripControlChars(this.withLocalOverrides(prompt)).replace(/\r\n?/g, '\n').trim();
     return `${safePrompt}
 
 [OPENCODE STARTUP EXECUTION REQUIREMENT]

@@ -10,6 +10,7 @@ import {
   hermesProfileHome,
   resolveHermesLaunchPins,
 } from '../utils/hermes-runtime.js';
+import { readLocalOverrides, composeTurnOverrideBlock } from '../utils/local-overrides.js';
 
 export { assertHermesProfileExists, hermesDbExists, hermesProfileHome } from '../utils/hermes-runtime.js';
 
@@ -112,9 +113,14 @@ export class HermesPTY extends AgentPTY {
     // Fail once with an actionable error instead of launching a process that
     // immediately exits and looks like a runtime crash loop.
     assertHermesProfileExists(this.getPins().profile, process.env['HERMES_HOME']);
-    this.startupPrompt = prompt;
+    // F2: carry {agentDir}/local/*.md on this runtime too.
+    // ⛔ NOT AS `--append-system-prompt`: measured 2026-09-20, `hermes --help` has no such
+    // flag, and passing one makes argparse exit before the seat boots. The overrides ride
+    // the SAME temp-file startup path this adapter already uses for exactly that reason.
+    const bootPrompt = this.withLocalOverrides(prompt);
+    this.startupPrompt = bootPrompt;
     // Write startup prompt to temp file BEFORE spawn so Hermes can read it
-    this.writeStartupFile(prompt);
+    this.writeStartupFile(bootPrompt);
     // Spawn Hermes (base class handles PTY setup, env injection, exit handler)
     await super.spawn(mode, prompt);
     // After `❯` appears, inject the read command — base class spawn() returns
@@ -143,6 +149,28 @@ export class HermesPTY extends AgentPTY {
         console.warn(`[hermes-pty] deferred Enter failed (pty likely torn down): ${msg}`);
       }
     }, 300).unref?.();
+  }
+
+  /**
+   * Prepend `{agentDir}/local/*.md` to the boot prompt, with its delivery caveat.
+   *
+   * ⚠️ THIS IS NOT PARITY WITH THE CLAUDE PATH AND MUST NOT BE REPORTED AS SUCH.
+   * `--append-system-prompt` is part of the SYSTEM prompt: one copy, and it survives a
+   * compaction. This is a conversation turn: it restores the instructions AT BOOT and a
+   * compaction can eat it later with nothing announcing that it has gone. The caveat ships
+   * inside the block so the seat — the only party present after a compaction — can act on it.
+   */
+  private withLocalOverrides(prompt: string): string {
+    const overrides = readLocalOverrides(this.agentDir);
+    if (overrides.skipped.length > 0) {
+      console.warn(
+        `[hermes-pty] ${this.env.agentName}: local/ overrides SKIPPED ` +
+          `(${overrides.skipped.length}): ${overrides.skipped.join(', ')}`,
+      );
+    }
+    const { text, note } = composeTurnOverrideBlock('hermes', overrides, prompt);
+    if (note) console.warn(note);
+    return text;
   }
 
   /**

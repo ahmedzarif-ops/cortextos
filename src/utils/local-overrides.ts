@@ -72,3 +72,71 @@ export function readLocalOverrides(agentDir: string | undefined): LocalOverrides
   const content = parts.join('\n\n');
   return { content, files, bytes: Buffer.byteLength(content, 'utf-8'), skipped };
 }
+
+/**
+ * Boot cap for overrides delivered as a TURN rather than as a system prompt.
+ * Mirrors the codex adapter's cap: DROP LOUDLY, never truncate. A truncated
+ * instruction set is worse than none, because it reads as complete.
+ */
+export const MAX_TURN_OVERRIDE_BYTES = 128 * 1024;
+
+/**
+ * The caveat that travels WITH the content, for every runtime that has no
+ * system-prompt equivalent.
+ *
+ * ⛔ THE LIMIT HAS TO BE WRITTEN WHERE THE SEAT READS IT (chief's ruling). A caveat that
+ * lives only in an adapter is a caveat the affected agent never sees — and this particular
+ * limit is one ONLY THE AGENT can act on, because after a compaction it is the only party
+ * still present.
+ */
+export function turnDeliveryCaveat(runtime: string): string {
+  return (
+    `DELIVERY NOTE (${runtime} interim): this block arrived as a ` +
+    'CONVERSATION TURN, not as a system prompt. It MAY BE COMPACTED AWAY ' +
+    'later in this session, and nothing will announce that it has gone. ' +
+    'RE-READ {agentDir}/local/*.md AT EVERY HEARTBEAT and treat its absence ' +
+    'from this transcript as expected, not as evidence it was never sent.'
+  );
+}
+
+/**
+ * Compose the boot block for a runtime with NO `--append-system-prompt`.
+ *
+ * ⛔ WHY THIS EXISTS RATHER THAN THE FLAG. Measured 2026-09-20: `hermes --help` offers
+ * `-z/--oneshot`, `-m`, `--usage-file` and subcommands, and `opencode --help` offers
+ * `--prompt`. NEITHER HAS `--append-system-prompt`. Pushing that flag into `buildClaudeArgs`
+ * hands argparse an unrecognised option and THE SEAT DOES NOT BOOT AT ALL — strictly worse
+ * than the missing instructions it was meant to fix.
+ *
+ * Returns the prompt unchanged when there is nothing to add, so a seat with no `local/`
+ * directory is byte-for-byte unaffected.
+ */
+export function composeTurnOverrideBlock(
+  runtime: string,
+  overrides: LocalOverrides,
+  prompt: string,
+): { text: string; note: string | null } {
+  if (!overrides.content) {
+    return { text: prompt, note: null };
+  }
+  if (overrides.bytes > MAX_TURN_OVERRIDE_BYTES) {
+    return {
+      text: prompt,
+      note:
+        `[${runtime}] local/ overrides DROPPED: ${overrides.bytes} bytes over the ` +
+        `${MAX_TURN_OVERRIDE_BYTES}-byte boot cap (${overrides.files.length} files: ` +
+        `${overrides.files.join(', ')}). Booting WITHOUT them.`,
+    };
+  }
+  const block =
+    `<local-overrides source="{agentDir}/local/*.md" files="${overrides.files.join(',')}" bytes="${overrides.bytes}">\n` +
+    `${turnDeliveryCaveat(runtime)}\n\n` +
+    `${overrides.content}\n` +
+    `</local-overrides>`;
+  return {
+    text: prompt.trim() ? `${block}\n\n${prompt}` : block,
+    note:
+      `[${runtime}] local/ overrides injected: ${overrides.files.length} files, ` +
+      `${overrides.bytes} bytes (${overrides.files.join(', ')})`,
+  };
+}
