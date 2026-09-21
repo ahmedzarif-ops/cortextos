@@ -228,6 +228,26 @@ export class HermesPTY extends AgentPTY {
     this.write(`Read ${STARTUP_PROMPT_FILE} and follow the instructions there.\r`);
   }
 
+  /**
+   * Stop the context reporter before the PTY goes down.
+   *
+   * Without this the 20s interval keeps writing `context_status.json` for a session that no
+   * longer exists, so the daemon's context gate reads a FRESH file for a DEAD seat — the same
+   * "at rest is indistinguishable from failed" shape this reporter exists to remove, reappearing
+   * at the other end of the lifecycle. A restart makes it cumulative: the new instance's
+   * `startContextReporter` can only stop its OWN timer, so each restart leaves another live
+   * reporter writing the same path.
+   *
+   * `timer.unref()` is not a substitute: it stops the timer holding the process open, not the
+   * timer firing, and this object lives as long as the daemon.
+   *
+   * Mirrors `OpencodePTY.kill()`. (guard, cortextos PR #61 review, 2026-09-21)
+   */
+  override kill(): void {
+    this.stopContextReporter();
+    super.kill();
+  }
+
   private startContextReporter(mode: 'fresh' | 'continue'): void {
     this.stopContextReporter();
     this.contextReporter = new HermesContextReporter({
