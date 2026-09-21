@@ -156,4 +156,44 @@ describe('HermesPTY context reporter lifecycle', () => {
 
     second.kill();
   });
+
+  /**
+   * ⛔ THE ARM THAT COUNTS WRITES CANNOT SEE A LEAKED TIMER. (guard, re-review of 9e1a6b00)
+   *
+   * The interval body is `this.contextReporter?.reportOnce()`. An implementation whose kill()
+   * nulls `contextReporter` but never calls clearInterval SILENCES EVERY WRITE while the interval
+   * goes on firing forever — and the three arms above, which count writes, see silence and call it
+   * stopped. Guard mutated exactly that and it survived 3/3.
+   *
+   * That splits the two consequences apart: the write-counting arms cover consequence 1 (a fresh
+   * context_status.json for a dead seat) and are blind to consequence 2 (one 20s interval leaked
+   * per restart, in a daemon that lives for days).
+   *
+   * This arm asserts on `vi.getTimerCount()` — whether a scheduled timer still EXISTS. That is
+   * still the property, not the mechanism: it does not care that clearInterval was the means, only
+   * that one fewer timer remains scheduled. An implementation that stops the timer some other way
+   * passes; one that leaves it armed fails, however quiet it is.
+   *
+   * ⚠ THE BASELINE IS `armed - 1`, NOT ZERO, AND THE REASON IS MEASURED: a spawn arms TWO timers,
+   * the reporter interval AND the startup-injection retry loop. `kill()` is responsible for the
+   * reporter only. My first version asserted a return to the pre-spawn count and FAILED AGAINST
+   * THE CORRECT CODE (before=0, armed=2, afterKill=1) — the test was wrong, not the fix. Relative
+   * to `armed` it also survives a future change to how the injection loop schedules itself.
+   */
+  it('leaves no timer armed after kill — silence is not the same as stopped', async () => {
+    const before = vi.getTimerCount();
+
+    const pty = await spawnedPty();
+    // Drain the startup-injection timers so the only survivor is the reporter interval.
+    await vi.advanceTimersByTimeAsync(CONTEXT_REPORT_INTERVAL_MS);
+
+    const armed = vi.getTimerCount();
+    // Positive control: without this, the assertion below would hold for an implementation that
+    // never armed a timer at all.
+    expect(armed).toBeGreaterThan(before);
+
+    pty.kill();
+
+    expect(vi.getTimerCount()).toBe(armed - 1);
+  });
 });
