@@ -5,7 +5,11 @@ import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { readLocalOverrides } from '../utils/local-overrides.js';
 import { OutputBuffer } from './output-buffer.js';
 import { resolveOrchestratorAgent } from '../utils/orchestrator-env.js';
-import { injectMessage as injectMessageIntoPty } from './inject.js';
+import { injectMessage as injectMessageIntoPty, composerHoldsUnsent, KEYS } from './inject.js';
+
+// How long after an injection to check that it actually left the composer. The Enter goes at
+// 300 ms; 2 s gives Claude Code's paste handling time to finish before we judge it stuck.
+export const SUBMIT_CHECK_MS = 2000;
 
 // node-pty types
 interface IPty {
@@ -379,6 +383,31 @@ export class AgentPTY {
    */
   injectMessage(content: string): void {
     injectMessageIntoPty((data) => this.write(data), content);
+    this.scheduleSubmitCheck(content);
+  }
+
+  /**
+   * ONE retry Enter if the message is still sitting in the composer (see composerHoldsUnsent).
+   * Never more than one: a composer that ignores two Enters is a different fault, and it is
+   * logged loudly instead of hammered.
+   */
+  protected scheduleSubmitCheck(content: string, delayMs: number = SUBMIT_CHECK_MS): void {
+    const check = (attempt: number) => {
+      try {
+        if (!this.isAlive()) return;
+        if (!composerHoldsUnsent(this.outputBuffer.getRecent(), content)) return;
+        if (attempt === 0) {
+          console.warn(`[agent-pty] ${this.env.agentName}: injected message still in the composer ${delayMs}ms after Enter — sending ONE retry Enter`);
+          this.write(KEYS.ENTER);
+          setTimeout(() => check(1), delayMs);
+        } else {
+          console.warn(`[agent-pty] ${this.env.agentName}: injected message STILL NOT SUBMITTED after a retry Enter — it is sitting unsent in the composer`);
+        }
+      } catch (e) {
+        console.warn(`[agent-pty] ${this.env.agentName}: submit check failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    };
+    setTimeout(() => check(0), delayMs);
   }
 
   /**
