@@ -44,6 +44,13 @@ describe('composerHoldsUnsent', () => {
     expect(composerHoldsUnsent(`${BORDER}\n\u276f ==\n${BORDER}`, MSG)).toBe(false);
     expect(composerHoldsUnsent(`${BORDER}\n\u276f ===\n${BORDER}`, MSG)).toBe(false);
   });
+  // Seen live 2026-09-25 20:58Z on the first boot after deploying this check: the ECHO of a message
+  // already sent uses the same glyph, with no box border before it, and was the last glyph on screen
+  // while the turn ran. It must not read as unsent.
+  it('does not flag the echo of a message already sent (no border before the glyph)', () => {
+    const echo = `thinking about it\n\u276f ${MSG.replace(/\n/g, ' ')}\n  \u23bf  Read 3 files`;
+    expect(composerHoldsUnsent(echo, MSG)).toBe(false);
+  });
   it('returns false when no prompt glyph is on screen at all', () => {
     expect(composerHoldsUnsent('booting...', MSG)).toBe(false);
   });
