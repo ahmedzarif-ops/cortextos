@@ -32,6 +32,18 @@ describe('composerHoldsUnsent', () => {
     const one = '=== AGENT MESSAGE from guard [msg_id: 1] === PASS';
     expect(composerHoldsUnsent(`${BORDER}\n❯ ${one}\n${BORDER}`, one)).toBe(true);
   });
+  // THE HIGHEST-CONSEQUENCE CASE (guard he6bj): Claude Code menus use the SAME glyph as their
+  // cursor, and a stray Enter picks the highlighted option — here option 1 stops the seat. A menu
+  // drawn after a stale stuck frame puts ITS glyph last, so the composer reads "1. Exit…" and
+  // nothing fires. Real menu line from a seat log.
+  it('does not fire on a menu drawn after a stale stuck frame (Enter would pick "Exit")', () => {
+    const menu = `${STUCK}\n${BORDER}\n  \u276f 1. Exit and stop tasks\n    2. Move to background\n`;
+    expect(composerHoldsUnsent(menu, MSG)).toBe(false);
+  });
+  it('does not let a 1-3 char composer match the content opening', () => {
+    expect(composerHoldsUnsent(`${BORDER}\n\u276f ==\n${BORDER}`, MSG)).toBe(false);
+    expect(composerHoldsUnsent(`${BORDER}\n\u276f ===\n${BORDER}`, MSG)).toBe(false);
+  });
   it('returns false when no prompt glyph is on screen at all', () => {
     expect(composerHoldsUnsent('booting...', MSG)).toBe(false);
   });

@@ -138,8 +138,11 @@ export function composerHoldsUnsent(screen: string, content: string): boolean {
   const composer = clean.slice(at + 1).split(/\u2500|\n/)[0].replace(/\s+/g, ' ').trim();
   if (!composer) return false;
   if (/^\[Pasted text #\d+/.test(composer)) return true;
+  // At least 12 matched characters, never fewer: a 1-3 char composer would otherwise
+  // "match" the opening `===` that almost every injected message starts with (guard he6bj).
   const head = content.replace(/\s+/g, ' ').trim().slice(0, 24);
-  return head.length >= 12 && composer.startsWith(head.slice(0, Math.min(head.length, composer.length)));
+  const m = Math.min(head.length, composer.length);
+  return m >= 12 && composer.slice(0, m) === head.slice(0, m);
 }
 
 /**
