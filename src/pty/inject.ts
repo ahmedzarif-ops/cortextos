@@ -113,6 +113,39 @@ export function injectMessage(
 }
 
 /**
+ * Did an injected message stay UNSENT in the runtime's composer?
+ *
+ * Observed 2026-09-25 04:14:50Z on the chief seat: `injectMessage` wrote the paste and,
+ * 300 ms later, the Enter — no write error, `onEnterError` never fired — yet the screen
+ * sat on `❯ [Pasted text #1 +8 lines]` for four minutes while the owner waited. Claude
+ * Code was still in its "Pasting…" state when the Enter arrived and dropped it. This is
+ * a DIFFERENT failure from the one `onEnterError` covers (a PTY torn down mid-window):
+ * here every write succeeded and the message was still not delivered.
+ *
+ * The composer is the text after the LAST prompt glyph on screen, up to the input box's
+ * bottom border. It holds an unsent message when it shows Claude Code's collapsed-paste
+ * placeholder, or when it starts with the head of the content we just injected.
+ * A false positive costs one extra Enter on an empty composer, which is a no-op; a
+ * false negative is a message the owner never gets an answer to. Bias accordingly.
+ */
+export function composerHoldsUnsent(screen: string, content: string): boolean {
+  const clean = screen
+    .replace(/\x1b\[[0-9;?<>]*[A-Za-z]/g, '')
+    .replace(/\x1b\][^\x07]*\x07/g, '')
+    .replace(/[\x00-\x08\x0e-\x1f]/g, '');
+  const at = clean.lastIndexOf('\u276f'); // ❯
+  if (at < 0) return false;
+  const composer = clean.slice(at + 1).split(/\u2500|\n/)[0].replace(/\s+/g, ' ').trim();
+  if (!composer) return false;
+  if (/^\[Pasted text #\d+/.test(composer)) return true;
+  // At least 12 matched characters, never fewer: a 1-3 char composer would otherwise
+  // "match" the opening `===` that almost every injected message starts with (guard he6bj).
+  const head = content.replace(/\s+/g, ' ').trim().slice(0, 24);
+  const m = Math.min(head.length, composer.length);
+  return m >= 12 && composer.slice(0, m) === head.slice(0, m);
+}
+
+/**
  * Send a sequence of keys to the PTY for TUI navigation.
  * Used for AskUserQuestion option selection and Plan mode approval.
  *
