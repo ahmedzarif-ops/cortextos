@@ -135,6 +135,13 @@ export function composerHoldsUnsent(screen: string, content: string): boolean {
     .replace(/[\x00-\x08\x0e-\x1f]/g, '');
   const at = clean.lastIndexOf('\u276f'); // ❯
   if (at < 0) return false;
+  // The COMPOSER sits inside the input box, so a box border comes right before its glyph. An ECHO of a
+  // message already sent uses the same glyph with no border before it. Without this, a running turn whose
+  // input box had not been redrawn yet read as "unsent" — seen live on the first boot after the deploy
+  // (2026-09-25 20:58Z: sentinel + social logged a retry and a false STILL NOT SUBMITTED while both seats
+  // were answering). Measured on chief's screen log: message-after-glyph WITHOUT a border 6200×, WITH 55×.
+  const before = clean.slice(Math.max(0, at - 6), at).replace(/\s+/g, '');
+  if (!before.endsWith('\u2500')) return false;
   const composer = clean.slice(at + 1).split(/\u2500|\n/)[0].replace(/\s+/g, ' ').trim();
   if (!composer) return false;
   if (/^\[Pasted text #\d+/.test(composer)) return true;
