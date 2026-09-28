@@ -250,8 +250,35 @@ function approvals(org: string) {
   };
 }
 
+/* ---------- add-on #2: when did the current run of work START? ----------
+   No task record carries a started_at. The audit log does: every transition is
+   an appended line, and the LAST one that moved the task to in_progress is when
+   the current run began. No such line = null ("age unknown") — never created_at
+   dressed up as a start time. Mirrors city-state.mjs startedAt(). */
+function startedAt(org: string, taskId: string): string | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(taskId)) return null;
+  let raw: string;
+  try {
+    raw = fs.readFileSync(path.join(getTaskDir(org), 'audit', `${taskId}.jsonl`), 'utf-8');
+  } catch {
+    return null;
+  }
+  let at: string | null = null;
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const e = JSON.parse(line);
+      if (e.to === 'in_progress' && typeof e.ts === 'string') at = e.ts;
+    } catch {
+      /* skip malformed */
+    }
+  }
+  return at;
+}
+
 /* ---------- row 9: tasks — read the store, not the cache ---------- */
-function tasks(org: string) {
+function tasks(org: string, roster: string[]) {
+  const seats = new Set(roster);
   const dir = getTaskDir(org);
   let files: string[];
   try {
@@ -262,6 +289,8 @@ function tasks(org: string) {
   const byAgent: Record<string, Array<Record<string, unknown>>> = {};
   let open = 0;
   let inProgress = 0;
+  let offRoster = 0;
+  const inProgressList: Array<{ id: string; title: string; assignee: string; started_at: string | null }> = [];
   for (const f of files) {
     try {
       const t = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8'));
@@ -269,6 +298,15 @@ function tasks(org: string) {
       open++;
       if (t.status === 'in_progress') inProgress++;
       const who = t.assigned_to || 'unassigned';
+      if (t.status === 'in_progress') {
+        /* Enumerated by ROSTER: a crew figure needs a building to sit in. Anything
+           else is counted, not drawn, so it cannot vanish silently. */
+        if (seats.has(who)) {
+          inProgressList.push({ id: t.id, title: t.title, assignee: who, started_at: startedAt(org, t.id) });
+        } else {
+          offRoster++;
+        }
+      }
       (byAgent[who] ||= []).push({
         id: t.id,
         title: t.title,
@@ -280,9 +318,17 @@ function tasks(org: string) {
       /* skip malformed */
     }
   }
+  inProgressList.sort(
+    (a, b) => a.assignee.localeCompare(b.assignee) || String(a.started_at).localeCompare(String(b.started_at))
+  );
   return {
     open,
-    in_progress: inProgress,
+    /* was a bare count; it is now the list the crews are drawn from. The count
+       is in_progress.length + in_progress_off_roster. */
+    in_progress: inProgressList,
+    in_progress_off_roster: offRoster,
+    in_progress_source:
+      'tasks/*.json status=in_progress; started_at = last audit line with to=in_progress (tasks/audit/<id>.jsonl), null if none',
     by_agent: byAgent,
     source: 'orgs/<org>/tasks/*.json',
     resolution: 'on change',
@@ -354,8 +400,13 @@ function events(org: string, limit: number, windowHours: number) {
   }
 
   out.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  /* newest non-heartbeat event per agent over the WHOLE window (recent[] is
+     capped, so a quiet seat would otherwise read as eventless) */
+  const lastByAgent: Record<string, string> = {};
+  for (const e of out) lastByAgent[e.agent] = e.at;
   return {
     recent: out.slice(-limit),
+    last_by_agent: lastByAgent,
     total_in_window: out.length,
     window_hours: windowHours,
     source: 'orgs/<org>/analytics/events/*/YYYY-MM-DD.jsonl (append-only log, NOT the SQLite cache)',
@@ -370,7 +421,10 @@ function events(org: string, limit: number, windowHours: number) {
 function activity(evs: ReturnType<typeof events>) {
   if (!evs) return null;
   const hourAgo = Date.now() - 3600e3;
-  const per: Record<string, { events_window: number; events_1h: number; messages_1h: number }> = {};
+  const per: Record<
+    string,
+    { events_window: number; events_1h: number; messages_1h: number; last_event_at?: string | null }
+  > = {};
   for (const e of evs.recent) {
     const a = (per[e.agent] ||= { events_window: 0, events_1h: 0, messages_1h: 0 });
     a.events_window++;
@@ -379,6 +433,12 @@ function activity(evs: ReturnType<typeof events>) {
       if (e.category === 'message') a.messages_1h++;
     }
   }
+  /* add-on #2: a desk screen is LIT only if its seat logged an event in the last
+     10 minutes. last_event_at is null when the seat has none in the window. */
+  for (const [who, at] of Object.entries(evs.last_by_agent)) {
+    (per[who] ||= { events_window: 0, events_1h: 0, messages_1h: 0 }).last_event_at = at;
+  }
+  for (const a of Object.values(per)) if (!('last_event_at' in a)) a.last_event_at = null;
   return {
     per_agent: per,
     window_hours: evs.window_hours,
@@ -405,13 +465,14 @@ export async function GET(request: NextRequest) {
 
   try {
     const eventsData = events(org, limit, windowHours);
+    const agentsData = await agents(org);
 
     return Response.json({
       generated_at: new Date().toISOString(),
       org,
-      agents: await agents(org),
+      agents: agentsData,
       approvals: approvals(org),
-      tasks: tasks(org),
+      tasks: tasks(org, (agentsData ?? []).map((a) => a.id)),
       events: eventsData,
       activity: activity(eventsData),
 
