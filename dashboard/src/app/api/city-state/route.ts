@@ -177,6 +177,26 @@ async function workers() {
   };
 }
 
+/* ---------- add-on #7: pending inbox depth, enumerated by ROSTER ----------
+   $CTX_ROOT/inbox/<seat>/*.json is the bus queue itself (check-inbox moves a
+   file to inflight when the seat reads it). The dir holds ~45 names, most not
+   seats, so only roster seats are counted. ENOENT = nothing was ever queued =
+   0; any other read failure = null (unknown), never 0. Mirrors city-state.mjs. */
+function inbox(roster: string[] | null) {
+  if (!roster) return null;
+  const per: Record<string, number | null> = {};
+  for (const seat of roster) {
+    try {
+      per[seat] = fs
+        .readdirSync(path.join(getCTXRoot(), 'inbox', seat))
+        .filter((f) => f.endsWith('.json') && !f.startsWith('.')).length;
+    } catch (e) {
+      per[seat] = (e as NodeJS.ErrnoException).code === 'ENOENT' ? 0 : null;
+    }
+  }
+  return { per_agent: per, source: '$CTX_ROOT/inbox/<seat>/*.json (pending, not yet read)', resolution: 'on poll' };
+}
+
 /** Emoji + role from IDENTITY.md — scene labelling, not a signal. */
 function identityOf(name: string, org: string): { role: string | null; emoji: string | null } {
   try {
@@ -540,6 +560,7 @@ export async function GET(request: NextRequest) {
       events: eventsData,
       activity: activity(eventsData),
       workers: await workers(),
+      inbox: inbox(agentsData ? agentsData.map((a) => a.id) : null),
       /* add-on #3: pairwise handoffs. null = event log unreadable = unknown */
       lanes: eventsData
         ? {
