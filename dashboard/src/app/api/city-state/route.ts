@@ -407,6 +407,8 @@ function events(org: string, limit: number, windowHours: number) {
     category: string;
     event: string;
     severity: string;
+    to?: string;
+    id?: string | null;
   }> = [];
 
   let agentDirs: string[];
@@ -434,13 +436,19 @@ function events(org: string, limit: number, windowHours: number) {
           if (e.category === 'heartbeat') continue;
           const ts = Date.parse(e.timestamp);
           if (Number.isNaN(ts) || ts < since) continue;
-          out.push({
+          const rec: (typeof out)[number] = {
             at: e.timestamp,
             agent: e.agent ?? agent,
             category: e.category,
             event: e.event,
             severity: e.severity,
-          });
+          };
+          /* add-on #3: a sent message names its recipient */
+          if (e.event === 'agent_message_sent' && typeof e.metadata?.to === 'string') {
+            rec.to = e.metadata.to;
+            rec.id = e.metadata.msg_id ?? e.id ?? null;
+          }
+          out.push(rec);
         } catch {
           /* skip malformed line rather than fabricate one */
         }
@@ -453,7 +461,14 @@ function events(org: string, limit: number, windowHours: number) {
      capped, so a quiet seat would otherwise read as eventless) */
   const lastByAgent: Record<string, string> = {};
   for (const e of out) lastByAgent[e.agent] = e.at;
+  /* add-on #3: every real sent message in the last 60 min, one lane each —
+     computed over the whole window, not the capped recent[] */
+  const laneSince = now - 60 * 60e3;
+  const lanes = out
+    .filter((e) => e.to && Date.parse(e.at) >= laneSince)
+    .map((e, i) => ({ id: e.id || `${e.at}:${e.agent}:${e.to}:${i}`, from: e.agent, to: e.to as string, at: e.at }));
   return {
+    lanes,
     recent: out.slice(-limit),
     last_by_agent: lastByAgent,
     total_in_window: out.length,
@@ -525,6 +540,15 @@ export async function GET(request: NextRequest) {
       events: eventsData,
       activity: activity(eventsData),
       workers: await workers(),
+      /* add-on #3: pairwise handoffs. null = event log unreadable = unknown */
+      lanes: eventsData
+        ? {
+            recent: eventsData.lanes,
+            window_minutes: 60,
+            source: 'agent_message_sent events, metadata.to (same append log as the ticker)',
+            resolution: 'append-time — one entry per real message',
+          }
+        : null,
 
       /* Rows 12-16 (revenue, ledger, streams, 14-day, trader P&L) are ABSENT on
          purpose. No revenue source exists in this org — SIGNALS.md §5. Absent
