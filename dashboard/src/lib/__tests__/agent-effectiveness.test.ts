@@ -49,4 +49,12 @@ describe('getAgentEffectiveness', () => {
     expect(a.errorsRecent).toBe(1);
     expect(a.warningCount).toBe(2);
   });
+
+  it('rate excludes blocked and cancelled from the denominator and reports them', () => {
+    const a = getAgentEffectiveness(ORG).find((r) => r.name === 'eff-agent')!;
+    expect(a.tasksCompleted).toBe(6);
+    expect(a.completionRate).toBeCloseTo((6 / 9) * 100, 5); // 14 - 3 blocked - 2 cancelled
+    expect(a.blockedCount).toBe(3);
+    expect(a.cancelledCount).toBe(2);
+  });
 });

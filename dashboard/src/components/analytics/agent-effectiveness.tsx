@@ -8,7 +8,9 @@ import { CHART_GOLD } from '@/components/charts/chart-theme';
 export interface AgentStat {
   name: string;
   emoji?: string;
-  completionRate: number; // 0-100
+  completionRate: number; // 0-100: completed / (total - blocked - cancelled)
+  blockedCount?: number;
+  cancelledCount?: number;
   errorCount: number; // category 'error' events with severity error|critical, all time
   errorsRecent?: number; // same, last 7 days
   warningCount?: number; // category 'error' events the writer marked warning/info
@@ -48,7 +50,12 @@ export function AgentEffectiveness({ agents }: AgentEffectivenessProps) {
                   <p className="text-sm font-medium truncate">{agent.name}</p>
                   <div className="flex items-center gap-3 text-xs text-muted-foreground mt-0.5">
                     <span>{agent.tasksCompleted} done</span>
-                    <span>{Math.round(agent.completionRate)}% rate</span>
+                    <span title="completed ÷ assigned tasks, not counting blocked or cancelled">
+                      {Math.round(agent.completionRate)}% rate
+                    </span>
+                    {(agent.blockedCount ?? 0) > 0 && (
+                      <span>{agent.blockedCount} blocked</span>
+                    )}
                     {agent.errorCount > 0 && (
                       <span className="text-destructive">
                         {agent.errorCount} errors

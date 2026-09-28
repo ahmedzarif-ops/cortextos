@@ -59,7 +59,9 @@ export function getAgentEffectiveness(org?: string): AgentStat[] {
         `SELECT
            assignee as name,
            COUNT(*) as total,
-           SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed
+           SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+           SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) as blocked,
+           SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) as cancelled
          FROM tasks
          ${where ? where + ' AND' : 'WHERE'} assignee IS NOT NULL AND assignee != ''
          GROUP BY assignee`,
@@ -68,6 +70,8 @@ export function getAgentEffectiveness(org?: string): AgentStat[] {
       name: string;
       total: number;
       completed: number;
+      blocked: number;
+      cancelled: number;
     }>;
 
     // Error counts per agent from events. An event is an error when its
@@ -124,15 +128,25 @@ export function getAgentEffectiveness(org?: string): AgentStat[] {
       arr[idx] = row.count;
     }
 
-    return rows.map((row) => ({
-      name: row.name,
-      completionRate: row.total > 0 ? (row.completed / row.total) * 100 : 0,
-      errorCount: errorMap.get(row.name)?.errors ?? 0,
-      errorsRecent: errorMap.get(row.name)?.errorsRecent ?? 0,
-      warningCount: errorMap.get(row.name)?.warnings ?? 0,
-      tasksCompleted: row.completed,
-      recentTrend: trendMap.get(row.name) ?? [0, 0, 0, 0, 0, 0, 0],
-    }));
+    // Completion rate is completed / tasks the agent could have finished.
+    // Blocked (waiting on someone else, usually the owner) and cancelled (a
+    // decision, not a failure) leave the denominator; both are returned so the
+    // card shows them instead of hiding them. Pending and in-progress stay in:
+    // an agent's own open backlog is a fair charge against its rate.
+    return rows.map((row) => {
+      const actionable = row.total - row.blocked - row.cancelled;
+      return {
+        name: row.name,
+        completionRate: actionable > 0 ? (row.completed / actionable) * 100 : 0,
+        blockedCount: row.blocked,
+        cancelledCount: row.cancelled,
+        errorCount: errorMap.get(row.name)?.errors ?? 0,
+        errorsRecent: errorMap.get(row.name)?.errorsRecent ?? 0,
+        warningCount: errorMap.get(row.name)?.warnings ?? 0,
+        tasksCompleted: row.completed,
+        recentTrend: trendMap.get(row.name) ?? [0, 0, 0, 0, 0, 0, 0],
+      };
+    });
   } catch {
     return [];
   }
