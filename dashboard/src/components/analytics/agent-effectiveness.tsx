@@ -9,7 +9,9 @@ export interface AgentStat {
   name: string;
   emoji?: string;
   completionRate: number; // 0-100
-  errorCount: number;
+  errorCount: number; // category 'error' events with severity error|critical, all time
+  errorsRecent?: number; // same, last 7 days
+  warningCount?: number; // category 'error' events the writer marked warning/info
   tasksCompleted: number;
   recentTrend: number[]; // last 7 days of completed tasks
   tokensToday?: number;
@@ -50,6 +52,12 @@ export function AgentEffectiveness({ agents }: AgentEffectivenessProps) {
                     {agent.errorCount > 0 && (
                       <span className="text-destructive">
                         {agent.errorCount} errors
+                        {agent.errorsRecent !== undefined && ` (${agent.errorsRecent} this week)`}
+                      </span>
+                    )}
+                    {(agent.warningCount ?? 0) > 0 && (
+                      <span className="text-amber-600">
+                        {agent.warningCount} warnings
                       </span>
                     )}
                   </div>

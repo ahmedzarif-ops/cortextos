@@ -70,17 +70,31 @@ export function getAgentEffectiveness(org?: string): AgentStat[] {
       completed: number;
     }>;
 
-    // Get error counts per agent from events
+    // Error counts per agent from events. An event is an error when its
+    // category is 'error' (sync.ts stores category in `type`) AND its own
+    // severity says so. Category-'error' events the writer marked warning/info
+    // (a failure recovered on retry, a finding about someone else's code, a
+    // probe) are counted separately as warnings, not dropped, and `errorsRecent`
+    // gives the last-7-day slice so a fixed-weeks-ago backlog reads as such.
+    const recentCutoff = new Date(Date.now() - 7 * 86400 * 1000).toISOString();
     const errorRows = db
       .prepare(
-        `SELECT agent as name, COUNT(*) as errors
+        `SELECT agent as name,
+           SUM(CASE WHEN severity IN ('error', 'critical') THEN 1 ELSE 0 END) as errors,
+           SUM(CASE WHEN severity IN ('error', 'critical') AND timestamp >= ? THEN 1 ELSE 0 END) as errorsRecent,
+           SUM(CASE WHEN severity IN ('error', 'critical') THEN 0 ELSE 1 END) as warnings
          FROM events
          ${where ? where + ' AND' : 'WHERE'} type = 'error'
          GROUP BY agent`,
       )
-      .all(...params) as Array<{ name: string; errors: number }>;
+      .all(recentCutoff, ...params) as Array<{
+      name: string;
+      errors: number;
+      errorsRecent: number;
+      warnings: number;
+    }>;
 
-    const errorMap = new Map(errorRows.map((r) => [r.name, r.errors]));
+    const errorMap = new Map(errorRows.map((r) => [r.name, r]));
 
     // Get daily completed tasks for the last 7 days (for sparklines)
     const trendRows = db
@@ -113,7 +127,9 @@ export function getAgentEffectiveness(org?: string): AgentStat[] {
     return rows.map((row) => ({
       name: row.name,
       completionRate: row.total > 0 ? (row.completed / row.total) * 100 : 0,
-      errorCount: errorMap.get(row.name) ?? 0,
+      errorCount: errorMap.get(row.name)?.errors ?? 0,
+      errorsRecent: errorMap.get(row.name)?.errorsRecent ?? 0,
+      warningCount: errorMap.get(row.name)?.warnings ?? 0,
       tasksCompleted: row.completed,
       recentTrend: trendMap.get(row.name) ?? [0, 0, 0, 0, 0, 0, 0],
     }));
