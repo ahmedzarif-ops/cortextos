@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { resolve } from 'path';
 import { resolveEnv } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-server.js';
+import { resolveWorkerModel } from '../utils/worker-model.js';
 
 export const spawnWorkerCommand = new Command('spawn-worker')
   .description('Spawn an ephemeral worker Claude Code session for a parallelized task')
@@ -9,19 +10,21 @@ export const spawnWorkerCommand = new Command('spawn-worker')
   .requiredOption('--dir <path>', 'Working directory for the worker session')
   .requiredOption('--prompt <text>', 'Task prompt to inject at session start')
   .option('--parent <agent>', 'Parent agent name (for bus reply routing)')
-  .option('--model <model>', 'Claude model to use (defaults to org default)')
+  .option('--model <model>', 'Claude model to use (default: worker_default_model in orgs/<org>/context.json, else the machine Claude Code default)')
   .action(async (name: string, opts: { dir: string; prompt: string; parent?: string; model?: string }) => {
     const env = resolveEnv();
     const client = new IPCClient(env.instanceId);
     const dir = resolve(opts.dir);
+    const { model, source } = resolveWorkerModel(opts.model, env.projectRoot, env.org);
 
     const response = await client.send({
       type: 'spawn-worker',
-      data: { name, dir, prompt: opts.prompt, parent: opts.parent, model: opts.model },
+      data: { name, dir, prompt: opts.prompt, parent: opts.parent, model },
     });
 
     if (response.success) {
       console.log(`Worker "${name}" spawning in ${dir}`);
+      console.log(`Model:   ${model ?? 'machine Claude Code default'} (${source})`);
       console.log(`Monitor: cortextos list-workers`);
       console.log(`Inject:  cortextos inject-worker ${name} "<text>"`);
       console.log(`Stop:    cortextos terminate-worker ${name}`);
