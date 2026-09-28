@@ -152,19 +152,87 @@ function pidAlive(pid: number | undefined): boolean {
   }
 }
 
+/* ---------- phase 2 #1: per-seat LIVE ACTIVITY, sub-minute ----------
+   Three real sources, none of them a guess:
+     - the bus event log (append-time): newest event + events in the last 60 s;
+     - logs/<seat>/stdout.log mtime: the daemon appends every PTY output chunk
+       to it synchronously (src/pty/output-buffer.ts appendFileSync), so its
+       mtime is the last moment the seat's session printed anything. An idle
+       session prints nothing (measured 2026-09-28: idle seats' mtimes stand
+       still for hours), a working one prints continuously (spinner, tool output);
+     - daemon IPC (status / list-workers): whether the PTY process exists at all.
+   state: working = output in the last WORK_OUTPUT_S or a bus event in the last
+   60 s; idle = daemon says running and neither; offline = daemon says NOT
+   running; unknown = the daemon could not be asked (never guessed idle). */
+const WORK_OUTPUT_S = 20;
+const WORK_EVENT_S = 60;
+
+type SeatState = 'working' | 'idle' | 'offline' | 'unknown';
+
+function lastOutputAt(name: string): { at: string | null; readable: boolean } {
+  if (!/^[A-Za-z0-9_.-]+$/.test(name)) return { at: null, readable: false };
+  try {
+    const st = fs.statSync(path.join(getCTXRoot(), 'logs', name, 'stdout.log'));
+    return { at: st.mtime.toISOString(), readable: true };
+  } catch (e) {
+    /* ENOENT = this session never printed (a measured absence); anything else = unreadable */
+    return { at: null, readable: (e as NodeJS.ErrnoException).code === 'ENOENT' };
+  }
+}
+
+function seatActivity(
+  name: string,
+  running: boolean | null,
+  evs: { last_by_agent: Record<string, string>; last60_by_agent: Record<string, number> } | null
+) {
+  const now = Date.now();
+  const out = lastOutputAt(name);
+  const lastEventAt = evs ? (evs.last_by_agent[name] ?? null) : null;
+  const events60 = evs ? (evs.last60_by_agent[name] ?? 0) : null;
+  const outAgeS = out.at ? (now - Date.parse(out.at)) / 1000 : null;
+  let state: SeatState;
+  if (running === null) state = 'unknown';
+  else if (!running) state = 'offline';
+  else if ((outAgeS !== null && outAgeS <= WORK_OUTPUT_S) || (events60 ?? 0) > 0) state = 'working';
+  else if (!out.readable && evs === null) state = 'unknown';   /* both activity sources blind */
+  else state = 'idle';
+  return {
+    state,
+    last_event_at: lastEventAt,
+    events_last_60s: events60,
+    last_output_at: out.at,
+    source:
+      'bus event log (last_event_at, events_last_60s) + logs/<seat>/stdout.log mtime (PTY output) + daemon IPC liveness',
+    rule: `working = PTY output <= ${WORK_OUTPUT_S}s or a bus event <= ${WORK_EVENT_S}s; idle = running, neither; offline = daemon says not running; unknown = daemon unreachable`,
+    resolution: 'seconds — MONITOR (read on every poll)',
+  };
+}
+
 /* ---------- add-on #9: ephemeral workers, ONLY as the daemon proves them ----------
    Same IPC the liveness monitor uses (`list-workers`, what `cortextos
    list-workers` sends). A worker is drawn only if the daemon says running AND
    its pid answers signal 0. A dir under $CTX_ROOT/workers proves nothing and
    is never read. Unreachable daemon = null = unknown, never an empty list. */
-async function workers() {
+async function workers(evs: Parameters<typeof seatActivity>[2]) {
   const list = await daemonRequest<DaemonWorker>('list-workers');
   if (!list) return null;
-  const running: Array<{ name: string; parent: string | null; pid: number | null; spawned_at: string | null }> = [];
+  const running: Array<{
+    name: string;
+    parent: string | null;
+    pid: number | null;
+    spawned_at: string | null;
+    activity: ReturnType<typeof seatActivity>;
+  }> = [];
   let notLive = 0;
   for (const w of list) {
     if (w.status === 'running' && pidAlive(w.pid)) {
-      running.push({ name: w.name, parent: w.parent ?? null, pid: w.pid ?? null, spawned_at: w.spawnedAt ?? null });
+      running.push({
+        name: w.name,
+        parent: w.parent ?? null,
+        pid: w.pid ?? null,
+        spawned_at: w.spawnedAt ?? null,
+        activity: seatActivity(w.name, true, evs),
+      });
     } else {
       notLive++;
     }
@@ -227,7 +295,7 @@ const bandOf = (min: number | null): string | null =>
   min === null ? null : (HEARTBEAT_BANDS.find((b) => min <= b.maxMin) as { id: string }).id;
 
 /* ---------- rows 1 + 2: roster, liveness, heartbeat ---------- */
-async function agents(org: string) {
+async function agents(org: string, evs: Parameters<typeof seatActivity>[2]) {
   const roster = getAllAgents().filter((a) => a.org === org);
   if (roster.length === 0) return null;
 
@@ -247,6 +315,9 @@ async function agents(org: string) {
         id: a.name,
         role: id.role,
         emoji: id.emoji,
+
+        /* phase 2 #1: working | idle | offline | unknown, re-read on every poll */
+        activity: seatActivity(a.name, statuses ? st?.status === 'running' : null, evs),
 
         /* MONITOR. `unknown: true` when the daemon could not be reached — a false
            here would paint a dead fleet during a healthy night. */
@@ -481,6 +552,9 @@ function events(org: string, limit: number, windowHours: number) {
      capped, so a quiet seat would otherwise read as eventless) */
   const lastByAgent: Record<string, string> = {};
   for (const e of out) lastByAgent[e.agent] = e.at;
+  /* phase 2 #1: events in the last 60 s per agent, over the whole window */
+  const last60ByAgent: Record<string, number> = {};
+  for (const e of out) if (Date.parse(e.at) >= now - 60e3) last60ByAgent[e.agent] = (last60ByAgent[e.agent] ?? 0) + 1;
   /* add-on #3: every real sent message in the last 60 min, one lane each —
      computed over the whole window, not the capped recent[] */
   const laneSince = now - 60 * 60e3;
@@ -491,6 +565,7 @@ function events(org: string, limit: number, windowHours: number) {
     lanes,
     recent: out.slice(-limit),
     last_by_agent: lastByAgent,
+    last60_by_agent: last60ByAgent,
     total_in_window: out.length,
     window_hours: windowHours,
     source: 'orgs/<org>/analytics/events/*/YYYY-MM-DD.jsonl (append-only log, NOT the SQLite cache)',
@@ -549,7 +624,7 @@ export async function GET(request: NextRequest) {
 
   try {
     const eventsData = events(org, limit, windowHours);
-    const agentsData = await agents(org);
+    const agentsData = await agents(org, eventsData);
 
     return Response.json({
       generated_at: new Date().toISOString(),
@@ -559,7 +634,7 @@ export async function GET(request: NextRequest) {
       tasks: tasks(org, (agentsData ?? []).map((a) => a.id)),
       events: eventsData,
       activity: activity(eventsData),
-      workers: await workers(),
+      workers: await workers(eventsData),
       inbox: inbox(agentsData ? agentsData.map((a) => a.id) : null),
       /* add-on #3: pairwise handoffs. null = event log unreadable = unknown */
       lanes: eventsData
