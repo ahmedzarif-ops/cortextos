@@ -82,6 +82,11 @@ interface DaemonStatus {
  * Returns null — not an empty list — when the daemon cannot be reached.
  */
 function daemonStatuses(timeoutMs = 2000): Promise<DaemonStatus[] | null> {
+  return daemonRequest<DaemonStatus>('status', timeoutMs);
+}
+
+/** One IPC round-trip to the daemon. null — never [] — when it cannot be asked. */
+function daemonRequest<T>(type: string, timeoutMs = 2000): Promise<T[] | null> {
   const socketPath =
     process.platform === 'win32'
       ? `\\\\.\\pipe\\cortextos-${INSTANCE}`
@@ -89,7 +94,7 @@ function daemonStatuses(timeoutMs = 2000): Promise<DaemonStatus[] | null> {
 
   return new Promise((resolve) => {
     let settled = false;
-    const done = (v: DaemonStatus[] | null) => {
+    const done = (v: T[] | null) => {
       if (!settled) {
         settled = true;
         resolve(v);
@@ -99,7 +104,7 @@ function daemonStatuses(timeoutMs = 2000): Promise<DaemonStatus[] | null> {
     let socket: ReturnType<typeof createConnection>;
     try {
       socket = createConnection(socketPath, () => {
-        socket.write(JSON.stringify({ type: 'status' }));
+        socket.write(JSON.stringify({ type }));
       });
     } catch {
       return done(null);
@@ -126,6 +131,50 @@ function daemonStatuses(timeoutMs = 2000): Promise<DaemonStatus[] | null> {
       done(null);
     });
   });
+}
+
+interface DaemonWorker {
+  name: string;
+  status: string;
+  pid?: number;
+  parent?: string;
+  spawnedAt?: string;
+}
+
+/* signal 0: does this pid exist right now? EPERM = exists, owned by someone else. */
+function pidAlive(pid: number | undefined): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/* ---------- add-on #9: ephemeral workers, ONLY as the daemon proves them ----------
+   Same IPC the liveness monitor uses (`list-workers`, what `cortextos
+   list-workers` sends). A worker is drawn only if the daemon says running AND
+   its pid answers signal 0. A dir under $CTX_ROOT/workers proves nothing and
+   is never read. Unreachable daemon = null = unknown, never an empty list. */
+async function workers() {
+  const list = await daemonRequest<DaemonWorker>('list-workers');
+  if (!list) return null;
+  const running: Array<{ name: string; parent: string | null; pid: number | null; spawned_at: string | null }> = [];
+  let notLive = 0;
+  for (const w of list) {
+    if (w.status === 'running' && pidAlive(w.pid)) {
+      running.push({ name: w.name, parent: w.parent ?? null, pid: w.pid ?? null, spawned_at: w.spawnedAt ?? null });
+    } else {
+      notLive++;
+    }
+  }
+  return {
+    running,
+    finished_listed: notLive,
+    source: 'daemon IPC list-workers (daemon-held PTYs) + pid signal-0 check',
+    resolution: 'seconds — MONITOR',
+  };
 }
 
 /** Emoji + role from IDENTITY.md — scene labelling, not a signal. */
@@ -475,6 +524,7 @@ export async function GET(request: NextRequest) {
       tasks: tasks(org, (agentsData ?? []).map((a) => a.id)),
       events: eventsData,
       activity: activity(eventsData),
+      workers: await workers(),
 
       /* Rows 12-16 (revenue, ledger, streams, 14-day, trader P&L) are ABSENT on
          purpose. No revenue source exists in this org — SIGNALS.md §5. Absent
