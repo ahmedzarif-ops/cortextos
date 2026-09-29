@@ -1281,7 +1281,9 @@ export function codexAppServerArgs(
   if (config.codex_memories !== true) args.push('--disable', 'memories');
   // shell_snapshot saves each shell's startup environment to $CODEX_HOME/shell_snapshots. A seat's
   // environment carries its credentials, so the snapshot would persist them in plain files.
-  args.push('--disable', 'shell_snapshot');
+  // shell_snapshot_v2 is the successor feature (under development today); disable it too so an
+  // upgrade that turns it on cannot bring the same persistence back under a new name.
+  args.push('--disable', 'shell_snapshot', '--disable', 'shell_snapshot_v2');
   args.push('--listen', listenArg);
   return args;
 }
