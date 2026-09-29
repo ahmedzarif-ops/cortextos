@@ -1187,6 +1187,22 @@ describe('CodexAppServerPTY thread lifecycle', () => {
     });
   });
 
+  it('resumes the latest thread for the cwd with the full feature set when no thread state is persisted', async () => {
+    fsMocks.existsSync.mockReturnValue(false);
+    requestMock.mockImplementation(async (method: string) => method === 'thread/list'
+      ? { result: { data: [{ id: 'latest-thread' }] } }
+      : { result: { thread: { id: 'latest-thread' } } });
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
+
+    await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('continue');
+
+    expect(requestMock).toHaveBeenCalledWith('thread/resume', expect.objectContaining({
+      threadId: 'latest-thread',
+      config: { features: { goals: true, memories: false, shell_snapshot: false, shell_snapshot_v2: false } },
+    }));
+  });
+
   it('starts a new thread in fresh mode even when persisted thread state exists', async () => {
     fsMocks.existsSync.mockReturnValue(true);
     fsMocks.readFileSync.mockReturnValue(JSON.stringify({
