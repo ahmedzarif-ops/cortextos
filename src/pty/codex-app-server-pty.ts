@@ -558,11 +558,7 @@ export class CodexAppServerPTY {
       }
 
       const spawnFn = this._spawnFn!;
-      const pty = spawnFn('codex', [
-        'app-server',
-        '--enable', 'goals',
-        '--listen', this._socketListenArg,
-      ], {
+      const pty = spawnFn('codex', codexAppServerArgs(this._config, this._socketListenArg), {
         name: 'xterm-256color',
         cols: 200,
         rows: 50,
@@ -1270,4 +1266,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Arguments for `codex app-server`. Codex memories are disabled unless the seat
+ * opts in with `codex_memories: true` (see AgentConfig.codex_memories).
+ */
+export function codexAppServerArgs(
+  config: Pick<AgentConfig, 'codex_memories'>,
+  listenArg: string,
+): string[] {
+  const args = ['app-server', '--enable', 'goals'];
+  if (config.codex_memories !== true) args.push('--disable', 'memories');
+  args.push('--listen', listenArg);
+  return args;
 }
