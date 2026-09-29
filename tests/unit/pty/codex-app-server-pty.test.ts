@@ -64,7 +64,7 @@ vi.mock('../../../src/bus/event.js', () => ({
   logEvent: logEventMock,
 }));
 
-const { CodexAppServerPTY, codexAppServerArgs } = await import('../../../src/pty/codex-app-server-pty.js');
+const { CodexAppServerPTY, codexAppServerArgs, codexThreadFeatures } = await import('../../../src/pty/codex-app-server-pty.js');
 
 const mockEnv = {
   instanceId: 'test',
@@ -132,6 +132,27 @@ describe('CodexAppServerPTY app-server arguments — Codex memories', () => {
     expect(codexAppServerArgs({}, 'unix://x')).toContain('memories');
     expect(codexAppServerArgs({ codex_memories: 'true' as unknown as boolean }, 'unix://x')).toContain('memories');
     expect(codexAppServerArgs({ codex_memories: true }, 'unix://x')).toEqual(['app-server', '--enable', 'goals', '--disable', 'shell_snapshot', '--disable', 'shell_snapshot_v2', '--listen', 'unix://x']);
+  });
+});
+
+describe('codexThreadFeatures — thread-level settings carry every disabled feature', () => {
+  // A thread-level features object is applied over the app-server's CLI flags; measured: a resumed
+  // thread whose config said only { goals: true } wrote a shell snapshot on a server started with
+  // --disable shell_snapshot. So every feature the argv disables must also be off here.
+  it('turns shell snapshots and memories off by default', () => {
+    expect(codexThreadFeatures({})).toEqual({ goals: true, memories: false, shell_snapshot: false, shell_snapshot_v2: false });
+  });
+  it('lets memories on only with codex_memories: true; snapshots stay off', () => {
+    expect(codexThreadFeatures({ codex_memories: true })).toEqual({ goals: true, memories: true, shell_snapshot: false, shell_snapshot_v2: false });
+    expect(codexThreadFeatures({ codex_memories: 'true' as unknown as boolean }).memories).toBe(false);
+  });
+  it('matches the argv: every feature disabled on the command line is false at thread level', () => {
+    for (const cfg of [{}, { codex_memories: true }]) {
+      const argv = codexAppServerArgs(cfg, 'unix://x');
+      const disabled = argv.filter((_, i) => argv[i - 1] === '--disable');
+      const f = codexThreadFeatures(cfg);
+      for (const name of disabled) expect(f[name], name).toBe(false);
+    }
   });
 });
 
@@ -1130,7 +1151,7 @@ describe('CodexAppServerPTY thread lifecycle', () => {
       cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
-      config: { features: { goals: true } },
+      config: { features: { goals: true, memories: false, shell_snapshot: false, shell_snapshot_v2: false } },
       sessionStartSource: 'startup',
       experimentalRawEvents: false,
       persistExtendedHistory: true,
@@ -1160,7 +1181,7 @@ describe('CodexAppServerPTY thread lifecycle', () => {
       cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
-      config: { features: { goals: true } },
+      config: { features: { goals: true, memories: false, shell_snapshot: false, shell_snapshot_v2: false } },
       excludeTurns: true,
       persistExtendedHistory: true,
     });
@@ -1184,7 +1205,7 @@ describe('CodexAppServerPTY thread lifecycle', () => {
       cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
-      config: { features: { goals: true } },
+      config: { features: { goals: true, memories: false, shell_snapshot: false, shell_snapshot_v2: false } },
       sessionStartSource: 'startup',
       experimentalRawEvents: false,
       persistExtendedHistory: true,
