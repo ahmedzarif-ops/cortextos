@@ -117,18 +117,21 @@ describe('CodexAppServerPTY app-server arguments — Codex memories', () => {
 
   it('starts the app-server with memories disabled by default', async () => {
     const args = await spawnedArgs({});
-    expect(args).toEqual(['app-server', '--enable', 'goals', '--disable', 'memories', '--listen', 'unix://./codex.sock']);
+    expect(args).toEqual(['app-server', '--enable', 'goals', '--disable', 'memories', '--disable', 'shell_snapshot', '--disable', 'shell_snapshot_v2', '--listen', 'unix://./codex.sock']);
   });
 
   it('leaves memories alone only when the seat opts in with codex_memories: true', async () => {
     expect(await spawnedArgs({ codex_memories: true })).not.toContain('memories');
+    expect(await spawnedArgs({ codex_memories: true })).toContain('shell_snapshot'); // never opt-out-able
+    expect(await spawnedArgs({ codex_memories: true })).toContain('shell_snapshot_v2');
     expect(await spawnedArgs({ codex_memories: false })).toContain('memories');
   });
 
   it('codexAppServerArgs treats anything but true as disabled', () => {
-    expect(codexAppServerArgs({}, 'unix://x')).toContain('--disable');
-    expect(codexAppServerArgs({ codex_memories: 'true' as unknown as boolean }, 'unix://x')).toContain('--disable');
-    expect(codexAppServerArgs({ codex_memories: true }, 'unix://x')).toEqual(['app-server', '--enable', 'goals', '--listen', 'unix://x']);
+    // Assert the MEMORIES flag specifically: '--disable' alone is also satisfied by the shell-snapshot flags.
+    expect(codexAppServerArgs({}, 'unix://x')).toContain('memories');
+    expect(codexAppServerArgs({ codex_memories: 'true' as unknown as boolean }, 'unix://x')).toContain('memories');
+    expect(codexAppServerArgs({ codex_memories: true }, 'unix://x')).toEqual(['app-server', '--enable', 'goals', '--disable', 'shell_snapshot', '--disable', 'shell_snapshot_v2', '--listen', 'unix://x']);
   });
 });
 
