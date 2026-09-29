@@ -15,6 +15,7 @@ import {
 import { KEYS } from '../pty/inject.js';
 import { stripControlChars, sanitizeForPtyInjection, wrapFenceSafe } from '../utils/validate.js';
 import { ensureDir } from '../utils/atomic.js';
+import { readReroutedAsk, isAnswerToReroutedAsk, clearReroutedAsk } from '../hooks/one-voice.js';
 import { agentHoldsContextHandoffLease, releaseContextHandoffLease, requestContextHandoffLease } from './context-handoff-lease.js';
 
 type LogFn = (msg: string) => void;
@@ -324,10 +325,16 @@ export class FastChecker {
     }
 
 
-    // Check agent inbox
+    // Check agent inbox. A reply to a question this seat's ask hook rerouted
+    // to the orchestrator (ONE VOICE) is marked as the answer, so the model
+    // acts on it instead of waiting for the owner.
     const inboxMessages = checkInbox(this.paths);
+    const pendingAsk = inboxMessages.length > 0 ? readReroutedAsk(this.paths.stateDir) : null;
+    let answeredReroutedAsk = false;
     for (const msg of inboxMessages) {
-      messageBlock += this.formatInboxMessage(msg);
+      const isAnswer = isAnswerToReroutedAsk(msg, pendingAsk);
+      if (isAnswer) answeredReroutedAsk = true;
+      messageBlock += this.formatInboxMessage(msg, isAnswer);
       ackIds.push(msg.id);
     }
 
@@ -339,6 +346,7 @@ export class FastChecker {
         for (const id of ackIds) {
           ackInbox(this.paths, id);
         }
+        if (answeredReroutedAsk) clearReroutedAsk(this.paths.stateDir);
         this.log(`Injected ${messageBlock.length} bytes`);
         // Only update typing timestamp for Telegram messages, not inbox/cron.
         // Inbox messages (agent-to-agent, session continuations) must not
@@ -364,7 +372,7 @@ export class FastChecker {
    * Format an inbox message for injection.
    * Matches bash fast-checker.sh format exactly.
    */
-  private formatInboxMessage(msg: InboxMessage): string {
+  private formatInboxMessage(msg: InboxMessage, answersReroutedAsk = false): string {
     const replyNote = msg.reply_to ? ` [reply_to: ${msg.reply_to}]` : '';
     // msg.text/from are externally influenced (a body can carry its own
     // fence/header markers; --body-stdin/--body-file made arbitrary bodies easy
@@ -373,8 +381,11 @@ export class FastChecker {
     // blocks stay readable. The inline `from` is collapse-sanitized (it sits in
     // the header line, not a fence).
     const safeFrom = sanitizeForPtyInjection(msg.from);
+    const answerNote = answersReroutedAsk
+      ? `[ONE VOICE] This is ${safeFrom}'s answer to the question you asked (rerouted from AskUserQuestion). It IS the user's answer: act on it now, do not wait for the owner.\n`
+      : '';
     return `=== AGENT MESSAGE from ${safeFrom}${replyNote} [msg_id: ${msg.id}] ===
-${wrapFenceSafe(msg.text)}
+${answerNote}${wrapFenceSafe(msg.text)}
 Reply using: cortextos bus send-message ${safeFrom} normal '<your reply>' ${msg.id}
 
 `;

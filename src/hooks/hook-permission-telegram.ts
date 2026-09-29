@@ -20,6 +20,7 @@ import {
   buildPermissionKeyboard,
   cleanupResponseFile,
 } from './index';
+import { resolveOwnerContactRoute, PERMISSION_REROUTE_REASON, blockedPermissionReason } from './one-voice';
 import { join } from 'path';
 import { mkdirSync } from 'fs';
 
@@ -42,6 +43,18 @@ async function main(): Promise<void> {
   // Auto-approve .claude/ directory writes
   if (isClaudeDirOperation(tool_name, tool_input)) {
     outputDecision('allow');
+    return;
+  }
+
+  // ONE VOICE: a specialist's permission prompt never reaches the owner.
+  // Deny (the safe direction) with a reason that names the internal routes.
+  const route = resolveOwnerContactRoute(env.agentName, process.env.CTX_FRAMEWORK_ROOT, process.env.CTX_ORG, process.env.CTX_AGENT_DIR);
+  if (route.kind === 'blocked') {
+    outputDecision('deny', blockedPermissionReason(route.why));
+    return;
+  }
+  if (route.kind === 'reroute') {
+    outputDecision('deny', PERMISSION_REROUTE_REASON(route.orchestrator));
     return;
   }
 

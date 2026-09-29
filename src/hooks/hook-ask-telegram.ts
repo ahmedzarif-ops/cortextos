@@ -15,6 +15,8 @@ import {
   buildAskMultiSelectKeyboard,
   formatQuestionMessage,
 } from './index';
+import { resolveOwnerContactRoute, rerouteQuestion, blockedQuestionReason } from './one-voice';
+import { resolvePaths } from '../utils/paths';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 
@@ -28,6 +30,28 @@ async function main(): Promise<void> {
   }
 
   const env = loadEnv();
+
+  // ONE VOICE: only the configured orchestrator may put a question in the
+  // owner's hand. Every other seat's question goes to the orchestrator's inbox
+  // and the tool call is blocked (exit 2 feeds stderr back to the model), so
+  // no menu is left open in a terminal nobody watches. Checked before the
+  // credential test: a specialist without a bot must not be left waiting either.
+  const org = process.env.CTX_ORG;
+  const route = resolveOwnerContactRoute(env.agentName, process.env.CTX_FRAMEWORK_ROOT, org, process.env.CTX_AGENT_DIR);
+  if (route.kind === 'blocked') {
+    process.stderr.write(blockedQuestionReason(route.why) + '\n');
+    process.exit(2);
+  }
+  if (route.kind === 'reroute') {
+    const { reason } = rerouteQuestion({
+      paths: resolvePaths(env.agentName, process.env.CTX_INSTANCE_ID || 'default', org),
+      agentName: env.agentName,
+      orchestrator: route.orchestrator,
+      questions,
+    });
+    process.stderr.write(reason + '\n');
+    process.exit(2);
+  }
 
   if (!env.botToken || !env.chatId) {
     process.exit(0);
