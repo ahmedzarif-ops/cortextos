@@ -622,7 +622,7 @@ export class CodexAppServerPTY {
             cwd: this._cwd,
             ...this.modelOverride(),
             ...THREAD_PERMISSION_OVERRIDES,
-            config: { features: { goals: true } },
+            config: { features: codexThreadFeatures(this._config) },
             excludeTurns: true,
             persistExtendedHistory: true,
           });
@@ -641,7 +641,7 @@ export class CodexAppServerPTY {
           cwd: this._cwd,
           ...this.modelOverride(),
           ...THREAD_PERMISSION_OVERRIDES,
-          config: { features: { goals: true } },
+          config: { features: codexThreadFeatures(this._config) },
           excludeTurns: true,
           persistExtendedHistory: true,
         });
@@ -655,7 +655,7 @@ export class CodexAppServerPTY {
       cwd: this._cwd,
       ...this.modelOverride(),
       ...THREAD_PERMISSION_OVERRIDES,
-      config: { features: { goals: true } },
+      config: { features: codexThreadFeatures(this._config) },
       sessionStartSource: 'startup',
       experimentalRawEvents: false,
       persistExtendedHistory: true,
@@ -1286,4 +1286,20 @@ export function codexAppServerArgs(
   args.push('--disable', 'shell_snapshot', '--disable', 'shell_snapshot_v2');
   args.push('--listen', listenArg);
   return args;
+}
+
+/**
+ * Per-thread feature settings sent on thread/start and thread/resume. They are
+ * stated in full because a thread-level `features` object is applied over the
+ * server's own flags: an app-server started with `--disable shell_snapshot`
+ * was measured writing a shell snapshot for a resumed thread whose config
+ * carried only `{ goals: true }`. Keep in step with codexAppServerArgs().
+ */
+export function codexThreadFeatures(config: Pick<AgentConfig, 'codex_memories'>): Record<string, boolean> {
+  return {
+    goals: true,
+    memories: config.codex_memories === true,
+    shell_snapshot: false,
+    shell_snapshot_v2: false,
+  };
 }
