@@ -32,6 +32,13 @@ type LogFn = (msg: string) => void;
 const OPENCODE_CONTINUE_WEDGE_THRESHOLD = 3;
 const OPENCODE_CONTINUE_WEDGE_FAST_EXIT_MS = 60_000;
 
+// codex-app-server resume ceiling (percent of context window). A soft restart
+// resumes the WHOLE previous thread (no compaction), so a thread that was already
+// this full comes back just as full — measured 75% on resume vs 26% on a fresh
+// boot of the same seat. At/above this, shouldContinue() starts fresh instead.
+// A missing/unreadable reading keeps the resume (no evidence the thread is heavy).
+const CODEX_RESUME_MAX_CTX_PCT = 50;
+
 /**
  * Manages a single agent's lifecycle.
  * Replaces agent-wrapper.sh for one agent.
@@ -593,6 +600,17 @@ export class AgentProcess {
   }
 
   /**
+   * How the current lifecycle was spawned ('fresh' | 'continue'), or null before
+   * the first start(). FastChecker reads this so its futile-handoff guard only
+   * trusts a baseline from a session that began empty: a continue-mode session
+   * inherits the prior conversation, so its "baseline" is just how full that
+   * conversation already was, and a handoff (.force-fresh) WOULD lighten it.
+   */
+  getLastSpawnMode(): 'fresh' | 'continue' | null {
+    return this.lastSpawnMode;
+  }
+
+  /**
    * Get the current agent config (live reference — fields may be updated in-place).
    */
   getConfig(): AgentConfig {
@@ -991,7 +1009,24 @@ export class AgentProcess {
         this.name,
         'codex-app-server-thread.json',
       );
-      return existsSync(threadStatePath);
+      if (!existsSync(threadStatePath)) return false;
+      // Resuming replays the whole prior thread, so gate it on how full that
+      // thread last was (context_status.json, written by the context bridge).
+      // Age is deliberately not checked: the reading is the last one the thread
+      // itself produced, and the restart that follows it is what we are judging.
+      const pct = this.readLastContextPct();
+      if (pct === null) {
+        this.log('codex-app-server: no readable last context percentage — resuming previous thread');
+        return true;
+      }
+      if (pct >= CODEX_RESUME_MAX_CTX_PCT) {
+        this.log(
+          `codex-app-server: previous thread was at ${Math.round(pct)}% context (>= ${CODEX_RESUME_MAX_CTX_PCT}%) — ` +
+          'starting fresh instead of resuming the full thread',
+        );
+        return false;
+      }
+      return true;
     }
 
     // opencode: do not inspect Claude JSONL history. The OpencodePTY adapter
@@ -1020,6 +1055,25 @@ export class AgentProcess {
       return files.some((f: string) => f.endsWith('.jsonl'));
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Last context percentage recorded for this agent, or null when the status
+   * file is missing/unreadable/has no usable number. exceeds_200k_tokens with no
+   * percentage counts as full (101), mirroring FastChecker.checkContextStatus.
+   */
+  private readLastContextPct(): number | null {
+    const statusPath = join(this.env.ctxRoot, 'state', this.name, 'context_status.json');
+    try {
+      if (!existsSync(statusPath)) return null;
+      const data = JSON.parse(readFileSync(statusPath, 'utf-8'));
+      if (typeof data.used_percentage === 'number' && Number.isFinite(data.used_percentage)) {
+        return data.used_percentage;
+      }
+      return data.exceeds_200k_tokens ? 101 : null;
+    } catch {
+      return null;
     }
   }
 
