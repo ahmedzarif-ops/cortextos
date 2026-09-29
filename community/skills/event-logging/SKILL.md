@@ -72,6 +72,17 @@ cortextos bus log-event error <operation>_failed error \
   --meta "{\"operation\":\"<what failed>\",\"error\":\"<message>\",\"agent\":\"$CTX_AGENT_NAME\"}"
 ```
 
+The dashboard's per-agent **errors** figure counts category `error` events at severity
+`error` or `critical`, charged to the agent that logged them. Pick the severity honestly:
+
+| What happened | category / severity |
+|---|---|
+| Your work failed and is still failed (rc≠0, no result, needs a human) | `error` / `error` (or `critical`) |
+| Your command failed but a retry or corrected form succeeded (bad flag, shell quoting, typo, a 429/503 that cleared) | `error` / `warning` |
+| You found a fault in ANOTHER agent's work or in the framework | `action` / `warning`, event `<thing>_reported`, `"subject":"<agent or component>"` in meta |
+
+Never lower a severity to make a number smaller: a failure that is still open is an `error`.
+
 ### Approval created
 ```bash
 cortextos bus log-event action approval_created info \

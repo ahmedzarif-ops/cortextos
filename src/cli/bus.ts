@@ -249,14 +249,31 @@ busCommand
         }
       } catch { /* skip */ }
     }
+    // A lane with no agent dir can still be read: codex, codex-shorts and
+    // codex-substack are polled by an external runtime that ACKs into
+    // processed/<lane>/. Telling the sender "may never be read" for those made
+    // agents log a routine hand-off as an error event (scout, 2026-09-25).
+    let ackedByLane = 0;
     if (!agentExists) {
-      console.error(`Warning: agent '${to}' not found in project. Message will be queued but may never be read.`);
+      try {
+        ackedByLane = require('fs').readdirSync(join(paths.ctxRoot, 'processed', to)).length;
+      } catch { /* never acked */ }
+      if (ackedByLane > 0) {
+        console.error(`Note: '${to}' is not a registered agent, but its inbox is polled (${ackedByLane} messages acked). Message queued.`);
+      } else {
+        console.error(`Warning: agent '${to}' not found in project. Message will be queued but may never be read.`);
+      }
     }
 
     // WRITE PATH: the FROM field of a message and the agent on its event are attributed
     // records, so identity is resolved strictly and never from the cwd.
     const me = requireAgentIdentity(undefined, 'send-message');
     const msgId = sendMessage(paths, me, to, priority as Priority, text, effectiveReplyTo);
+    if (!agentExists) {
+      try {
+        logEvent(paths, me, env.org, 'message', 'message_queued_unregistered', 'warning', JSON.stringify({ to, msg_id: msgId, polled: ackedByLane > 0, acked: ackedByLane }));
+      } catch { /* non-fatal */ }
+    }
     try {
       logEvent(paths, me, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null }), { refreshHeartbeat: true });
     } catch { /* non-fatal */ }
