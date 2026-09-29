@@ -1500,7 +1500,16 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     // grace window has expired. Gated on ctxSessionStartedAt > 0 — only when we actually
     // observed this session's birth can we distinguish baseline-fill from work-fill.
     // Without an anchor the guard stays inert and legacy handoff behavior is preserved.
-    if (this.ctxSessionStartedAt > 0 && !withinHandoffGrace && this.ctxSessionBaselinePct === null) {
+    // Only a FRESH-mode session yields a baseline. A continue-mode session inherits the
+    // prior conversation (codex soft restart resumes the whole thread), so its reading is
+    // just how full the last thread was — and the handoff's .force-fresh WOULD lighten it.
+    // Capturing it would suppress the one action that helps. Unknown mode is not fresh.
+    if (
+      this.ctxSessionStartedAt > 0
+      && !withinHandoffGrace
+      && this.ctxSessionBaselinePct === null
+      && this.agent.getLastSpawnMode?.() === 'fresh'
+    ) {
       this.ctxSessionBaselinePct = effectivePct;
     }
 

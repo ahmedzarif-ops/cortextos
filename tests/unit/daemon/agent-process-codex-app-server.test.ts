@@ -461,4 +461,65 @@ describe('AgentProcess codex-app-server runtime', () => {
     await apContinue.start();
     expect(mockCodexAppServerPty.spawn).toHaveBeenLastCalledWith('continue', expect.any(String));
   });
+  // Resume replays the WHOLE previous thread (no compaction), so a seat whose
+  // last thread was already heavy comes back heavy (measured 75% resumed vs 26%
+  // fresh). shouldContinue() gates the resume on the last recorded context %.
+  describe('resume gated on last context percentage (CODEX_RESUME_MAX_CTX_PCT = 50)', () => {
+    const threadPath = '/tmp/test-ctx/state/codex-app-agent/codex-app-server-thread.json';
+    const statusPath = '/tmp/test-ctx/state/codex-app-agent/context_status.json';
+
+    // status: undefined => file absent; string => raw file body (may be malformed).
+    function seedThreadAndStatus(status: string | undefined) {
+      fsMocks.existsSync.mockImplementation((path: string) =>
+        path === threadPath || (path === statusPath && status !== undefined));
+      fsMocks.readFileSync.mockImplementation((path: string) =>
+        path === statusPath ? (status as string) : '');
+    }
+
+    async function startMode(): Promise<unknown> {
+      const ap = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
+      await ap.start();
+      expect(ap.getLastSpawnMode()).toBe(mockCodexAppServerPty.spawn.mock.calls.at(-1)?.[0]);
+      return mockCodexAppServerPty.spawn.mock.calls.at(-1)?.[0];
+    }
+
+    it('starts fresh when the last thread was at 75%', async () => {
+      seedThreadAndStatus(JSON.stringify({ used_percentage: 75 }));
+      expect(await startMode()).toBe('fresh');
+    });
+
+    it('starts fresh at exactly 50% (ceiling is inclusive)', async () => {
+      seedThreadAndStatus(JSON.stringify({ used_percentage: 50 }));
+      expect(await startMode()).toBe('fresh');
+    });
+
+    it('resumes when the last thread was at 49%', async () => {
+      seedThreadAndStatus(JSON.stringify({ used_percentage: 49 }));
+      expect(await startMode()).toBe('continue');
+    });
+
+    it('starts fresh when the status only reports exceeds_200k_tokens', async () => {
+      seedThreadAndStatus(JSON.stringify({ used_percentage: null, exceeds_200k_tokens: true }));
+      expect(await startMode()).toBe('fresh');
+    });
+
+    it('resumes (today\'s behaviour) when the status file is missing', async () => {
+      seedThreadAndStatus(undefined);
+      expect(await startMode()).toBe('continue');
+    });
+
+    it('resumes when the status file is unreadable or has no percentage', async () => {
+      seedThreadAndStatus('{not json');
+      expect(await startMode()).toBe('continue');
+      mockCodexAppServerPty.spawn.mockClear();
+      seedThreadAndStatus(JSON.stringify({ session_id: 'x' }));
+      expect(await startMode()).toBe('continue');
+    });
+
+    it('with no thread state, stays fresh regardless of the reading', async () => {
+      fsMocks.existsSync.mockImplementation((path: string) => path === statusPath);
+      fsMocks.readFileSync.mockImplementation(() => JSON.stringify({ used_percentage: 10 }));
+      expect(await startMode()).toBe('fresh');
+    });
+  });
 });

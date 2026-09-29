@@ -141,6 +141,18 @@ describe('AgentProcess - Hermes runtime: shouldContinue', () => {
     expect(mockPty.spawn).toHaveBeenCalledWith('continue', expect.any(String));
   });
 
+  it('ignores a high last context percentage — the codex resume gate is codex-only', async () => {
+    mockHermesDbExists.mockReturnValue(true);
+    fsMocks.existsSync.mockImplementation((path: string) => path.endsWith('context_status.json'));
+    fsMocks.readFileSync.mockImplementation(() => JSON.stringify({ used_percentage: 90 }));
+    const ap = new AgentProcess('hermes-agent', mockEnv, {
+      runtime: 'hermes', hermes_profile: 'hermes-agent',
+    });
+    await ap.start();
+    expect(mockPty.spawn).toHaveBeenCalledWith('continue', expect.any(String));
+    expect(ap.getLastSpawnMode()).toBe('continue');
+  });
+
   it('checks the configured profile under the Hermes root', async () => {
     const originalHermesHome = process.env['HERMES_HOME'];
     process.env['HERMES_HOME'] = '/custom/hermes';

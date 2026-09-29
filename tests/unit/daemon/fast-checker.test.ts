@@ -1253,9 +1253,12 @@ describe('FastChecker', () => {
       vi.useRealTimers();
     });
 
-    function makeCtxAgent(name = 'ctx-agent') {
+    // The guard only trusts a baseline from a session spawned in FRESH mode
+    // (AgentProcess.getLastSpawnMode); default here so tests A-D keep their meaning.
+    function makeCtxAgent(name = 'ctx-agent', spawnMode: 'fresh' | 'continue' | null = 'fresh') {
       const config: any = {};
       return {
+        getLastSpawnMode: () => spawnMode,
         name,
         hasEverBootstrapped: vi.fn().mockReturnValue(true),
         injectMessage: vi.fn().mockReturnValue(true),
@@ -1403,6 +1406,64 @@ describe('FastChecker', () => {
       expect(injected(agent).some(m => m.includes('CONTEXT HANDOFF REQUIRED'))).toBe(true);
       expect((checker as any).ctxHandoffFiredAt).toBeGreaterThan(0);
       expect(orchestratorMessages().length).toBe(0);
+    });
+
+    it('E: continue-mode session born above threshold is NOT suppressed — hands off, no baseline, no alert', async () => {
+      vi.useFakeTimers();
+      const t0 = new Date('2026-06-01T00:00:00Z').getTime();
+      vi.setSystemTime(t0);
+      // Resumed conversation: the 72% is inherited thread fill, and .force-fresh would lighten it.
+      const agent = makeCtxAgent('ctx-agent', 'continue');
+      const checker = new FastChecker(agent, paths, frameworkRoot);
+      writeConfig({});
+
+      writeCtxStatus(72, 'sess-resumed');
+      await (checker as any).checkContextStatus(); // within grace
+
+      vi.setSystemTime(t0 + GRACE_MS + 60_000);
+      writeCtxStatus(72, 'sess-resumed');
+      await (checker as any).checkContextStatus();
+
+      expect((checker as any).ctxSessionBaselinePct).toBeNull();
+      expect(injected(agent).some(m => m.includes('CONTEXT HANDOFF REQUIRED'))).toBe(true);
+      expect((checker as any).ctxHandoffFiredAt).toBeGreaterThan(0);
+      expect(orchestratorMessages().length).toBe(0);
+    });
+
+    it('F: fresh-mode heavy baseline is still suppressed (mode-aware guard preserves existing behaviour)', async () => {
+      vi.useFakeTimers();
+      const t0 = new Date('2026-06-01T00:00:00Z').getTime();
+      vi.setSystemTime(t0);
+      const agent = makeCtxAgent('ctx-agent', 'fresh');
+      const checker = new FastChecker(agent, paths, frameworkRoot);
+      writeConfig({});
+
+      writeCtxStatus(72, 'sess-fresh-heavy');
+      await (checker as any).checkContextStatus();
+      vi.setSystemTime(t0 + GRACE_MS + 60_000);
+      writeCtxStatus(72, 'sess-fresh-heavy');
+      await (checker as any).checkContextStatus();
+
+      expect((checker as any).ctxSessionBaselinePct).toBe(72);
+      expect(injected(agent).some(m => m.includes('CONTEXT HANDOFF REQUIRED'))).toBe(false);
+      expect(orchestratorMessages().length).toBe(1);
+    });
+
+    it('G: unknown spawn mode (never started) captures no baseline', async () => {
+      vi.useFakeTimers();
+      const t0 = new Date('2026-06-01T00:00:00Z').getTime();
+      vi.setSystemTime(t0);
+      const agent = makeCtxAgent('ctx-agent', null);
+      const checker = new FastChecker(agent, paths, frameworkRoot);
+      writeConfig({});
+
+      writeCtxStatus(72, 'sess-unknown');
+      await (checker as any).checkContextStatus();
+      vi.setSystemTime(t0 + GRACE_MS + 60_000);
+      writeCtxStatus(72, 'sess-unknown');
+      await (checker as any).checkContextStatus();
+
+      expect((checker as any).ctxSessionBaselinePct).toBeNull();
     });
   });
 });
