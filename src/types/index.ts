@@ -279,6 +279,15 @@ export interface AgentConfig {
    */
   codex_context_cap?: number;
   /**
+   * Let Codex's built-in memories feature run for this codex-app-server seat.
+   * Default false: the app-server is started with `--disable memories`.
+   * Memories live in the shared Codex home (~/.codex/memories), so an agent
+   * seat would read the operator's personal memories into its context and
+   * write its own threads back into them, and the background consolidation
+   * job runs under the seat's instructions (it has filed bus tasks for itself).
+   */
+  codex_memories?: boolean;
+  /**
    * Fallback context window cap (tokens) for opencode agents when the OpenCode
    * model cache does not expose a context limit. Only applies to runtime:
    * 'opencode'.

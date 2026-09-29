@@ -64,7 +64,7 @@ vi.mock('../../../src/bus/event.js', () => ({
   logEvent: logEventMock,
 }));
 
-const { CodexAppServerPTY } = await import('../../../src/pty/codex-app-server-pty.js');
+const { CodexAppServerPTY, codexAppServerArgs } = await import('../../../src/pty/codex-app-server-pty.js');
 
 const mockEnv = {
   instanceId: 'test',
@@ -97,6 +97,38 @@ describe('CodexAppServerPTY daemon lifecycle provenance env', () => {
     const env = (pty as unknown as { buildEnv(): Record<string, string> }).buildEnv();
     expect(env.CTX_DAEMON_PID).toBe(String(process.pid));
     expect(env.CTX_AGENT_NAME).toBe(mockEnv.agentName);
+  });
+});
+
+describe('CodexAppServerPTY app-server arguments — Codex memories', () => {
+  // Memories live in the shared Codex home, so an agent seat would read the
+  // operator's personal memories and write its own threads back into them, and
+  // the background consolidation job runs under the seat's own instructions.
+  async function spawnedArgs(config: Record<string, unknown>): Promise<string[]> {
+    const spawnFn = vi.fn().mockReturnValue({ pid: 1, write: vi.fn(), onData: vi.fn(), onExit: vi.fn(), kill: vi.fn() });
+    const pty = new CodexAppServerPTY(mockEnv, config);
+    (pty as unknown as { _spawnFn: unknown })._spawnFn = spawnFn;
+    fsMocks.existsSync.mockReturnValue(true); // the socket "appears" at once
+    await (pty as unknown as { startAppServer(): Promise<void> }).startAppServer();
+    expect(spawnFn).toHaveBeenCalledTimes(1);
+    expect(spawnFn.mock.calls[0][0]).toBe('codex');
+    return spawnFn.mock.calls[0][1] as string[];
+  }
+
+  it('starts the app-server with memories disabled by default', async () => {
+    const args = await spawnedArgs({});
+    expect(args).toEqual(['app-server', '--enable', 'goals', '--disable', 'memories', '--listen', 'unix://./codex.sock']);
+  });
+
+  it('leaves memories alone only when the seat opts in with codex_memories: true', async () => {
+    expect(await spawnedArgs({ codex_memories: true })).not.toContain('memories');
+    expect(await spawnedArgs({ codex_memories: false })).toContain('memories');
+  });
+
+  it('codexAppServerArgs treats anything but true as disabled', () => {
+    expect(codexAppServerArgs({}, 'unix://x')).toContain('--disable');
+    expect(codexAppServerArgs({ codex_memories: 'true' as unknown as boolean }, 'unix://x')).toContain('--disable');
+    expect(codexAppServerArgs({ codex_memories: true }, 'unix://x')).toEqual(['app-server', '--enable', 'goals', '--listen', 'unix://x']);
   });
 });
 
