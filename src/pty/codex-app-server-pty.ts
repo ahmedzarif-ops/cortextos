@@ -1270,7 +1270,8 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * Arguments for `codex app-server`. Codex memories are disabled unless the seat
- * opts in with `codex_memories: true` (see AgentConfig.codex_memories).
+ * opts in with `codex_memories: true` (see AgentConfig.codex_memories). Shell
+ * snapshots are always disabled.
  */
 export function codexAppServerArgs(
   config: Pick<AgentConfig, 'codex_memories'>,
@@ -1278,6 +1279,9 @@ export function codexAppServerArgs(
 ): string[] {
   const args = ['app-server', '--enable', 'goals'];
   if (config.codex_memories !== true) args.push('--disable', 'memories');
+  // shell_snapshot saves each shell's startup environment to $CODEX_HOME/shell_snapshots. A seat's
+  // environment carries its credentials, so the snapshot would persist them in plain files.
+  args.push('--disable', 'shell_snapshot');
   args.push('--listen', listenArg);
   return args;
 }
