@@ -19,6 +19,7 @@ import {
 import { join } from 'path';
 import { mkdirSync, readFileSync, existsSync, readdirSync, statSync } from 'fs';
 import { homedir } from 'os';
+import { resolveOwnerContactRoute } from './one-voice';
 
 /**
  * Find the most recent plan file in ~/.claude/plans/
@@ -61,6 +62,15 @@ async function main(): Promise<void> {
   const { tool_input } = parseHookInput(input);
 
   const env = loadEnv();
+
+  // ONE VOICE: a specialist's plan is not sent to the owner for review. It is
+  // approved at once, the same outcome as the no-credentials and timeout paths,
+  // so the seat is not left at a prompt nobody watches.
+  const route = resolveOwnerContactRoute(env.agentName, process.env.CTX_FRAMEWORK_ROOT, process.env.CTX_ORG);
+  if (route.kind === 'reroute') {
+    outputDecision('allow');
+    return;
+  }
 
   if (!env.botToken || !env.chatId) {
     outputDecision('allow');

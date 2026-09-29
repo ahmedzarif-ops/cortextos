@@ -63,6 +63,12 @@ the pressure under which this rule would otherwise bend, so it is not an excepti
 **Replies are always allowed.** If the owner messages you, answer using the reply command the
 daemon prints, then tell the orchestrator it happened. This rule governs what you INITIATE.
 
+**Questions go to the orchestrator too.** On a non-orchestrator seat the configured orchestrator
+is the user you ask: send the question with `cortextos bus send-message <orchestrator> …` (on a
+Claude Code seat the framework reroutes an `AskUserQuestion` call there for you). **Its reply IS
+the user's answer — act on it.** Never ask the owner in plain text in your own terminal and wait:
+nobody reads that terminal.
+
 **Exceptions are a CLOSED list and they live in this file's `## Communication` section — do not
 restate them elsewhere.** A second copy has a second owner and will drift.
 
