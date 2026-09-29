@@ -15,7 +15,7 @@ import {
   buildAskMultiSelectKeyboard,
   formatQuestionMessage,
 } from './index';
-import { resolveOwnerContactRoute, rerouteQuestion } from './one-voice';
+import { resolveOwnerContactRoute, rerouteQuestion, blockedQuestionReason } from './one-voice';
 import { resolvePaths } from '../utils/paths';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
@@ -37,7 +37,11 @@ async function main(): Promise<void> {
   // no menu is left open in a terminal nobody watches. Checked before the
   // credential test: a specialist without a bot must not be left waiting either.
   const org = process.env.CTX_ORG;
-  const route = resolveOwnerContactRoute(env.agentName, process.env.CTX_FRAMEWORK_ROOT, org);
+  const route = resolveOwnerContactRoute(env.agentName, process.env.CTX_FRAMEWORK_ROOT, org, process.env.CTX_AGENT_DIR);
+  if (route.kind === 'blocked') {
+    process.stderr.write(blockedQuestionReason(route.why) + '\n');
+    process.exit(2);
+  }
   if (route.kind === 'reroute') {
     const { reason } = rerouteQuestion({
       paths: resolvePaths(env.agentName, process.env.CTX_INSTANCE_ID || 'default', org),

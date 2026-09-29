@@ -111,6 +111,34 @@ describe('ONE VOICE hook gates', () => {
     expect(inboxCount()).toBe(0);
   }, 30000);
 
+  it('ask: a malformed context.json BLOCKS the question instead of reaching the owner', () => {
+    writeFileSync(join(frameworkRoot, 'orgs', 'acme', 'context.json'), '{"orchestrator": "chief",');
+    const r = run('hook-ask-telegram', 'growth', ASK_INPUT);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('cannot be resolved');
+    expect(r.stderr).toContain('Do not ask the owner');
+    expect(fetches()).toEqual([]);
+    expect(inboxCount()).toBe(0);
+  }, 30000);
+
+  it('ask: with CTX_ORG unset the org is inferred from the agent dir and the question is rerouted', () => {
+    const agentDir = join(frameworkRoot, 'orgs', 'acme', 'agents', 'growth');
+    mkdirSync(agentDir, { recursive: true });
+    const r = run('hook-ask-telegram', 'growth', ASK_INPUT, { CTX_ORG: '', CTX_FRAMEWORK_ROOT: '', CTX_AGENT_DIR: agentDir });
+    expect(r.status).toBe(2);
+    expect(fetches()).toEqual([]);
+    expect(inboxCount()).toBe(1);
+  }, 30000);
+
+  it('permission: a malformed context.json denies, nothing sent', () => {
+    writeFileSync(join(frameworkRoot, 'orgs', 'acme', 'context.json'), '{not json');
+    const r = run('hook-permission-telegram', 'growth', JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }));
+    const out = JSON.parse(r.stdout.trim());
+    expect(out.hookSpecificOutput.decision.behavior).toBe('deny');
+    expect(out.hookSpecificOutput.decision.message).toContain('cannot be resolved');
+    expect(fetches()).toEqual([]);
+  }, 30000);
+
   it('permission: a specialist prompt is denied with the internal routes named, nothing sent', () => {
     const r = run('hook-permission-telegram', 'growth', JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }));
     expect(r.status).toBe(0);

@@ -8,6 +8,7 @@ import {
   clearReroutedAsk,
   formatReroutedQuestion,
   isAnswerToReroutedAsk,
+  orgFromAgentDir,
   readReroutedAsk,
   rerouteQuestion,
   resolveOwnerContactRoute,
@@ -57,14 +58,51 @@ describe('resolveOwnerContactRoute', () => {
     expect(resolveOwnerContactRoute('Chief', root, 'acme')).toEqual({ kind: 'reroute', orchestrator: 'chief' });
   });
 
-  it('is unconfigured with no org context, no orchestrator field, or an unreadable file', () => {
+  it('keeps the original route only for a deliberate no-orchestrator deployment', () => {
+    // no org at all
     expect(resolveOwnerContactRoute('growth', undefined, 'acme')).toEqual({ kind: 'unconfigured' });
     expect(resolveOwnerContactRoute('growth', root, undefined)).toEqual({ kind: 'unconfigured' });
+    // no context.json in an org with at most one agent
     expect(resolveOwnerContactRoute('growth', root, 'acme')).toEqual({ kind: 'unconfigured' });
+    mkdirSync(join(root, 'orgs', 'acme', 'agents', 'growth'), { recursive: true });
+    expect(resolveOwnerContactRoute('growth', root, 'acme')).toEqual({ kind: 'unconfigured' });
+    // field absent, or "" as `cortextos init` writes it — even with several agents
+    mkdirSync(join(root, 'orgs', 'acme', 'agents', 'guard'), { recursive: true });
     writeContext(root, 'acme', JSON.stringify({ timezone: 'UTC' }));
     expect(resolveOwnerContactRoute('growth', root, 'acme')).toEqual({ kind: 'unconfigured' });
-    writeContext(root, 'acme', '{not json');
+    writeContext(root, 'acme', JSON.stringify({ orchestrator: '' }));
     expect(resolveOwnerContactRoute('growth', root, 'acme')).toEqual({ kind: 'unconfigured' });
+  });
+
+  it('fails CLOSED when the orchestrator should exist but does not resolve', () => {
+    const blocked = (agent = 'growth') => resolveOwnerContactRoute(agent, root, 'acme').kind;
+    writeContext(root, 'acme', '{not json');
+    expect(blocked()).toBe('blocked');
+    writeContext(root, 'acme', '[]');
+    expect(blocked()).toBe('blocked');
+    writeContext(root, 'acme', JSON.stringify({ orchestrator: 'chief ' })); // trailing-space typo
+    expect(blocked()).toBe('blocked');
+    expect(blocked('chief')).toBe('blocked'); // the would-be orchestrator gets no owner route either
+    writeContext(root, 'acme', JSON.stringify({ orchestrator: 'bad name!' }));
+    expect(blocked()).toBe('blocked');
+    writeContext(root, 'acme', JSON.stringify({ orchestrator: 7 }));
+    expect(blocked()).toBe('blocked');
+  });
+
+  it('fails CLOSED when context.json is missing in an org with more than one agent', () => {
+    mkdirSync(join(root, 'orgs', 'acme', 'agents', 'growth'), { recursive: true });
+    mkdirSync(join(root, 'orgs', 'acme', 'agents', 'guard'), { recursive: true });
+    const route = resolveOwnerContactRoute('growth', root, 'acme');
+    expect(route.kind).toBe('blocked');
+    expect(route.kind === 'blocked' && route.why).toContain('more than one agent');
+  });
+
+  it('infers framework root and org from the agent dir when the env does not carry them', () => {
+    writeContext(root, 'acme', JSON.stringify({ orchestrator: 'chief' }));
+    const agentDir = join(root, 'orgs', 'acme', 'agents', 'growth');
+    expect(orgFromAgentDir(agentDir)).toEqual({ frameworkRoot: root, org: 'acme' });
+    expect(orgFromAgentDir('/somewhere/else')).toBeNull();
+    expect(resolveOwnerContactRoute('growth', undefined, undefined, agentDir)).toEqual({ kind: 'reroute', orchestrator: 'chief' });
   });
 });
 

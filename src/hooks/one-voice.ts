@@ -8,13 +8,21 @@
  *
  *  - the configured orchestrator keeps the original Telegram behaviour;
  *  - every other seat is rerouted to the orchestrator over the internal bus;
- *  - a deployment with no configured orchestrator (no org context, no field,
- *    or an unreadable file) keeps the original behaviour. There is nobody to
- *    reroute to, and a single-agent install messaging its own user is correct.
+ *  - a deployment that has deliberately no orchestrator keeps the original
+ *    behaviour: `orchestrator` absent or "" in a readable context.json (what
+ *    `cortextos init` writes), or no context.json in an org with at most one
+ *    agent, or no org at all. A standalone agent messaging its own user is
+ *    correct.
+ *  - anything else that fails to resolve is BLOCKED, never sent to the owner:
+ *    an unreadable context.json, a non-empty `orchestrator` that does not
+ *    resolve (a typo, surrounding whitespace, an invalid name), or a missing
+ *    context.json in an org with more than one agent. One bad edit must not
+ *    silently reopen every specialist's route to the owner.
  */
 
-import { existsSync, readFileSync, unlinkSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
+import { stripBom } from '../utils/strip-bom.js';
 import type { BusPaths } from '../types/index.js';
 import { sendMessage } from '../bus/message.js';
 import { atomicWriteSync } from '../utils/atomic.js';
@@ -23,17 +31,73 @@ import { resolveConfiguredOrchestrator } from '../telegram/lifecycle.js';
 export type OwnerContactRoute =
   | { kind: 'owner' }
   | { kind: 'unconfigured' }
-  | { kind: 'reroute'; orchestrator: string };
+  | { kind: 'reroute'; orchestrator: string }
+  | { kind: 'blocked'; why: string };
+
+/** Infer framework root and org from an agent dir shaped `<root>/orgs/<org>/agents/<name>`. */
+export function orgFromAgentDir(agentDir: string | undefined): { frameworkRoot: string; org: string } | null {
+  const m = agentDir?.match(/^(.*)[\\/]orgs[\\/]([^\\/]+)[\\/]agents[\\/][^\\/]+[\\/]?$/);
+  return m ? { frameworkRoot: m[1], org: m[2] } : null;
+}
+
+function countAgentDirs(frameworkRoot: string, org: string): number {
+  try {
+    return readdirSync(join(frameworkRoot, 'orgs', org, 'agents'), { withFileTypes: true })
+      .filter((e) => e.isDirectory()).length;
+  } catch {
+    return 0;
+  }
+}
 
 export function resolveOwnerContactRoute(
   agentName: string,
   frameworkRoot: string | undefined,
   org: string | undefined,
+  agentDir?: string,
 ): OwnerContactRoute {
+  if (!frameworkRoot || !org) {
+    const inferred = orgFromAgentDir(agentDir);
+    if (inferred) {
+      frameworkRoot = frameworkRoot || inferred.frameworkRoot;
+      org = org || inferred.org;
+    }
+  }
+
   const orchestrator = resolveConfiguredOrchestrator(frameworkRoot, org);
-  if (orchestrator === null) return { kind: 'unconfigured' };
-  if (agentName === orchestrator) return { kind: 'owner' };
-  return { kind: 'reroute', orchestrator };
+  if (orchestrator !== null) {
+    return agentName === orchestrator ? { kind: 'owner' } : { kind: 'reroute', orchestrator };
+  }
+  if (!frameworkRoot || !org) return { kind: 'unconfigured' };
+
+  const contextPath = join(frameworkRoot, 'orgs', org, 'context.json');
+  if (!existsSync(contextPath)) {
+    return countAgentDirs(frameworkRoot, org) > 1
+      ? { kind: 'blocked', why: `orgs/${org}/context.json is missing in an org with more than one agent` }
+      : { kind: 'unconfigured' };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stripBom(readFileSync(contextPath, 'utf-8')));
+  } catch {
+    return { kind: 'blocked', why: `orgs/${org}/context.json cannot be read as JSON` };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { kind: 'blocked', why: `orgs/${org}/context.json is not a JSON object` };
+  }
+  const field = (parsed as Record<string, unknown>).orchestrator;
+  if (field === undefined || field === '') return { kind: 'unconfigured' };
+  return { kind: 'blocked', why: `orgs/${org}/context.json names an orchestrator that does not resolve (${JSON.stringify(field)})` };
+}
+
+export function blockedQuestionReason(why: string): string {
+  return `ONE VOICE: AskUserQuestion is blocked because the org orchestrator cannot be resolved: ${why}. ` +
+    'Do not ask the owner. Send your question to your orchestrator with cortextos bus send-message, and report the configuration fault.';
+}
+
+export function blockedPermissionReason(why: string): string {
+  return `ONE VOICE: permission prompts are blocked because the org orchestrator cannot be resolved: ${why}. Denied. ` +
+    'Ask your orchestrator with cortextos bus send-message, or file an approval with cortextos bus create-approval.';
 }
 
 /** State file that links a rerouted question to the orchestrator's answer. */
