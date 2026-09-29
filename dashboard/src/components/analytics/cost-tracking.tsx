@@ -6,10 +6,11 @@ import { CHART_GOLD } from '@/components/charts/chart-theme';
 import type { CostSummary, UsageHealth } from '@/lib/cost-parser';
 
 interface PlanUsageData {
-  session: { used_pct: number; resets: string };
-  week_all_models: { used_pct: number; resets: string };
-  week_sonnet: { used_pct: number };
+  session: { used_pct: number; resets: string } | null;
+  week_all_models: { used_pct: number; resets: string } | null;
+  week_sonnet: { used_pct: number } | null;
   timestamp: string;
+  unavailable_reason?: string;
 }
 
 interface UsageHistoryPoint {
@@ -35,7 +36,17 @@ interface CostTrackingProps {
   codexUsage?: CodexUsageData | null;
 }
 
-function UsageBar({ pct, label, sublabel }: { pct: number; label: string; sublabel?: string }) {
+function UsageBar({ pct, label, sublabel }: { pct: number | null | undefined; label: string; sublabel?: string }) {
+  if (pct == null) {
+    return (
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between text-sm">
+          <span className="font-medium">{label}</span>
+          <span className="text-muted-foreground">unknown</span>
+        </div>
+      </div>
+    );
+  }
   const color = pct < 50 ? 'bg-green-500' : pct < 80 ? 'bg-amber-500' : 'bg-red-500';
   return (
     <div className="space-y-1.5">
@@ -72,21 +83,24 @@ export function CostTracking({
           {planUsage ? (
             <div className="space-y-4">
               <UsageBar
-                pct={planUsage.week_all_models.used_pct}
+                pct={planUsage.week_all_models?.used_pct}
                 label="Weekly (All Models)"
-                sublabel={planUsage.week_all_models.resets ? `Resets ${planUsage.week_all_models.resets}` : undefined}
+                sublabel={planUsage.week_all_models?.resets ? `Resets ${planUsage.week_all_models.resets}` : undefined}
               />
               <UsageBar
-                pct={planUsage.session.used_pct}
+                pct={planUsage.session?.used_pct}
                 label="Current Session"
-                sublabel={planUsage.session.resets ? `Resets ${planUsage.session.resets}` : undefined}
+                sublabel={planUsage.session?.resets ? `Resets ${planUsage.session.resets}` : undefined}
               />
               <UsageBar
-                pct={planUsage.week_sonnet.used_pct}
+                pct={planUsage.week_sonnet?.used_pct}
                 label="Weekly (Sonnet Only)"
               />
+              {planUsage.unavailable_reason && (
+                <p className="text-[10px] text-muted-foreground">No usage data: {planUsage.unavailable_reason}</p>
+              )}
               <p className="text-[10px] text-muted-foreground">
-                Last updated: {new Date(planUsage.timestamp).toLocaleString()}
+                Last updated: {planUsage.timestamp ? new Date(planUsage.timestamp).toLocaleString() : 'unknown'}
               </p>
             </div>
           ) : (

@@ -264,12 +264,47 @@ function getFleetHealthFromHeartbeats(org: string): FleetHealth | null {
 // Plan Usage (scraped from /usage via scrape-usage.sh)
 // ---------------------------------------------------------------------------
 
+// Each window is null when the source has no usable number for it — the UI
+// renders "unknown" rather than a guessed 0.
 export interface PlanUsage {
   agent: string;
   timestamp: string;
-  session: { used_pct: number; resets: string };
-  week_all_models: { used_pct: number; resets: string };
-  week_sonnet: { used_pct: number };
+  session: { used_pct: number; resets: string } | null;
+  week_all_models: { used_pct: number; resets: string } | null;
+  week_sonnet: { used_pct: number } | null;
+  /** Set when every window is null: why there is no plan-usage data. */
+  unavailable_reason?: string;
+}
+
+/**
+ * Shape-check a `state/usage/latest.json` snapshot. That file has two writers:
+ * `cortextos bus scrape-usage` (session / week_all_models / week_sonnet) and the
+ * OAuth usage check in src/bus/oauth.ts (flat five_hour_utilization /
+ * seven_day_utilization). Returning the OAuth shape verbatim crashed the
+ * analytics page on `.week_all_models.used_pct`; any window missing here is null.
+ */
+export function normalizePlanUsage(raw: unknown): PlanUsage {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const win = (v: unknown): { used_pct: number; resets: string } | null => {
+    if (!v || typeof v !== 'object') return null;
+    const w = v as { used_pct?: unknown; resets?: unknown };
+    if (typeof w.used_pct !== 'number' || !Number.isFinite(w.used_pct)) return null;
+    return { used_pct: w.used_pct, resets: typeof w.resets === 'string' ? w.resets : '' };
+  };
+  const sonnet = win(r.week_sonnet);
+  const usage: PlanUsage = {
+    agent: typeof r.agent === 'string' ? r.agent : typeof r.account === 'string' ? r.account : 'unknown',
+    timestamp: typeof r.timestamp === 'string' ? r.timestamp : typeof r.fetched_at === 'string' ? r.fetched_at : '',
+    session: win(r.session),
+    week_all_models: win(r.week_all_models),
+    week_sonnet: sonnet ? { used_pct: sonnet.used_pct } : null,
+  };
+  if (!usage.session && !usage.week_all_models && !usage.week_sonnet) {
+    usage.unavailable_reason = 'five_hour_utilization' in r || 'seven_day_utilization' in r
+      ? 'latest.json holds an OAuth usage snapshot, not a scrape-usage snapshot (no session/week windows)'
+      : 'latest.json has no session/week usage windows';
+  }
+  return usage;
 }
 
 export interface CodexUsage {
@@ -308,9 +343,12 @@ export function getPlanUsage(): PlanUsage | null {
   // Primary: an explicit `cortextos bus scrape-usage` snapshot. Preserves the
   // manual /usage paste path and the daily JSONL history series.
   const file = path.join(CTX_ROOT, 'state', 'usage', 'latest.json');
+  let unusable: PlanUsage | null = null;
   if (fs.existsSync(file)) {
     try {
-      return JSON.parse(fs.readFileSync(file, 'utf-8'));
+      const usage = normalizePlanUsage(JSON.parse(fs.readFileSync(file, 'utf-8')));
+      if (!usage.unavailable_reason) return usage;
+      unusable = usage; // try the live API cache before reporting "no data"
     } catch {
       // fall through to the live API cache
     }
@@ -320,10 +358,10 @@ export function getPlanUsage(): PlanUsage | null {
   // This auto-populates the widget with no manual scrape. The cache exposes 5h /
   // 7d / 7d-sonnet utilization, which map onto session / week-all-models / week-sonnet.
   const cacheFile = path.join(CTX_ROOT, 'state', 'usage', 'api-cache.json');
-  if (!fs.existsSync(cacheFile)) return null;
+  if (!fs.existsSync(cacheFile)) return unusable;
   try {
     const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf-8'));
-    if (cache.five_hour == null && cache.seven_day == null) return null;
+    if (cache.five_hour == null && cache.seven_day == null) return unusable;
     const fmtReset = (iso?: string | null): string =>
       iso ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric' }) : '';
     return {
@@ -342,7 +380,7 @@ export function getPlanUsage(): PlanUsage | null {
       },
     };
   } catch {
-    return null;
+    return unusable;
   }
 }
 
