@@ -82,6 +82,11 @@ interface DaemonStatus {
  * Returns null — not an empty list — when the daemon cannot be reached.
  */
 function daemonStatuses(timeoutMs = 2000): Promise<DaemonStatus[] | null> {
+  return daemonRequest<DaemonStatus>('status', timeoutMs);
+}
+
+/** One IPC round-trip to the daemon. null — never [] — when it cannot be asked. */
+function daemonRequest<T>(type: string, timeoutMs = 2000): Promise<T[] | null> {
   const socketPath =
     process.platform === 'win32'
       ? `\\\\.\\pipe\\cortextos-${INSTANCE}`
@@ -89,7 +94,7 @@ function daemonStatuses(timeoutMs = 2000): Promise<DaemonStatus[] | null> {
 
   return new Promise((resolve) => {
     let settled = false;
-    const done = (v: DaemonStatus[] | null) => {
+    const done = (v: T[] | null) => {
       if (!settled) {
         settled = true;
         resolve(v);
@@ -99,7 +104,7 @@ function daemonStatuses(timeoutMs = 2000): Promise<DaemonStatus[] | null> {
     let socket: ReturnType<typeof createConnection>;
     try {
       socket = createConnection(socketPath, () => {
-        socket.write(JSON.stringify({ type: 'status' }));
+        socket.write(JSON.stringify({ type }));
       });
     } catch {
       return done(null);
@@ -126,6 +131,138 @@ function daemonStatuses(timeoutMs = 2000): Promise<DaemonStatus[] | null> {
       done(null);
     });
   });
+}
+
+interface DaemonWorker {
+  name: string;
+  status: string;
+  pid?: number;
+  parent?: string;
+  spawnedAt?: string;
+}
+
+/* signal 0: does this pid exist right now? EPERM = exists, owned by someone else. */
+function pidAlive(pid: number | undefined): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/* ---------- phase 2 #1: per-seat LIVE ACTIVITY, sub-minute ----------
+   Three real sources, none of them a guess:
+     - the bus event log (append-time): newest event + events in the last 60 s;
+     - logs/<seat>/stdout.log mtime: the daemon appends every PTY output chunk
+       to it synchronously (src/pty/output-buffer.ts appendFileSync), so its
+       mtime is the last moment the seat's session printed anything. An idle
+       session prints nothing (measured 2026-09-28: idle seats' mtimes stand
+       still for hours), a working one prints continuously (spinner, tool output);
+     - daemon IPC (status / list-workers): whether the PTY process exists at all.
+   state: working = output in the last WORK_OUTPUT_S or a bus event in the last
+   60 s; idle = daemon says running and neither; offline = daemon says NOT
+   running; unknown = the daemon could not be asked (never guessed idle). */
+const WORK_OUTPUT_S = 20;
+const WORK_EVENT_S = 60;
+
+type SeatState = 'working' | 'idle' | 'offline' | 'unknown';
+
+function lastOutputAt(name: string): { at: string | null; readable: boolean } {
+  if (!/^[A-Za-z0-9_.-]+$/.test(name)) return { at: null, readable: false };
+  try {
+    const st = fs.statSync(path.join(getCTXRoot(), 'logs', name, 'stdout.log'));
+    return { at: st.mtime.toISOString(), readable: true };
+  } catch (e) {
+    /* ENOENT = this session never printed (a measured absence); anything else = unreadable */
+    return { at: null, readable: (e as NodeJS.ErrnoException).code === 'ENOENT' };
+  }
+}
+
+function seatActivity(
+  name: string,
+  running: boolean | null,
+  evs: { last_by_agent: Record<string, string>; last60_by_agent: Record<string, number> } | null
+) {
+  const now = Date.now();
+  const out = lastOutputAt(name);
+  const lastEventAt = evs ? (evs.last_by_agent[name] ?? null) : null;
+  const events60 = evs ? (evs.last60_by_agent[name] ?? 0) : null;
+  const outAgeS = out.at ? (now - Date.parse(out.at)) / 1000 : null;
+  let state: SeatState;
+  if (running === null) state = 'unknown';
+  else if (!running) state = 'offline';
+  else if ((outAgeS !== null && outAgeS <= WORK_OUTPUT_S) || (events60 ?? 0) > 0) state = 'working';
+  else if (!out.readable && evs === null) state = 'unknown';   /* both activity sources blind */
+  else state = 'idle';
+  return {
+    state,
+    last_event_at: lastEventAt,
+    events_last_60s: events60,
+    last_output_at: out.at,
+    source:
+      'bus event log (last_event_at, events_last_60s) + logs/<seat>/stdout.log mtime (PTY output) + daemon IPC liveness',
+    rule: `working = PTY output <= ${WORK_OUTPUT_S}s or a bus event <= ${WORK_EVENT_S}s; idle = running, neither; offline = daemon says not running; unknown = daemon unreachable`,
+    resolution: 'seconds — MONITOR (read on every poll)',
+  };
+}
+
+/* ---------- add-on #9: ephemeral workers, ONLY as the daemon proves them ----------
+   Same IPC the liveness monitor uses (`list-workers`, what `cortextos
+   list-workers` sends). A worker is drawn only if the daemon says running AND
+   its pid answers signal 0. A dir under $CTX_ROOT/workers proves nothing and
+   is never read. Unreachable daemon = null = unknown, never an empty list. */
+async function workers(evs: Parameters<typeof seatActivity>[2]) {
+  const list = await daemonRequest<DaemonWorker>('list-workers');
+  if (!list) return null;
+  const running: Array<{
+    name: string;
+    parent: string | null;
+    pid: number | null;
+    spawned_at: string | null;
+    activity: ReturnType<typeof seatActivity>;
+  }> = [];
+  let notLive = 0;
+  for (const w of list) {
+    if (w.status === 'running' && pidAlive(w.pid)) {
+      running.push({
+        name: w.name,
+        parent: w.parent ?? null,
+        pid: w.pid ?? null,
+        spawned_at: w.spawnedAt ?? null,
+        activity: seatActivity(w.name, true, evs),
+      });
+    } else {
+      notLive++;
+    }
+  }
+  return {
+    running,
+    finished_listed: notLive,
+    source: 'daemon IPC list-workers (daemon-held PTYs) + pid signal-0 check',
+    resolution: 'seconds — MONITOR',
+  };
+}
+
+/* ---------- add-on #7: pending inbox depth, enumerated by ROSTER ----------
+   $CTX_ROOT/inbox/<seat>/*.json is the bus queue itself (check-inbox moves a
+   file to inflight when the seat reads it). The dir holds ~45 names, most not
+   seats, so only roster seats are counted. ENOENT = nothing was ever queued =
+   0; any other read failure = null (unknown), never 0. Mirrors city-state.mjs. */
+function inbox(roster: string[] | null) {
+  if (!roster) return null;
+  const per: Record<string, number | null> = {};
+  for (const seat of roster) {
+    try {
+      per[seat] = fs
+        .readdirSync(path.join(getCTXRoot(), 'inbox', seat))
+        .filter((f) => f.endsWith('.json') && !f.startsWith('.')).length;
+    } catch (e) {
+      per[seat] = (e as NodeJS.ErrnoException).code === 'ENOENT' ? 0 : null;
+    }
+  }
+  return { per_agent: per, source: '$CTX_ROOT/inbox/<seat>/*.json (pending, not yet read)', resolution: 'on poll' };
 }
 
 /** Emoji + role from IDENTITY.md — scene labelling, not a signal. */
@@ -158,7 +295,7 @@ const bandOf = (min: number | null): string | null =>
   min === null ? null : (HEARTBEAT_BANDS.find((b) => min <= b.maxMin) as { id: string }).id;
 
 /* ---------- rows 1 + 2: roster, liveness, heartbeat ---------- */
-async function agents(org: string) {
+async function agents(org: string, evs: Parameters<typeof seatActivity>[2]) {
   const roster = getAllAgents().filter((a) => a.org === org);
   if (roster.length === 0) return null;
 
@@ -178,6 +315,9 @@ async function agents(org: string) {
         id: a.name,
         role: id.role,
         emoji: id.emoji,
+
+        /* phase 2 #1: working | idle | offline | unknown, re-read on every poll */
+        activity: seatActivity(a.name, statuses ? st?.status === 'running' : null, evs),
 
         /* MONITOR. `unknown: true` when the daemon could not be reached — a false
            here would paint a dead fleet during a healthy night. */
@@ -250,8 +390,35 @@ function approvals(org: string) {
   };
 }
 
+/* ---------- add-on #2: when did the current run of work START? ----------
+   No task record carries a started_at. The audit log does: every transition is
+   an appended line, and the LAST one that moved the task to in_progress is when
+   the current run began. No such line = null ("age unknown") — never created_at
+   dressed up as a start time. Mirrors city-state.mjs startedAt(). */
+function startedAt(org: string, taskId: string): string | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(taskId)) return null;
+  let raw: string;
+  try {
+    raw = fs.readFileSync(path.join(getTaskDir(org), 'audit', `${taskId}.jsonl`), 'utf-8');
+  } catch {
+    return null;
+  }
+  let at: string | null = null;
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const e = JSON.parse(line);
+      if (e.to === 'in_progress' && typeof e.ts === 'string') at = e.ts;
+    } catch {
+      /* skip malformed */
+    }
+  }
+  return at;
+}
+
 /* ---------- row 9: tasks — read the store, not the cache ---------- */
-function tasks(org: string) {
+function tasks(org: string, roster: string[]) {
+  const seats = new Set(roster);
   const dir = getTaskDir(org);
   let files: string[];
   try {
@@ -262,6 +429,8 @@ function tasks(org: string) {
   const byAgent: Record<string, Array<Record<string, unknown>>> = {};
   let open = 0;
   let inProgress = 0;
+  let offRoster = 0;
+  const inProgressList: Array<{ id: string; title: string; assignee: string; started_at: string | null }> = [];
   for (const f of files) {
     try {
       const t = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8'));
@@ -269,6 +438,15 @@ function tasks(org: string) {
       open++;
       if (t.status === 'in_progress') inProgress++;
       const who = t.assigned_to || 'unassigned';
+      if (t.status === 'in_progress') {
+        /* Enumerated by ROSTER: a crew figure needs a building to sit in. Anything
+           else is counted, not drawn, so it cannot vanish silently. */
+        if (seats.has(who)) {
+          inProgressList.push({ id: t.id, title: t.title, assignee: who, started_at: startedAt(org, t.id) });
+        } else {
+          offRoster++;
+        }
+      }
       (byAgent[who] ||= []).push({
         id: t.id,
         title: t.title,
@@ -280,9 +458,17 @@ function tasks(org: string) {
       /* skip malformed */
     }
   }
+  inProgressList.sort(
+    (a, b) => a.assignee.localeCompare(b.assignee) || String(a.started_at).localeCompare(String(b.started_at))
+  );
   return {
     open,
-    in_progress: inProgress,
+    /* was a bare count; it is now the list the crews are drawn from. The count
+       is in_progress.length + in_progress_off_roster. */
+    in_progress: inProgressList,
+    in_progress_off_roster: offRoster,
+    in_progress_source:
+      'tasks/*.json status=in_progress; started_at = last audit line with to=in_progress (tasks/audit/<id>.jsonl), null if none',
     by_agent: byAgent,
     source: 'orgs/<org>/tasks/*.json',
     resolution: 'on change',
@@ -312,6 +498,8 @@ function events(org: string, limit: number, windowHours: number) {
     category: string;
     event: string;
     severity: string;
+    to?: string;
+    id?: string | null;
   }> = [];
 
   let agentDirs: string[];
@@ -339,13 +527,19 @@ function events(org: string, limit: number, windowHours: number) {
           if (e.category === 'heartbeat') continue;
           const ts = Date.parse(e.timestamp);
           if (Number.isNaN(ts) || ts < since) continue;
-          out.push({
+          const rec: (typeof out)[number] = {
             at: e.timestamp,
             agent: e.agent ?? agent,
             category: e.category,
             event: e.event,
             severity: e.severity,
-          });
+          };
+          /* add-on #3: a sent message names its recipient */
+          if (e.event === 'agent_message_sent' && typeof e.metadata?.to === 'string') {
+            rec.to = e.metadata.to;
+            rec.id = e.metadata.msg_id ?? e.id ?? null;
+          }
+          out.push(rec);
         } catch {
           /* skip malformed line rather than fabricate one */
         }
@@ -354,8 +548,24 @@ function events(org: string, limit: number, windowHours: number) {
   }
 
   out.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  /* newest non-heartbeat event per agent over the WHOLE window (recent[] is
+     capped, so a quiet seat would otherwise read as eventless) */
+  const lastByAgent: Record<string, string> = {};
+  for (const e of out) lastByAgent[e.agent] = e.at;
+  /* phase 2 #1: events in the last 60 s per agent, over the whole window */
+  const last60ByAgent: Record<string, number> = {};
+  for (const e of out) if (Date.parse(e.at) >= now - 60e3) last60ByAgent[e.agent] = (last60ByAgent[e.agent] ?? 0) + 1;
+  /* add-on #3: every real sent message in the last 60 min, one lane each —
+     computed over the whole window, not the capped recent[] */
+  const laneSince = now - 60 * 60e3;
+  const lanes = out
+    .filter((e) => e.to && Date.parse(e.at) >= laneSince)
+    .map((e, i) => ({ id: e.id || `${e.at}:${e.agent}:${e.to}:${i}`, from: e.agent, to: e.to as string, at: e.at }));
   return {
+    lanes,
     recent: out.slice(-limit),
+    last_by_agent: lastByAgent,
+    last60_by_agent: last60ByAgent,
     total_in_window: out.length,
     window_hours: windowHours,
     source: 'orgs/<org>/analytics/events/*/YYYY-MM-DD.jsonl (append-only log, NOT the SQLite cache)',
@@ -370,7 +580,10 @@ function events(org: string, limit: number, windowHours: number) {
 function activity(evs: ReturnType<typeof events>) {
   if (!evs) return null;
   const hourAgo = Date.now() - 3600e3;
-  const per: Record<string, { events_window: number; events_1h: number; messages_1h: number }> = {};
+  const per: Record<
+    string,
+    { events_window: number; events_1h: number; messages_1h: number; last_event_at?: string | null }
+  > = {};
   for (const e of evs.recent) {
     const a = (per[e.agent] ||= { events_window: 0, events_1h: 0, messages_1h: 0 });
     a.events_window++;
@@ -379,6 +592,12 @@ function activity(evs: ReturnType<typeof events>) {
       if (e.category === 'message') a.messages_1h++;
     }
   }
+  /* add-on #2: a desk screen is LIT only if its seat logged an event in the last
+     10 minutes. last_event_at is null when the seat has none in the window. */
+  for (const [who, at] of Object.entries(evs.last_by_agent)) {
+    (per[who] ||= { events_window: 0, events_1h: 0, messages_1h: 0 }).last_event_at = at;
+  }
+  for (const a of Object.values(per)) if (!('last_event_at' in a)) a.last_event_at = null;
   return {
     per_agent: per,
     window_hours: evs.window_hours,
@@ -405,15 +624,27 @@ export async function GET(request: NextRequest) {
 
   try {
     const eventsData = events(org, limit, windowHours);
+    const agentsData = await agents(org, eventsData);
 
     return Response.json({
       generated_at: new Date().toISOString(),
       org,
-      agents: await agents(org),
+      agents: agentsData,
       approvals: approvals(org),
-      tasks: tasks(org),
+      tasks: tasks(org, (agentsData ?? []).map((a) => a.id)),
       events: eventsData,
       activity: activity(eventsData),
+      workers: await workers(eventsData),
+      inbox: inbox(agentsData ? agentsData.map((a) => a.id) : null),
+      /* add-on #3: pairwise handoffs. null = event log unreadable = unknown */
+      lanes: eventsData
+        ? {
+            recent: eventsData.lanes,
+            window_minutes: 60,
+            source: 'agent_message_sent events, metadata.to (same append log as the ticker)',
+            resolution: 'append-time — one entry per real message',
+          }
+        : null,
 
       /* Rows 12-16 (revenue, ledger, streams, 14-day, trader P&L) are ABSENT on
          purpose. No revenue source exists in this org — SIGNALS.md §5. Absent

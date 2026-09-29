@@ -22,11 +22,34 @@ const BUNDLE = path.join(process.cwd(), 'public', 'agent-city', 'index.html');
  * The scene polls /api/city-state itself and prints its own cadence in the
  * footer. It is a sampler, and it says so.
  */
+/**
+ * The build date the bundle wrote into itself (`<meta name="city-built-at">`).
+ * Buildings are geometry baked at build time, so a fresh poll over an old bundle
+ * is still an old city — scout went 33 days without a building that way. Null
+ * when the bundle predates the stamp: rendered as "unknown", never as a date.
+ */
+function bundleBuiltAt(): string | null {
+  try {
+    const html = fs.readFileSync(BUNDLE, 'utf-8');
+    const m = html.match(/<meta name="city-built-at" content="([^"]+)">/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function CityPage() {
   const present = fs.existsSync(BUNDLE);
+  const builtAt = present ? bundleBuiltAt() : null;
 
   return (
     <div className="flex h-[calc(100vh-4rem)] flex-col">
+      {present && (
+        <p className="px-3 py-1 text-xs opacity-70" data-testid="city-built-at">
+          City bundle built:{' '}
+          {builtAt ? builtAt.replace('T', ' ') : 'unknown (bundle predates the build stamp — rebuild it)'}
+        </p>
+      )}
       {present ? (
         <iframe
           src="/agent-city/index.html"
@@ -55,6 +78,7 @@ export default function CityPage() {
             missing — not because the fleet is quiet. Run{' '}
             <code>node build/build-internal.mjs</code> in the city agent directory to produce it.
           </p>
+          <p className="text-xs opacity-60">City bundle built: never (no bundle on disk).</p>
         </div>
       )}
     </div>
