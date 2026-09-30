@@ -31,6 +31,7 @@ interface StatusLineInput {
     };
   };
   session_id?: string;
+  transcript_path?: string;
 }
 
 async function main(): Promise<void> {
@@ -71,6 +72,9 @@ async function main(): Promise<void> {
     exceeds_200k_tokens: Boolean(cw.exceeds_200k_tokens),
     current_usage: cw.current_usage ?? null,
     session_id: data.session_id ?? null,
+    // Read by the daemon's turn watch: the transcript advancing is the evidence
+    // that the seat is taking turns, which no liveness signal measures.
+    transcript_path: typeof data.transcript_path === 'string' ? data.transcript_path : null,
     written_at: new Date().toISOString(),
   });
 
