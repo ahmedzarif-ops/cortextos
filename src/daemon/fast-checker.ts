@@ -17,6 +17,7 @@ import { stripControlChars, sanitizeForPtyInjection, wrapFenceSafe } from '../ut
 import { ensureDir } from '../utils/atomic.js';
 import { readReroutedAsk, isAnswerToReroutedAsk, clearReroutedAsk } from '../hooks/one-voice.js';
 import { agentHoldsContextHandoffLease, releaseContextHandoffLease, requestContextHandoffLease } from './context-handoff-lease.js';
+import { evaluateTurnWatch, readTurnEvidence, TURN_STALL_MS } from './turn-watch.js';
 
 type LogFn = (msg: string) => void;
 
@@ -125,6 +126,11 @@ export class FastChecker {
   // Idle-session heartbeat watchdog
   private heartbeatTimer: NodeJS.Timeout | null = null;
 
+  // Turn watch (see turn-watch.ts): the OLDEST injection no turn has followed
+  // yet (0 = none pending), and whether that injection was reported.
+  private turnPendingSince: number = 0;
+  private turnReported: 'stalled' | 'unknown' | null = null;
+
   // Context monitor state
   private ctxConfigMtime: number = 0;
   private ctxWarningFiredAt: number = 0;    // dedup: 15min cooldown between warnings
@@ -215,22 +221,8 @@ export class FastChecker {
 
     // Idle-session heartbeat watchdog: fires every 50 min regardless of REPL state
     const HEARTBEAT_INTERVAL_MS = 50 * 60 * 1000;
-    const agentName = this.agent.name;
     this.heartbeatTimer = setInterval(() => {
-      const ts = new Date().toISOString();
-      try {
-        // The child cannot start in a missing cwd, even though its writer creates stateDir.
-        ensureDir(this.paths.stateDir);
-        execFile('cortextos', ['bus', 'update-heartbeat', `[watchdog] ${agentName} alive — idle session ${ts}`], {
-          // Bind the CLI write target and file-based context to this checker's seat.
-          env: { ...process.env, CTX_AGENT_NAME: agentName },
-          cwd: this.paths.stateDir,
-        }, (err) => {
-          if (err) this.log(`Heartbeat watchdog error: ${err.message}`);
-        });
-      } catch (err) {
-        this.log(`Heartbeat watchdog error: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      this.writeHeartbeat(this.watchdogStatus(Date.now()), 'Heartbeat watchdog error');
     }, HEARTBEAT_INTERVAL_MS);
 
     while (this.running) {
@@ -348,6 +340,7 @@ export class FastChecker {
         }
         if (answeredReroutedAsk) clearReroutedAsk(this.paths.stateDir);
         this.log(`Injected ${messageBlock.length} bytes`);
+        this.noteInjected();
         // Only update typing timestamp for Telegram messages, not inbox/cron.
         // Inbox messages (agent-to-agent, session continuations) must not
         // restart the typing indicator after Stop has cleared it.
@@ -366,6 +359,9 @@ export class FastChecker {
 
     // Context monitor: check usage thresholds and fire warnings/handoffs
     await this.checkContextStatus();
+
+    // Turn watch: did a turn follow the last injection?
+    this.checkTurnWatch();
   }
 
   /**
@@ -1013,6 +1009,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
         `Reply using: cortextos bus send-telegram ${chatId} '<your reply>'`,
       ].join('\n');
       const injected = this.agent.injectMessage(msg);
+      if (injected) this.noteInjected();
       if (injected && this.telegramApi) {
         try { await this.telegramApi.answerCallbackQuery(callbackQueryId, 'Got it'); } catch { /* ignore */ }
       }
@@ -1170,6 +1167,8 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
         if (!result.ok) {
           this.log(`Urgent signal deduped (${result.message}) — treating as already delivered`);
+        } else {
+          this.noteInjected();
         }
 
         unlinkSync(urgentPath);
@@ -1177,6 +1176,112 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       } catch (err) {
         this.log(`Error processing urgent signal: ${err}`);
       }
+    }
+  }
+
+  /** Start the turn-watch clock, unless an earlier injection is still unanswered. */
+  private noteInjected(): void {
+    if (this.turnPendingSince === 0) this.turnPendingSince = Date.now();
+  }
+
+  /**
+   * The idle watchdog's heartbeat line. A stalled seat keeps saying STALLED:
+   * re-labelling it "alive" is exactly the green the turn watch exists to remove.
+   */
+  private watchdogStatus(now: number): string {
+    if (this.turnReported === 'stalled') return this.stalledStatus(now);
+    return `[watchdog] ${this.agent.name} alive — idle session ${new Date(now).toISOString()}`;
+  }
+
+  private stalledStatus(now: number): string {
+    const mins = Math.round((now - this.turnPendingSince) / 60_000);
+    return `STALLED: message injected ${new Date(this.turnPendingSince).toISOString()}, no turn since (${mins}m)`;
+  }
+
+  /** Write this seat's heartbeat through the CLI, bound to this checker's seat. */
+  private writeHeartbeat(status: string, errorLabel: string): void {
+    try {
+      // The child cannot start in a missing cwd, even though its writer creates stateDir.
+      ensureDir(this.paths.stateDir);
+      execFile('cortextos', ['bus', 'update-heartbeat', status], {
+        // Bind the CLI write target and file-based context to this checker's seat.
+        env: { ...process.env, CTX_AGENT_NAME: this.agent.name },
+        cwd: this.paths.stateDir,
+      }, (err) => {
+        if (err) this.log(`${errorLabel}: ${err.message}`);
+      });
+    } catch (err) {
+      this.log(`${errorLabel}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private writeTurnWatchFile(state: string, now: number, sources: string[]): void {
+    try {
+      writeFileSync(
+        join(this.paths.stateDir, 'turn_watch.json'),
+        JSON.stringify({
+          state,
+          pending_since: this.turnPendingSince ? new Date(this.turnPendingSince).toISOString() : null,
+          sources,
+          checked_at: new Date(now).toISOString(),
+        }) + '\n',
+        'utf-8',
+      );
+    } catch { /* never let reporting a fault become a fault */ }
+  }
+
+  /**
+   * Turn watch — called on every poll cycle. Reports a seat that accepted an
+   * injection and has taken no turn since, once per episode. It never restarts
+   * the seat: that decision belongs to the orchestrator (or, for the
+   * orchestrator itself, to whatever watches its heartbeat).
+   */
+  checkTurnWatch(now: number = Date.now()): void {
+    if (this.turnPendingSince === 0) return;
+    const evidence = readTurnEvidence(this.paths.stateDir);
+    const state = evaluateTurnWatch(this.turnPendingSince, evidence, now, TURN_STALL_MS);
+
+    if (state === 'turned') {
+      if (this.turnReported === 'stalled') {
+        const mins = Math.round((now - this.turnPendingSince) / 60_000);
+        this.log(`TURN WATCH: turn resumed after ${mins}m stalled`);
+        this.writeHeartbeat(
+          `[turn-watch] ${this.agent.name} turn resumed ${new Date(now).toISOString()} after ${mins}m stalled`,
+          'Turn watch heartbeat error',
+        );
+      }
+      const reported = this.turnReported;
+      this.turnPendingSince = 0;
+      this.turnReported = null;
+      // Clear a reported state so the file cannot go stale in the other direction.
+      if (reported !== null) this.writeTurnWatchFile('ok', now, evidence.sources);
+      return;
+    }
+
+    if (state === 'stalled' && this.turnReported !== 'stalled') {
+      this.turnReported = 'stalled';
+      const status = this.stalledStatus(now);
+      this.log(`TURN WATCH ${status} (sources: ${evidence.sources.join(', ')})`);
+      this.writeTurnWatchFile('stalled', now, evidence.sources);
+      this.writeHeartbeat(status, 'Turn watch heartbeat error');
+      const orchestrator = this.resolveOrchestratorName();
+      if (orchestrator && orchestrator !== this.agent.name) {
+        try {
+          sendMessage(this.paths, this.agent.name, orchestrator, 'normal',
+            `${this.agent.name} ${status}. The daemon delivered a message and the seat has not taken a turn. ` +
+            `Nothing has been restarted; that is your call.`);
+        } catch { /* the log line and heartbeat remain authoritative */ }
+      }
+      return;
+    }
+
+    if (state === 'unknown' && this.turnReported === null) {
+      this.turnReported = 'unknown';
+      this.log(
+        'TURN WATCH UNKNOWN — no turn signal for this seat (no transcript_path in context_status.json, ' +
+        'no last_idle.flag). A stall here cannot be detected; this is unwatched, not healthy.',
+      );
+      this.writeTurnWatchFile('unknown', now, evidence.sources);
     }
   }
 
