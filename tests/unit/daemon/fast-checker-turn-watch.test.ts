@@ -100,7 +100,7 @@ describe('FastChecker turn watch', () => {
     expect(sendMessage).toHaveBeenCalledTimes(1);
     const [, from, to, priority, text] = vi.mocked(sendMessage).mock.calls[0];
     expect([from, to, priority]).toEqual(['worker', 'boss', 'normal']);
-    expect(text).toContain('worker STALLED');
+    expect(text.startsWith('[daemon turn-watch] worker STALLED: ')).toBe(true);
     expect(logs.some((l) => l.startsWith('TURN WATCH STALLED'))).toBe(true);
 
     // Reported once per episode, not once per poll.

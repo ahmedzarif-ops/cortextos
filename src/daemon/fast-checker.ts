@@ -1267,8 +1267,9 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       const orchestrator = this.resolveOrchestratorName();
       if (orchestrator && orchestrator !== this.agent.name) {
         try {
+          // Sent under the stalled seat's own name, so the prefix says who is really speaking.
           sendMessage(this.paths, this.agent.name, orchestrator, 'normal',
-            `${this.agent.name} ${status}. The daemon delivered a message and the seat has not taken a turn. ` +
+            `[daemon turn-watch] ${this.agent.name} ${status}. The daemon delivered a message and the seat has not taken a turn. ` +
             `Nothing has been restarted; that is your call.`);
         } catch { /* the log line and heartbeat remain authoritative */ }
       }
