@@ -31,14 +31,18 @@ describe('readTurnEvidence', () => {
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  const writeStatus = (transcript: string | null) =>
-    writeFileSync(join(stateDir, 'context_status.json'), JSON.stringify({ used_percentage: 5, transcript_path: transcript }));
+  const writeStatus = (transcript: string | null, writtenAt?: number) =>
+    writeFileSync(join(stateDir, 'context_status.json'), JSON.stringify({
+      used_percentage: 5,
+      transcript_path: transcript,
+      ...(writtenAt !== undefined ? { written_at: new Date(writtenAt).toISOString() } : {}),
+    }));
 
   it('no sources at all yields no reading and no sources', () => {
     expect(readTurnEvidence(stateDir)).toEqual({ at: null, sources: [] });
   });
 
-  it('a status file without transcript_path is not a source', () => {
+  it('a status file with neither transcript_path nor written_at is not a source', () => {
     writeStatus(null);
     expect(readTurnEvidence(stateDir)).toEqual({ at: null, sources: [] });
   });
@@ -67,12 +71,38 @@ describe('readTurnEvidence', () => {
     expect(readTurnEvidence(stateDir)).toEqual({ at: T0 + 60_000, sources: ['transcript', 'subagent_transcript'] });
   });
 
-  it('reads last_idle.flag as epoch seconds and takes the latest of all sources', () => {
+  it('reads last_idle.flag as epoch seconds as EVIDENCE, without listing it as a watched source', () => {
     const transcript = join(dir, 'session.jsonl');
     touch(transcript, T0);
     writeStatus(transcript);
     writeFileSync(join(stateDir, 'last_idle.flag'), String((T0 + 120_000) / 1000));
-    expect(readTurnEvidence(stateDir)).toEqual({ at: T0 + 120_000, sources: ['transcript', 'idle_flag'] });
+    expect(readTurnEvidence(stateDir)).toEqual({ at: T0 + 120_000, sources: ['transcript'] });
+  });
+
+  it('THE FROZEN-FLAG ARM: an idle flag alone never makes a seat count as watched', () => {
+    // A runtime that never writes the flag leaves an old file behind. Counting it as a
+    // live source turned every injection into a false STALLED instead of UNKNOWN.
+    writeFileSync(join(stateDir, 'last_idle.flag'), String((T0 - 9 * 86_400_000) / 1000));
+    const evidence = readTurnEvidence(stateDir);
+    expect(evidence).toEqual({ at: T0 - 9 * 86_400_000, sources: [] });
+    expect(evaluateTurnWatch(T0, evidence, T0 + TURN_STALL_MS)).toBe('unknown');
+  });
+
+  it('without a transcript, the status write time is activity (codex, hermes write it only when the session moves)', () => {
+    writeStatus(null, T0 + 45_000);
+    expect(readTurnEvidence(stateDir)).toEqual({ at: T0 + 45_000, sources: ['status_write'] });
+  });
+
+  it('with a transcript, the status write time is IGNORED (the statusLine refreshes it on a timer)', () => {
+    const transcript = join(dir, 'session.jsonl');
+    touch(transcript, T0);
+    writeStatus(transcript, T0 + 600_000);
+    expect(readTurnEvidence(stateDir)).toEqual({ at: T0, sources: ['transcript'] });
+  });
+
+  it('an unparseable written_at is not a source', () => {
+    writeFileSync(join(stateDir, 'context_status.json'), JSON.stringify({ written_at: 'not a date' }));
+    expect(readTurnEvidence(stateDir)).toEqual({ at: null, sources: [] });
   });
 
   it('an unparseable idle flag is not a source', () => {

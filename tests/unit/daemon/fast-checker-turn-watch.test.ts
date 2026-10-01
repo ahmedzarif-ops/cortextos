@@ -221,6 +221,55 @@ describe('FastChecker turn watch', () => {
     });
   });
 
+  describe('seats without a transcript (codex, hermes)', () => {
+    function statusWrittenAt(ms: number) {
+      writeFileSync(join(paths.stateDir, 'context_status.json'),
+        JSON.stringify({ transcript_path: null, written_at: new Date(ms).toISOString() }));
+    }
+    function frozenIdleFlag() {
+      writeFileSync(join(paths.stateDir, 'last_idle.flag'), String(Math.floor((T0 - 9 * 86_400_000) / 1000)));
+    }
+
+    it('a frozen idle flag plus a status write after the injection is a turn, not a stall', () => {
+      const c = checker();
+      frozenIdleFlag();
+      statusWrittenAt(T0 + 20 * 60_000);
+      injectAt(c, T0);
+      c.checkTurnWatch(T0 + 24 * 60_000);
+      expect(heartbeats()).toEqual([]);
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect((c as any).turnPendingSince).toBe(0);
+    });
+
+    it('a long turn still writing status is not a stall, even with no idle flag since', () => {
+      const c = checker();
+      frozenIdleFlag();
+      statusWrittenAt(T0 + 11 * 60_000);
+      injectAt(c, T0);
+      c.checkTurnWatch(T0 + TURN_STALL_MS + 60_000);
+      expect(heartbeats()).toEqual([]);
+    });
+
+    it('a frozen idle flag and NO status write after the injection is a real stall', () => {
+      const c = checker();
+      frozenIdleFlag();
+      statusWrittenAt(T0 - 60_000);
+      injectAt(c, T0);
+      c.checkTurnWatch(T0 + TURN_STALL_MS);
+      expect(heartbeats()[0]).toMatch(/^STALLED: /);
+      expect(watchFile()).toMatchObject({ state: 'stalled', sources: ['status_write'] });
+    });
+
+    it('a frozen idle flag as the ONLY file is unknown, never stalled', () => {
+      const c = checker();
+      frozenIdleFlag();
+      injectAt(c, T0);
+      c.checkTurnWatch(T0 + TURN_STALL_MS);
+      expect(heartbeats()).toEqual([]);
+      expect(watchFile()).toMatchObject({ state: 'unknown', sources: [] });
+    });
+  });
+
   it('nothing injected means nothing to watch', () => {
     const c = checker();
     c.checkTurnWatch(T0 + TURN_STALL_MS * 10);
