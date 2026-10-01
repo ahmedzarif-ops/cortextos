@@ -12,6 +12,12 @@ let costs: typeof import('../cost-parser');
 let db: typeof import('../db')['db'];
 const org = 'hyphen-org';
 const now = Date.parse('2026-09-10T05:00:00Z');
+// The fixtures carry fixed dates and the code under test aggregates "this month" and
+// "the last N days" from the real clock, so an unpinned clock fails this file every
+// time the calendar moves past them (it began failing on 2026-10-01). Pin it inside
+// the fixtures' month and window.
+vi.useFakeTimers({ toFake: ['Date'] });
+vi.setSystemTime(Date.parse('2026-09-20T00:00:00Z'));
 const api = { provider: 'openai', billing_mode: 'api', service_tier: 'standard', region: 'global', model: 'gpt-5-codex', observed_model: 'gpt-5-codex', model_source: 'observed', cache_write_known: true };
 const codex = (n: number, input: number, extra = {}) => ({ ...api, timestamp: new Date(now + n * 1000).toISOString(), session_id: 's', turn_id: 't', input_tokens: input, output_tokens: 0, ...extra });
 const claude = (output: number) => ({ provider: 'anthropic', billing_mode: 'api', service_tier: 'standard', region: 'global', timestamp: new Date(now).toISOString(), sessionId: 's', requestId: 'r', message: { id: 'm', model: 'claude-opus-4-6', usage: { input_tokens: 100, output_tokens: output } } });
