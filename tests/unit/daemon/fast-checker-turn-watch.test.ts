@@ -296,6 +296,16 @@ describe('FastChecker turn watch', () => {
     });
   });
 
+  it('an agent whose config cannot be read does not break the poll: it just does not opt in', () => {
+    const c = checker('worker', 'codex-app-server');
+    (c as any).agent.getConfig = undefined;
+    writeFileSync(join(paths.stateDir, 'context_status.json'),
+      JSON.stringify({ transcript_path: null, written_at: new Date(T0 + 60_000).toISOString() }));
+    injectAt(c, T0);
+    expect(() => c.checkTurnWatch(T0 + TURN_STALL_MS)).not.toThrow();
+    expect(watchFile()).toMatchObject({ state: 'unknown' });
+  });
+
   it('nothing injected means nothing to watch', () => {
     const c = checker();
     c.checkTurnWatch(T0 + TURN_STALL_MS * 10);

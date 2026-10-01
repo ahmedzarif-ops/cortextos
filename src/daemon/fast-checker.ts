@@ -1238,8 +1238,12 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
    */
   checkTurnWatch(now: number = Date.now()): void {
     if (this.turnPendingSince === 0) return;
+    // Runs inside every poll cycle, so reading the runtime must never throw:
+    // an unreadable config simply does not opt in.
+    let runtime: string | undefined;
+    try { runtime = this.agent.getConfig()?.runtime; } catch { runtime = undefined; }
     const evidence = readTurnEvidence(this.paths.stateDir, {
-      statusWriteIsActivity: this.agent.getConfig()?.runtime === 'codex-app-server',
+      statusWriteIsActivity: runtime === 'codex-app-server',
     });
     const state = evaluateTurnWatch(this.turnPendingSince, evidence, now, TURN_STALL_MS);
 
