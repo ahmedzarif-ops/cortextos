@@ -8,15 +8,27 @@
  * measures whether the model is taking turns, so the state lasts until a human
  * happens to notice it.
  *
- * The turn signal is activity AFTER the injection, from either of:
- *   - the session transcript, whose path the statusLine hook records in
- *     context_status.json (plus the newest subagent transcript beside it, so a
- *     long foreground subagent does not read as a stall);
- *   - last_idle.flag, written when a turn ends (Stop hook; codex app-server).
+ * The turn signal is activity AFTER the injection:
+ *   - Claude seats: the session transcript, whose path the statusLine hook
+ *     records in context_status.json (plus the newest subagent transcript
+ *     beside it, so a long foreground subagent does not read as a stall).
+ *   - codex app-server seats: the context_status.json `written_at`. That runtime
+ *     writes it only on a token-usage event, i.e. after a model response, so it
+ *     tracks activity DURING a turn. The caller opts in by POSITIVE runtime
+ *     match, never by the absence of a transcript path: the Claude statusLine
+ *     refreshes the same field on a timer, and the hermes reporter moves it when
+ *     the inbound message is persisted, before any model call. Either would
+ *     read as a turn while the model is hung, a false OK in the very case this
+ *     exists for. Those seats fall to UNKNOWN unless they have a transcript.
+ *   - last_idle.flag (written when a turn ENDS) is evidence, but it never makes
+ *     a seat count as watched. A runtime that never writes it leaves a frozen
+ *     file behind, and counting that file as a live signal turned every
+ *     injection into a false STALLED. Likewise a runtime that writes it only at
+ *     turn end would read STALLED for any turn longer than the threshold.
  *
- * A seat with NEITHER source is reported UNKNOWN, never OK: a detector that has
- * nothing to read must say so, or it is indistinguishable from one that read
- * a healthy seat.
+ * A seat with no qualifying source is reported UNKNOWN, never OK: a detector
+ * that has nothing to read must say so, or it is indistinguishable from one
+ * that read a healthy seat.
  *
  * This module only measures. It never restarts anything.
  */
@@ -36,7 +48,7 @@ export type TurnWatchState = 'idle' | 'waiting' | 'turned' | 'stalled' | 'unknow
 export interface TurnEvidence {
   /** Latest turn activity seen, epoch ms, or null when no source produced a reading. */
   at: number | null;
-  /** Sources that produced a reading. Empty means there is nothing to measure. */
+  /** Activity sources that produced a reading. Empty means the seat is not watched. */
   sources: string[];
 }
 
@@ -58,21 +70,32 @@ function newestJsonlMtime(dir: string): number | null {
   return newest;
 }
 
+export interface TurnEvidenceOptions {
+  /** True only for runtimes whose status writes are proven to follow model activity (codex app-server). */
+  statusWriteIsActivity?: boolean;
+}
+
 /** Read every available turn signal for a seat. Never throws. */
-export function readTurnEvidence(stateDir: string): TurnEvidence {
+export function readTurnEvidence(stateDir: string, options: TurnEvidenceOptions = {}): TurnEvidence {
   const sources: string[] = [];
   let at: number | null = null;
+  const bump = (ms: number) => {
+    if (at === null || ms > at) at = ms;
+  };
   const seen = (source: string, ms: number) => {
     sources.push(source);
-    if (at === null || ms > at) at = ms;
+    bump(ms);
   };
 
   let transcript: string | null = null;
+  let statusWrittenAt: number | null = null;
   try {
     const status = JSON.parse(readFileSync(join(stateDir, 'context_status.json'), 'utf-8'));
     if (typeof status.transcript_path === 'string' && status.transcript_path) {
       transcript = status.transcript_path;
     }
+    const written = typeof status.written_at === 'string' ? Date.parse(status.written_at) : NaN;
+    if (Number.isFinite(written)) statusWrittenAt = written;
   } catch { /* no status file, or unparseable */ }
 
   if (transcript) {
@@ -82,11 +105,14 @@ export function readTurnEvidence(stateDir: string): TurnEvidence {
     const subagents = join(dirname(transcript), basename(transcript, '.jsonl'), 'subagents');
     const sub = newestJsonlMtime(subagents);
     if (sub !== null) seen('subagent_transcript', sub);
+  } else if (options.statusWriteIsActivity && statusWrittenAt !== null) {
+    seen('status_write', statusWrittenAt);
   }
 
   try {
     const secs = parseInt(readFileSync(join(stateDir, 'last_idle.flag'), 'utf-8').trim(), 10);
-    if (Number.isFinite(secs)) seen('idle_flag', secs * 1000);
+    // Evidence only: see the header for why it never qualifies a seat as watched.
+    if (Number.isFinite(secs)) bump(secs * 1000);
   } catch { /* no idle flag */ }
 
   return { at, sources };
