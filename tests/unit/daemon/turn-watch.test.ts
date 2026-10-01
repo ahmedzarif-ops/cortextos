@@ -88,21 +88,30 @@ describe('readTurnEvidence', () => {
     expect(evaluateTurnWatch(T0, evidence, T0 + TURN_STALL_MS)).toBe('unknown');
   });
 
-  it('without a transcript, the status write time is activity (codex, hermes write it only when the session moves)', () => {
+  it('for a runtime that opts in (codex), the status write time is activity', () => {
     writeStatus(null, T0 + 45_000);
-    expect(readTurnEvidence(stateDir)).toEqual({ at: T0 + 45_000, sources: ['status_write'] });
+    expect(readTurnEvidence(stateDir, { statusWriteIsActivity: true })).toEqual({ at: T0 + 45_000, sources: ['status_write'] });
   });
 
-  it('with a transcript, the status write time is IGNORED (the statusLine refreshes it on a timer)', () => {
+  it('THE FALSE-OK ARM: without the opt-in, a status write is NOT activity, even with no transcript', () => {
+    // Hermes moves it when the inbound message is persisted, before any model call; a
+    // Claude seat whose hook got no transcript_path refreshes it on a timer. Keying on the
+    // ABSENCE of a transcript would read either as a turn while the model is hung.
+    writeStatus(null, T0 + 45_000);
+    expect(readTurnEvidence(stateDir)).toEqual({ at: null, sources: [] });
+    expect(readTurnEvidence(stateDir, { statusWriteIsActivity: false })).toEqual({ at: null, sources: [] });
+  });
+
+  it('with a transcript, the status write time is IGNORED even with the opt-in', () => {
     const transcript = join(dir, 'session.jsonl');
     touch(transcript, T0);
     writeStatus(transcript, T0 + 600_000);
-    expect(readTurnEvidence(stateDir)).toEqual({ at: T0, sources: ['transcript'] });
+    expect(readTurnEvidence(stateDir, { statusWriteIsActivity: true })).toEqual({ at: T0, sources: ['transcript'] });
   });
 
   it('an unparseable written_at is not a source', () => {
     writeFileSync(join(stateDir, 'context_status.json'), JSON.stringify({ written_at: 'not a date' }));
-    expect(readTurnEvidence(stateDir)).toEqual({ at: null, sources: [] });
+    expect(readTurnEvidence(stateDir, { statusWriteIsActivity: true })).toEqual({ at: null, sources: [] });
   });
 
   it('an unparseable idle flag is not a source', () => {

@@ -12,11 +12,14 @@
  *   - Claude seats: the session transcript, whose path the statusLine hook
  *     records in context_status.json (plus the newest subagent transcript
  *     beside it, so a long foreground subagent does not read as a stall).
- *   - Seats with no transcript (codex, hermes): the context_status.json
- *     `written_at`. Those runtimes write it only when the session moves
- *     (codex on each token-usage event, hermes when the session grows), so it
- *     tracks activity DURING a turn. It is NOT used for Claude seats: the
- *     statusLine refreshes it on a timer whether or not anything happens.
+ *   - codex app-server seats: the context_status.json `written_at`. That runtime
+ *     writes it only on a token-usage event, i.e. after a model response, so it
+ *     tracks activity DURING a turn. The caller opts in by POSITIVE runtime
+ *     match, never by the absence of a transcript path: the Claude statusLine
+ *     refreshes the same field on a timer, and the hermes reporter moves it when
+ *     the inbound message is persisted, before any model call. Either would
+ *     read as a turn while the model is hung, a false OK in the very case this
+ *     exists for. Those seats fall to UNKNOWN unless they have a transcript.
  *   - last_idle.flag (written when a turn ENDS) is evidence, but it never makes
  *     a seat count as watched. A runtime that never writes it leaves a frozen
  *     file behind, and counting that file as a live signal turned every
@@ -67,8 +70,13 @@ function newestJsonlMtime(dir: string): number | null {
   return newest;
 }
 
+export interface TurnEvidenceOptions {
+  /** True only for runtimes whose status writes are proven to follow model activity (codex app-server). */
+  statusWriteIsActivity?: boolean;
+}
+
 /** Read every available turn signal for a seat. Never throws. */
-export function readTurnEvidence(stateDir: string): TurnEvidence {
+export function readTurnEvidence(stateDir: string, options: TurnEvidenceOptions = {}): TurnEvidence {
   const sources: string[] = [];
   let at: number | null = null;
   const bump = (ms: number) => {
@@ -97,7 +105,7 @@ export function readTurnEvidence(stateDir: string): TurnEvidence {
     const subagents = join(dirname(transcript), basename(transcript, '.jsonl'), 'subagents');
     const sub = newestJsonlMtime(subagents);
     if (sub !== null) seen('subagent_transcript', sub);
-  } else if (statusWrittenAt !== null) {
+  } else if (options.statusWriteIsActivity && statusWrittenAt !== null) {
     seen('status_write', statusWrittenAt);
   }
 

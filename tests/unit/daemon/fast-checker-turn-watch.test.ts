@@ -57,12 +57,12 @@ describe('FastChecker turn watch', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  function checker(name = 'worker') {
+  function checker(name = 'worker', runtime?: string) {
     const agent = {
       name,
       hasEverBootstrapped: () => true,
       getAgentDir: () => join(root, 'orgs', ORG, 'agents', name),
-      getConfig: () => ({}),
+      getConfig: () => (runtime ? { runtime } : {}),
     } as any;
     return new FastChecker(agent, paths, root, { log: (m: string) => logs.push(m) });
   }
@@ -221,7 +221,7 @@ describe('FastChecker turn watch', () => {
     });
   });
 
-  describe('seats without a transcript (codex, hermes)', () => {
+  describe('codex app-server seats (status writes follow model responses)', () => {
     function statusWrittenAt(ms: number) {
       writeFileSync(join(paths.stateDir, 'context_status.json'),
         JSON.stringify({ transcript_path: null, written_at: new Date(ms).toISOString() }));
@@ -231,7 +231,7 @@ describe('FastChecker turn watch', () => {
     }
 
     it('a frozen idle flag plus a status write after the injection is a turn, not a stall', () => {
-      const c = checker();
+      const c = checker('worker', 'codex-app-server');
       frozenIdleFlag();
       statusWrittenAt(T0 + 20 * 60_000);
       injectAt(c, T0);
@@ -242,7 +242,7 @@ describe('FastChecker turn watch', () => {
     });
 
     it('a long turn still writing status is not a stall, even with no idle flag since', () => {
-      const c = checker();
+      const c = checker('worker', 'codex-app-server');
       frozenIdleFlag();
       statusWrittenAt(T0 + 11 * 60_000);
       injectAt(c, T0);
@@ -251,7 +251,7 @@ describe('FastChecker turn watch', () => {
     });
 
     it('a frozen idle flag and NO status write after the injection is a real stall', () => {
-      const c = checker();
+      const c = checker('worker', 'codex-app-server');
       frozenIdleFlag();
       statusWrittenAt(T0 - 60_000);
       injectAt(c, T0);
@@ -261,11 +261,37 @@ describe('FastChecker turn watch', () => {
     });
 
     it('a frozen idle flag as the ONLY file is unknown, never stalled', () => {
-      const c = checker();
+      const c = checker('worker', 'codex-app-server');
       frozenIdleFlag();
       injectAt(c, T0);
       c.checkTurnWatch(T0 + TURN_STALL_MS);
       expect(heartbeats()).toEqual([]);
+      expect(watchFile()).toMatchObject({ state: 'unknown', sources: [] });
+    });
+  });
+
+  describe('seats whose status writes are NOT proof of a turn', () => {
+    function statusWrittenAt(ms: number) {
+      writeFileSync(join(paths.stateDir, 'context_status.json'),
+        JSON.stringify({ transcript_path: null, written_at: new Date(ms).toISOString() }));
+    }
+
+    it('THE FALSE-OK ARM, hermes: a status write after the injection (inbound row persisted) is unknown, not a turn', () => {
+      const c = checker('worker', 'hermes');
+      writeFileSync(join(paths.stateDir, 'last_idle.flag'), String(Math.floor((T0 - 9 * 86_400_000) / 1000)));
+      statusWrittenAt(T0 + 20_000);
+      injectAt(c, T0);
+      c.checkTurnWatch(T0 + TURN_STALL_MS);
+      expect((c as any).turnPendingSince).toBe(T0);
+      expect(watchFile()).toMatchObject({ state: 'unknown', sources: [] });
+      expect(heartbeats()).toEqual([]);
+    });
+
+    it('a Claude seat whose hook got no transcript_path is unknown, not "turned" by a timer refresh', () => {
+      const c = checker('worker', 'claude-code');
+      statusWrittenAt(T0 + TURN_STALL_MS - 1_000);
+      injectAt(c, T0);
+      c.checkTurnWatch(T0 + TURN_STALL_MS);
       expect(watchFile()).toMatchObject({ state: 'unknown', sources: [] });
     });
   });

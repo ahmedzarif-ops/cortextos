@@ -1238,7 +1238,9 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
    */
   checkTurnWatch(now: number = Date.now()): void {
     if (this.turnPendingSince === 0) return;
-    const evidence = readTurnEvidence(this.paths.stateDir);
+    const evidence = readTurnEvidence(this.paths.stateDir, {
+      statusWriteIsActivity: this.agent.getConfig()?.runtime === 'codex-app-server',
+    });
     const state = evaluateTurnWatch(this.turnPendingSince, evidence, now, TURN_STALL_MS);
 
     if (state === 'turned') {
