@@ -46,6 +46,37 @@ describe('statusLine usage feed', () => {
     expect(readdirSync(usageDir())).toEqual(['statusline.json']);
   });
 
+  it('converts epoch resets_at (seconds or ms, as Claude Code sends them) to ISO', () => {
+    const sec = Date.parse('2026-01-01T15:00:00Z') / 1000;
+    expect(recordStatuslineUsage(root, {
+      five_hour: { used_percentage: 1, resets_at: sec },
+      seven_day: { used_percentage: 1, resets_at: Date.parse('2026-01-04T21:00:00Z') },
+    }, NOW)).toBe(true);
+    expect(statusline()).toMatchObject({
+      five_hour_resets_at: '2026-01-01T15:00:00.000Z',
+      seven_day_resets_at: '2026-01-04T21:00:00.000Z',
+    });
+  });
+
+  it('a missing or junk resets_at is null, never a 1970 date', () => {
+    expect(recordStatuslineUsage(root, {
+      five_hour: { used_percentage: 1, resets_at: 0 },
+      seven_day: { used_percentage: 1, resets_at: Number.NaN },
+    }, NOW)).toBe(true);
+    expect(statusline()).toMatchObject({ five_hour_resets_at: null, seven_day_resets_at: null });
+  });
+
+  it('an out-of-range resets_at loses only the reset time, never the utilization', () => {
+    expect(recordStatuslineUsage(root, {
+      five_hour: { used_percentage: 42, resets_at: 1e20 },
+      seven_day: { used_percentage: 7, resets_at: 1e12 },
+    }, NOW)).toBe(true);
+    expect(statusline()).toMatchObject({
+      five_hour_utilization: 0.42, five_hour_resets_at: null,
+      seven_day_utilization: 0.07, seven_day_resets_at: new Date(1e12).toISOString(),
+    });
+  });
+
   it('throttles: a second reading inside the interval is skipped, after it is written', () => {
     expect(recordStatuslineUsage(root, RL, NOW)).toBe(true);
     expect(recordStatuslineUsage(root, { five_hour: { used_percentage: 50 } }, NOW + STATUSLINE_USAGE_MIN_INTERVAL_MS - 1)).toBe(false);
