@@ -41,6 +41,7 @@ vi.mock('node-pty', () => ({
 }));
 
 const { OpencodePTY, opencodeSessionExists } = await import('../../../src/pty/opencode-pty.js');
+const { withAgeLine } = await import('../../../src/daemon/message-age.js');
 
 const mockEnv = {
   instanceId: 'test',
@@ -636,5 +637,19 @@ describe('opencodeSessionExists', () => {
     fsMocks.existsSync.mockImplementation((path: string) => path === expected);
 
     expect(opencodeSessionExists('/tmp/ctx', 'opencode-agent')).toBe(true);
+  });
+});
+
+describe('OpencodePTY aged Telegram delivery', () => {
+  it('an AGED message (age line under the header) is still recognised and gets the send-telegram directive', () => {
+    const pty = new OpencodePTY(mockEnv, {});
+    const aged = withAgeLine(`=== TELEGRAM from James (chat_id:7940429114) ===
+hello from two days ago
+Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+`, '[AGE: 2d 0h] ');
+    const out = (pty as unknown as { prepareInjectedContent(c: string): string }).prepareInjectedContent(aged);
+    expect(out).not.toBe(aged);
+    expect(out).toContain('send-telegram 7940429114');
+    expect(out).toContain('[AGE: 2d 0h]');
   });
 });
