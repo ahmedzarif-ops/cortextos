@@ -42,6 +42,12 @@ describe('hook-context-status', () => {
     expect(out).toMatchObject({ used_percentage: 42, session_id: 's-1', transcript_path: '/somewhere/s-1.jsonl' });
   });
 
+  it('feeds the usage meter from rate_limits in the same input', () => {
+    run({ session_id: 's-3', context_window: { used_percentage: 9 }, rate_limits: { five_hour: { used_percentage: 12 }, seven_day: { used_percentage: 70 } } });
+    const usage = JSON.parse(readFileSync(join(root, 'state', 'usage', 'statusline.json'), 'utf8'));
+    expect(usage).toMatchObject({ account: 'statusline', five_hour_utilization: 0.12, seven_day_utilization: 0.7 });
+  });
+
   it('writes null when the runtime sends no transcript path', () => {
     const out = run({ session_id: 's-2', context_window: { used_percentage: 7 } });
     expect(out.transcript_path).toBeNull();

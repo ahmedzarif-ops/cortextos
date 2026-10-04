@@ -49,6 +49,10 @@ export interface UsageSnapshot {
   five_hour_utilization: number;
   seven_day_utilization: number;
   fetched_at: string;
+  /** Present when the reading came from Claude Code's statusLine input. */
+  five_hour_resets_at?: string | null;
+  seven_day_resets_at?: string | null;
+  model_scoped?: unknown;
 }
 
 export interface UsageCache {
@@ -177,7 +181,8 @@ export async function checkUsageApi(
   // Check cache first (unless force)
   if (!opts.force) {
     const cache = loadCache(ctxRoot);
-    if (cache && cache.expires_at > Date.now()) {
+    // A cached reading answers only the account it was taken for.
+    if (cache && cache.expires_at > Date.now() && (!opts.account || cache.snapshot.account === opts.account)) {
       return { ...cache.snapshot, cached: true };
     }
   }
@@ -201,7 +206,12 @@ export async function checkUsageApi(
     } else {
       accessToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
       accountName = 'env';
-      if (!accessToken) throw new Error('No OAuth token available (no accounts.json and CLAUDE_CODE_OAUTH_TOKEN not set)');
+      if (!accessToken) {
+        // No API credential: answer from the statusLine feed when it is fresh.
+        const fromStatusline = readStatuslineUsage(ctxRoot);
+        if (fromStatusline) return { ...fromStatusline, cached: true };
+        throw new Error('No OAuth token available (no accounts.json and CLAUDE_CODE_OAUTH_TOKEN not set)');
+      }
     }
   }
 
@@ -213,6 +223,9 @@ export async function checkUsageApi(
   });
 
   if (!response.ok) {
+    // e.g. 429: for an unnamed request, a fresh statusLine reading is a valid answer.
+    const fromStatusline = opts.account ? null : readStatuslineUsage(ctxRoot);
+    if (fromStatusline) return { ...fromStatusline, cached: true };
     throw new Error(`Usage API returned ${response.status}: ${await response.text()}`);
   }
 
@@ -264,6 +277,80 @@ export async function checkUsageApi(
   }
 
   return { ...snapshot, cached: false };
+}
+
+/** Throttle for statusLine-fed readings: the hook runs every few seconds on every seat. */
+export const STATUSLINE_USAGE_MIN_INTERVAL_MS = 60_000;
+/** A statusLine reading older than this is not used as a fallback answer. */
+export const STATUSLINE_USAGE_MAX_AGE_MS = 10 * 60_000;
+
+/**
+ * The statusLine feed has its OWN file. cache.json / latest.json / the daily log
+ * belong to the API path and to the metrics collector (different schemas);
+ * sharing them would let writers overwrite each other and mix log formats.
+ */
+export function statuslineUsagePath(ctxRoot: string): string {
+  return join(usageDir(ctxRoot), 'statusline.json');
+}
+
+/**
+ * Record a usage reading from Claude Code's statusLine input (`rate_limits`).
+ *
+ * WHY: the usage API path needs an OAuth account store or token and is rate
+ * limited; when either is missing the meter silently stops. Claude Code already
+ * hands every seat these numbers in its statusLine input. `used_percentage` is a
+ * percentage (0..100) and is always divided by 100 -- normalize()'s ">1 means
+ * percent" guess would read 0.5% as 50%.
+ *
+ * Many seats call this concurrently. Each write is a whole-file atomic rename of
+ * the same snapshot shape, so the last writer wins and no reader sees a torn or
+ * duplicated record; nothing is appended. Returns true when written. Never throws.
+ */
+export function recordStatuslineUsage(ctxRoot: string, rateLimits: unknown, now: number = Date.now()): boolean {
+  try {
+    if (!rateLimits || typeof rateLimits !== 'object') return false;
+    const rl = rateLimits as Record<string, any>;
+    const pctOf = (w: any): number | null =>
+      w && typeof w.used_percentage === 'number' && Number.isFinite(w.used_percentage) ? w.used_percentage / 100 : null;
+    const fiveHour = pctOf(rl.five_hour);
+    const sevenDay = pctOf(rl.seven_day);
+    if (fiveHour === null && sevenDay === null) return false;
+
+    const path = statuslineUsagePath(ctxRoot);
+    try {
+      const prev = JSON.parse(readFileSync(path, 'utf-8')) as UsageSnapshot;
+      const age = now - Date.parse(prev.fetched_at);
+      if (age >= 0 && age < STATUSLINE_USAGE_MIN_INTERVAL_MS) return false;
+    } catch { /* no previous reading */ }
+
+    const resets = (w: any): string | null => (w && typeof w.resets_at === 'string' ? w.resets_at : null);
+    const snapshot: UsageSnapshot = {
+      account: 'statusline',
+      five_hour_utilization: fiveHour ?? 0,
+      seven_day_utilization: sevenDay ?? 0,
+      fetched_at: new Date(now).toISOString(),
+      five_hour_resets_at: resets(rl.five_hour),
+      seven_day_resets_at: resets(rl.seven_day),
+      ...(rl.model_scoped !== undefined ? { model_scoped: rl.model_scoped } : {}),
+    };
+    ensureDir(usageDir(ctxRoot));
+    atomicWriteSync(path, JSON.stringify(snapshot, null, 2));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The latest statusLine reading if it is fresh enough to answer with, else null. */
+export function readStatuslineUsage(ctxRoot: string, now: number = Date.now()): UsageSnapshot | null {
+  try {
+    const snap = JSON.parse(readFileSync(statuslineUsagePath(ctxRoot), 'utf-8')) as UsageSnapshot;
+    const age = now - Date.parse(snap.fetched_at);
+    if (!(age >= 0 && age <= STATUSLINE_USAGE_MAX_AGE_MS)) return null;
+    return snap;
+  } catch {
+    return null;
+  }
 }
 
 // --- refresh-oauth-token ---
