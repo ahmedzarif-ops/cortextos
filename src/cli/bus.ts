@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { formatDigest } from '../daemon/inbox-digest.js';
 import { spawnSync, execFileSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
@@ -3002,6 +3003,19 @@ busCommand
   .action(() => runHook('hook-loop-detector'));
 
 // --- OAuth token rotation commands ---
+
+busCommand
+  .command('digest')
+  .description("Print an agent's inbox digest for a day: routine FYI/ack/status messages batched instead of delivered live")
+  .option('--date <YYYY-MM-DD>', 'Day to print (default: today, UTC)')
+  .option('--agent <name>', 'Agent whose digest to print (default: this agent)')
+  .action((opts: { date?: string; agent?: string }) => {
+    const env = resolveEnv();
+    const agent = opts.agent || env.agentName;
+    const day = opts.date || new Date().toISOString().slice(0, 10);
+    const out = formatDigest(join(env.ctxRoot, 'state', agent), day);
+    console.log(out || `No digest entries for ${agent} on ${day}.`);
+  });
 
 busCommand
   .command('check-usage-api')

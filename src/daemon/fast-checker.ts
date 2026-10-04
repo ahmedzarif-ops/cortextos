@@ -18,6 +18,7 @@ import { ensureDir } from '../utils/atomic.js';
 import { readReroutedAsk, isAnswerToReroutedAsk, clearReroutedAsk } from '../hooks/one-voice.js';
 import { agentHoldsContextHandoffLease, releaseContextHandoffLease, requestContextHandoffLease } from './context-handoff-lease.js';
 import { evaluateTurnWatch, readTurnEvidence, TURN_STALL_MS } from './turn-watch.js';
+import { appendDigest, isDigestible, resolveDigestMode } from './inbox-digest.js';
 import { ageLabel, ageLabelFromIso, withAgeLine } from './message-age.js';
 
 type LogFn = (msg: string) => void;
@@ -325,9 +326,23 @@ export class FastChecker {
     const inboxMessages = checkInbox(this.paths);
     const pendingAsk = inboxMessages.length > 0 ? readReroutedAsk(this.paths.stateDir) : null;
     let answeredReroutedAsk = false;
+    // Digest applies only to the orchestrator: routine FYI traffic is read in a
+    // batch instead of costing a full turn each (see inbox-digest.ts).
+    let digestMode: 'off' | 'shadow' | 'on' = 'off';
+    if (inboxMessages.length > 0 && this.resolveOrchestratorName() === this.agent.name) {
+      try { digestMode = resolveDigestMode(this.agent.getConfig()?.inbox_digest); } catch { digestMode = 'shadow'; }
+    }
     for (const msg of inboxMessages) {
       const isAnswer = isAnswerToReroutedAsk(msg, pendingAsk);
       if (isAnswer) answeredReroutedAsk = true;
+      if (digestMode !== 'off' && !isAnswer && isDigestible(msg)) {
+        const recorded = appendDigest(this.paths.stateDir, msg, digestMode);
+        // Divert only what was actually recorded; a failed write is delivered live.
+        if (digestMode === 'on' && recorded) {
+          ackInbox(this.paths, msg.id);
+          continue;
+        }
+      }
       messageBlock += this.formatInboxMessage(msg, isAnswer);
       ackIds.push(msg.id);
     }
