@@ -1713,3 +1713,81 @@ describe('CodexAppServerPTY buildMediaPayload — dynamic fence parsing', () => 
     expect(payload).toContain('caption: hello');
   });
 });
+
+describe('CodexAppServerPTY loop brake', () => {
+  type Internals = {
+    handleRpcMessage(message: unknown): void;
+    _rpc: unknown;
+    _threadId: string | null;
+    _activeTurnId: string | null;
+  };
+  const startCommand = (pty: unknown, command: string, turnId = 'turn-1') =>
+    (pty as Internals).handleRpcMessage({
+      method: 'item/started',
+      params: { item: { type: 'commandExecution', id: 'i', command, commandActions: [], cwd: '/x', status: 'inProgress' }, threadId: 'thread-1', turnId, startedAtMs: 1 },
+    });
+  const wire = (pty: unknown) => {
+    const internals = pty as Internals;
+    internals._rpc = { request: requestMock };
+    internals._threadId = 'thread-1';
+    internals._activeTurnId = 'turn-1';
+    requestMock.mockResolvedValue({ result: {} });
+  };
+
+  it('shadow (default) logs the event but never steers or interrupts', () => {
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    wire(pty);
+    for (let i = 0; i < 5; i++) startCommand(pty, 'cortextos bus check-inbox');
+    expect(requestMock).not.toHaveBeenCalled();
+    expect(logEventMock).toHaveBeenCalledWith(
+      expect.anything(), 'codex-app-agent', 'acme', 'action', 'codex_loop_brake', 'warning',
+      expect.objectContaining({ mode: 'shadow', action: 'steer', kind: 'repeat', count: 5 }),
+    );
+  });
+
+  it('never logs the command text', () => {
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    wire(pty);
+    for (let i = 0; i < 5; i++) startCommand(pty, 'curl -H "Authorization: Bearer SECRET123" x');
+    expect(JSON.stringify(logEventMock.mock.calls)).not.toContain('SECRET123');
+  });
+
+  it('on: steers the active turn with the stop note, then interrupts if the loop continues', () => {
+    const pty = new CodexAppServerPTY(mockEnv, { codex_loop_brake: 'on' });
+    wire(pty);
+    for (let i = 0; i < 5; i++) startCommand(pty, 'git status');
+    expect(requestMock).toHaveBeenCalledWith('turn/steer', expect.objectContaining({
+      threadId: 'thread-1',
+      expectedTurnId: 'turn-1',
+      input: [expect.objectContaining({ type: 'text', text: expect.stringContaining('[LOOP BRAKE]') })],
+    }));
+    for (let i = 0; i < 3; i++) startCommand(pty, 'git status');
+    expect(requestMock).toHaveBeenCalledWith('turn/interrupt', { threadId: 'thread-1', turnId: 'turn-1' });
+  });
+
+  it('off: does nothing', () => {
+    const pty = new CodexAppServerPTY(mockEnv, { codex_loop_brake: 'off' });
+    wire(pty);
+    for (let i = 0; i < 8; i++) startCommand(pty, 'git status');
+    expect(requestMock).not.toHaveBeenCalled();
+    expect(logEventMock).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.anything(), 'action', 'codex_loop_brake', expect.anything(), expect.anything());
+  });
+
+  it('turn/started resets the repeat run', () => {
+    const pty = new CodexAppServerPTY(mockEnv, { codex_loop_brake: 'on' });
+    wire(pty);
+    for (let i = 0; i < 4; i++) startCommand(pty, 'cortextos bus check-inbox');
+    (pty as Internals).handleRpcMessage({ method: 'turn/started', params: { turn: { id: 'turn-2' } } });
+    startCommand(pty, 'cortextos bus check-inbox', 'turn-2');
+    expect(requestMock).not.toHaveBeenCalled();
+  });
+
+  it('ignores non-command items', () => {
+    const pty = new CodexAppServerPTY(mockEnv, { codex_loop_brake: 'on' });
+    wire(pty);
+    for (let i = 0; i < 6; i++) {
+      (pty as Internals).handleRpcMessage({ method: 'item/started', params: { item: { type: 'mcpToolCall', command: 'same', text: 'same' }, turnId: 'turn-1' } });
+    }
+    expect(requestMock).not.toHaveBeenCalled();
+  });
+});

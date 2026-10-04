@@ -11,6 +11,7 @@ import { readLocalOverrides } from '../utils/local-overrides.js';
 import { logEvent } from '../bus/event.js';
 import { WsUnixJsonRpcClient, type JsonRpcResponse } from '../utils/ws-unix-client.js';
 import { resolveOrchestratorAgent } from '../utils/orchestrator-env.js';
+import { LoopBrake, loopBrakeNote, resolveLoopBrakeMode, type LoopBrakeVerdict } from './codex-loop-brake.js';
 
 interface IPty {
   pid: number;
@@ -132,6 +133,7 @@ export class CodexAppServerPTY {
   private _outputBuffer: OutputBuffer;
   private _env: CtxEnv;
   private _config: AgentConfig;
+  private _loopBrake = new LoopBrake();
   private _stateDir: string;
   private _cwd: string;
   private _socketPath: string;
@@ -864,6 +866,7 @@ export class CodexAppServerPTY {
         if (isRecord(params.turn) && typeof params.turn.id === 'string') {
           this._activeTurnId = params.turn.id;
         }
+        this._loopBrake.startTurn();
         this.maybeFireTyping();
         this._outputBuffer.push('[codex-app-server] turn started\n');
         break;
@@ -911,11 +914,59 @@ export class CodexAppServerPTY {
       case 'mcpServer/startupStatus/updated':
       case 'account/rateLimits/updated':
       case 'skills/changed':
+        this._outputBuffer.push(`[codex-app-server:event] ${method}\n`);
+        break;
       case 'item/started':
+        this.checkLoopBrake(params);
         this._outputBuffer.push(`[codex-app-server:event] ${method}\n`);
         break;
       default:
         this._outputBuffer.push(`[codex-app-server:event] ${method}\n`);
+    }
+  }
+
+  /**
+   * Feed each command the model starts into the loop brake. Shadow mode (the
+   * default) only records what the brake would have done; "on" steers the
+   * turn with a stop note, then interrupts it if the loop keeps going.
+   */
+  private checkLoopBrake(params: Record<string, unknown>): void {
+    const mode = resolveLoopBrakeMode(this._config.codex_loop_brake);
+    if (mode === 'off') return;
+    const item = params.item;
+    if (!isRecord(item) || item.type !== 'commandExecution' || typeof item.command !== 'string') return;
+    const verdict = this._loopBrake.observe(item.command, Date.now());
+    if (verdict.action === 'none') return;
+
+    this._outputBuffer.push(`[codex-app-server] loop brake ${mode}: ${verdict.action} (${verdict.kind} x${verdict.count})\n`);
+    this.emitLoopBrakeEvent(mode, verdict);
+    if (mode !== 'on') return;
+
+    if (verdict.action === 'steer') {
+      this.steerActiveTurn([{ type: 'text', text: loopBrakeNote(verdict.kind!, verdict.count!), text_elements: [] }])
+        .catch((err) => this._outputBuffer.push(`[codex-app-server] loop brake steer failed: ${err}\n`));
+      return;
+    }
+    const turnId = typeof params.turnId === 'string' ? params.turnId : this._activeTurnId;
+    if (!this._threadId || !turnId) return;
+    this.request('turn/interrupt', { threadId: this._threadId, turnId })
+      .catch((err) => this._outputBuffer.push(`[codex-app-server] loop brake interrupt failed: ${err}\n`));
+  }
+
+  private emitLoopBrakeEvent(mode: string, verdict: LoopBrakeVerdict): void {
+    try {
+      const paths = resolvePaths(this._env.agentName, this._env.instanceId, this._env.org, this._env.ctxRoot);
+      // The command text is not logged: it can carry arguments we do not want in events.
+      logEvent(paths, this._env.agentName, this._env.org, 'action', 'codex_loop_brake', 'warning', {
+        runtime: 'codex-app-server',
+        mode,
+        action: verdict.action,
+        kind: verdict.kind,
+        count: verdict.count,
+        thread_id: this._threadId,
+      });
+    } catch {
+      // The outputBuffer line above is the fallback record.
     }
   }
 
