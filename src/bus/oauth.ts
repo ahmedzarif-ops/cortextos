@@ -49,6 +49,10 @@ export interface UsageSnapshot {
   five_hour_utilization: number;
   seven_day_utilization: number;
   fetched_at: string;
+  /** Present when the reading came from Claude Code's statusLine input. */
+  five_hour_resets_at?: string | null;
+  seven_day_resets_at?: string | null;
+  model_scoped?: unknown;
 }
 
 export interface UsageCache {
@@ -264,6 +268,53 @@ export async function checkUsageApi(
   }
 
   return { ...snapshot, cached: false };
+}
+
+/** Throttle for statusLine-fed readings: the hook runs every few seconds on every seat. */
+export const STATUSLINE_USAGE_MIN_INTERVAL_MS = 60_000;
+
+/**
+ * Record a usage reading from Claude Code's statusLine input (`rate_limits`).
+ *
+ * WHY: the usage API path needs an OAuth account store or token and is rate
+ * limited; when either is missing the meter silently stops. Claude Code already
+ * hands every seat these numbers in its statusLine input, so the meter is fed
+ * from there with no API call. `used_percentage` is a percentage (0..100) and
+ * is always divided by 100 -- normalize()'s ">1 means percent" guess would read
+ * 0.5% as 50%.
+ *
+ * Returns true when a reading was written. Never throws.
+ */
+export function recordStatuslineUsage(ctxRoot: string, rateLimits: unknown, now: number = Date.now()): boolean {
+  try {
+    if (!rateLimits || typeof rateLimits !== 'object') return false;
+    const rl = rateLimits as Record<string, any>;
+    const pctOf = (w: any): number | null =>
+      w && typeof w.used_percentage === 'number' && Number.isFinite(w.used_percentage) ? w.used_percentage / 100 : null;
+    const fiveHour = pctOf(rl.five_hour);
+    const sevenDay = pctOf(rl.seven_day);
+    if (fiveHour === null && sevenDay === null) return false;
+
+    try {
+      const prev = JSON.parse(readFileSync(usageLatestPath(ctxRoot), 'utf-8')) as UsageSnapshot;
+      const age = now - Date.parse(prev.fetched_at);
+      if (prev.account === 'statusline' && age >= 0 && age < STATUSLINE_USAGE_MIN_INTERVAL_MS) return false;
+    } catch { /* no previous reading */ }
+
+    const resets = (w: any): string | null => (w && typeof w.resets_at === 'string' ? w.resets_at : null);
+    saveCache(ctxRoot, {
+      account: 'statusline',
+      five_hour_utilization: fiveHour ?? 0,
+      seven_day_utilization: sevenDay ?? 0,
+      fetched_at: new Date(now).toISOString(),
+      five_hour_resets_at: resets(rl.five_hour),
+      seven_day_resets_at: resets(rl.seven_day),
+      ...(rl.model_scoped !== undefined ? { model_scoped: rl.model_scoped } : {}),
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // --- refresh-oauth-token ---

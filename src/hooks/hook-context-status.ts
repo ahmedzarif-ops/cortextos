@@ -17,6 +17,7 @@ import { statSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { atomicWriteSync } from '../utils/atomic.js';
+import { recordStatuslineUsage } from '../bus/oauth.js';
 
 interface StatusLineInput {
   context_window?: {
@@ -32,6 +33,7 @@ interface StatusLineInput {
   };
   session_id?: string;
   transcript_path?: string;
+  rate_limits?: unknown;
 }
 
 async function main(): Promise<void> {
@@ -62,6 +64,9 @@ async function main(): Promise<void> {
   try {
     data = JSON.parse(Buffer.concat(chunks).toString('utf-8'));
   } catch { return; }
+
+  // Feed the fleet usage meter from the same input (throttled, never throws).
+  recordStatuslineUsage(ctxRoot, data.rate_limits);
 
   const cw = data.context_window;
   if (!cw) return;
