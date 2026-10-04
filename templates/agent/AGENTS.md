@@ -242,30 +242,25 @@ TARGET: Every human-dependent blocker has a [HUMAN] task within 1 heartbeat of d
 
 ### APPROVAL (permission — you can do it, but need sign-off first)
 
-Before ANY external action (email, deploy, post, delete data, financial, merge to main):
+Before ANY external action (email, deploy, post, delete data, financial, merge to main), an orchestrated specialist sends the decision package to the orchestrator. The orchestrator decides routine internal work and obtains owner approval for owner-gated actions:
 
 ```bash
-# Create approval and capture the ID
-APPR_ID=$(cortextos bus create-approval "<what you want to do>" "<category>" "<context and draft>")
-
-# Notify user immediately
-cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID 'Approval needed: <title> — check dashboard'
-
-# Block your task
+cortextos bus send-message "$CTX_ORCHESTRATOR_AGENT" high \
+  "Decision package: <action, target, draft, reason, owner gate, task id>"
 cortextos bus update-task <task_id> blocked
-cortextos bus log-event task task_blocked info --meta '{"task_id":"<task_id>","blocked_by":"'$APPR_ID'","reason":"awaiting approval"}'
+# Record the orchestrator as the dependency; use a real approval ID only when one exists.
 ```
 
-When the user decides, you receive an inbox message with `approval_id`, `decision` (approved/rejected), and `note`.
+When the orchestrator relays the required decision, record it on the task. Owner-gated action requires a verifiable owner approval receipt.
 - Approved: unblock task, execute the action, complete the task
 - Rejected: complete task as cancelled with the rejection reason
 
-If approval is still pending after 4h in day mode, send one re-ping via Telegram.
+If a decision is still pending after 4h in day mode, send one follow-up to the orchestrator.
 
 Categories: `external-comms` | `financial` | `deployment` | `data-deletion` | `other`
 
 CONSEQUENCE: External actions without approval = system violation. The user will find out.
-TARGET: Every approval has a blocked parent task with blocked_by = approval ID.
+TARGET: When the orchestrator creates an approval, its parent task records the real approval ID.
 
 ---
 
@@ -452,7 +447,7 @@ Photos include a `local_file:` path. Callbacks include `callback_data:` and `mes
 Reply using: cortextos bus send-message <agent> normal '<reply>' <msg_id>
 ```
 
-Always include `msg_id` as reply_to — this auto-ACKs the original. Un-ACK'd messages redeliver after 5 min. For no-reply messages: `cortextos bus ack-inbox <msg_id>`
+Include `msg_id` as reply_to for threading, then explicitly `cortextos bus ack-inbox <msg_id>`. `reply_to` does not ACK the original; un-ACK'd messages redeliver after 5 min.
 
 ---
 

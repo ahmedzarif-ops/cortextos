@@ -276,20 +276,19 @@ TARGET: Every human-dependent blocker has a [HUMAN] task within 1 heartbeat of d
 
 ### APPROVAL (permission — you can do it, but need sign-off first)
 
-Before ANY external action (email, deploy, post, delete data, financial, merge to main):
+Before ANY external action (email, deploy, post, delete data, financial, merge to main), a specialist in an orchestrated org routes the decision package to the orchestrator. The orchestrator decides routine internal work and obtains the owner's approval for owner-gated actions:
 
 ```bash
-APPR_ID=$(cortextos bus create-approval "<what you want to do>" "<category>" "<context and draft>")
-cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID 'Approval needed: <title> — check dashboard'
+cortextos bus send-message "$CTX_ORCHESTRATOR_AGENT" high 'Decision package: <action, target, draft, reason, owner gate, task id>'
 cortextos bus update-task <task_id> blocked
-cortextos bus log-event task task_blocked info --meta '{"task_id":"<task_id>","blocked_by":"'$APPR_ID'","reason":"awaiting approval"}'
+# Record the orchestrator as the dependency; use a real approval ID only when one exists.
 ```
 
-When the user decides, you receive an inbox message with `approval_id`, `decision` (approved/rejected), and `note`.
+When the orchestrator reports the required decision, record it on the task. For owner-gated actions, require the owner approval receipt before execution.
 - Approved: unblock task, execute the action, complete the task
 - Rejected: complete task as cancelled with the rejection reason
 
-If approval is still pending after 4h in day mode, send one re-ping via Telegram (`cortextos bus send-telegram`).
+If a decision is still pending after 4h in day mode, send one follow-up to the orchestrator.
 
 Categories: `external-comms` | `financial` | `deployment` | `data-deletion` | `other`
 
@@ -432,10 +431,10 @@ Reply using: cortextos bus send-message <agent> normal '<reply>' <msg_id>
 **REPLY + ACK DISCIPLINE — non-negotiable:**
 
 1. **Reply** via the exact `Reply using:` command. Pass `<msg_id>` as the trailing `reply_to` argument so the sender's reply_to chain stays threaded.
-2. **Ack** via `cortextos bus ack-inbox <msg_id>` if (and only if) you do NOT reply. Sending a reply with `reply_to` auto-ACKs; calling `ack-inbox` afterward is harmless but redundant.
+2. **Ack** every inbound message explicitly with `cortextos bus ack-inbox <msg_id>` after any threaded reply. `reply_to` preserves the thread but does not ACK the inbound item.
 3. Un-ACK'd messages redeliver every 5 minutes. An inbox that grows unbounded is the symptom of a missed ack — do not ignore it.
 
-**Multi-message inbox burst:** when `cortextos bus check-inbox` returns several entries, handle them oldest-first. Do not skip ahead; do not batch into one combined reply unless they are clearly a single conversation. Each `msg_id` needs either a `reply_to` reply or an explicit `ack-inbox`.
+**Multi-message inbox burst:** when `cortextos bus check-inbox` returns several entries, handle them oldest-first. Do not skip ahead; do not batch into one combined reply unless they are clearly a single conversation. Each `msg_id` needs an explicit `ack-inbox`, whether or not you reply with `reply_to`.
 
 **Reply-to threading:** when an inbound `=== AGENT MESSAGE` includes `[reply_to: <prior_id>]`, that means the sender is replying to one of YOUR earlier outbound messages. Your reply should reference that prior context — don't pretend the message arrived in a vacuum.
 
