@@ -328,7 +328,9 @@ export function recordStatuslineUsage(ctxRoot: string, rateLimits: unknown, now:
       const v = w?.resets_at;
       if (typeof v === 'string') return v;
       if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
-        return new Date(v > 1e12 ? v : v * 1000).toISOString();
+        // An out-of-range number must cost only the reset time, never the reading.
+        const d = new Date(v >= 1e12 ? v : v * 1000);
+        return Number.isFinite(d.getTime()) ? d.toISOString() : null;
       }
       return null;
     };
