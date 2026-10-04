@@ -288,6 +288,13 @@ export interface AgentConfig {
    */
   codex_memories?: boolean;
   /**
+   * Loop brake for codex-app-server seats: the same command 5 times in a row,
+   * or 10 sleep calls in 30 minutes. 'shadow' (default) logs a
+   * `codex_loop_brake` event only; 'on' also steers the turn with a stop note
+   * and interrupts it if the loop continues; 'off' disables it.
+   */
+  codex_loop_brake?: 'off' | 'shadow' | 'on';
+  /**
    * Fallback context window cap (tokens) for opencode agents when the OpenCode
    * model cache does not expose a context limit. Only applies to runtime:
    * 'opencode'.
