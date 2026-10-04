@@ -9,7 +9,7 @@ vi.mock('../../../src/bus/message', async (importOriginal) => {
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { appendDigest, digestPath, formatDigest, isDigestible, resolveDigestMode } from '../../../src/daemon/inbox-digest';
+import { appendDigest, digestPath, DIGEST_RETENTION_DAYS, DIGEST_TEXT_MAX, formatDigest, isDigestible, resolveDigestMode } from '../../../src/daemon/inbox-digest';
 import { FastChecker } from '../../../src/daemon/fast-checker';
 import { ackInbox, checkInbox } from '../../../src/bus/message';
 
@@ -25,13 +25,18 @@ const msg = (text: string, priority: any = 'normal', id = 'm1') =>
 
 describe('isDigestible', () => {
   it('routine FYI / ack / status / no-action notes are digestible', () => {
-    for (const t of ['FYI: build finished', 'ack, no action needed', 'Received.', 'Status: all green', 'Done: PR merged', 'noted for the record']) {
+    for (const t of ['FYI: build finished', 'ack, no action needed', 'Received.', 'Status: all green', 'Done: PR merged', 'noted for the record', 'FYI: nothing needed from you', 'ack, no reply required']) {
       expect(isDigestible(msg(t)), t).toBe(true);
     }
   });
 
   it('THE KEEP ARM: anything that asks for the orchestrator is delivered live', () => {
-    for (const t of ['FYI: should I merge?', 'FYI decision needed on X', 'ack, but I am blocked on Y', 'status: blocker on deploy', 'noted; needs your approval', 'FYI urgent']) {
+    for (const t of [
+      'FYI: should I merge?', 'FYI decision needed on X', 'ack, but I am blocked on Y', 'status: blocker on deploy',
+      'noted; needs your approval', 'FYI urgent', 'FYI: please review this PR before merge',
+      'Received the owner reply; please tell me when the change is live', 'noted, let me know when done',
+      'FYI: you must restart the daemon tonight', 'ack, waiting for your call', 'FYI: please merge it',
+    ]) {
       expect(isDigestible(msg(t)), t).toBe(false);
     }
   });
@@ -66,6 +71,14 @@ describe('digest file', () => {
     expect(text).toContain('03:04Z worker: FYI: one');
     expect(text).toContain('worker (also delivered live): ack: two');
     expect(formatDigest(dir, '2026-01-03')).toBe('');
+  });
+
+  it('keeps only a bounded excerpt and prunes days past retention', () => {
+    appendDigest(dir, msg('FYI: ' + 'x'.repeat(5000), 'normal', 'big'), 'shadow', new Date('2026-01-01T00:00:00Z'));
+    const line = JSON.parse(readFileSync(digestPath(dir, '2026-01-01'), 'utf-8'));
+    expect(line.text.length).toBe(DIGEST_TEXT_MAX);
+    appendDigest(dir, msg('FYI: later', 'normal', 'l'), 'shadow', new Date(Date.parse('2026-01-01T00:00:00Z') + (DIGEST_RETENTION_DAYS + 1) * 86_400_000));
+    expect(existsSync(digestPath(dir, '2026-01-01'))).toBe(false);
   });
 });
 
