@@ -948,7 +948,7 @@ export class AgentManager {
               log('Media processing returned null - falling back to text format');
               const text = stripControlChars(msg.caption || '');
               const formatted = FastChecker.formatTelegramTextMessage(from, effectiveChatId, text, this.frameworkRoot, replyToText);
-              if (!checker.isDuplicate(formatted)) checker.queueTelegramMessage(formatted);
+              if (!checker.isDuplicate(formatted)) checker.queueTelegramMessage(formatted, typeof msg.date === 'number' ? msg.date * 1000 : undefined);
               return;
             }
 
@@ -980,12 +980,12 @@ export class AgentManager {
               return;
             }
             log(`Media message received: type=${media.type}, path=${media.image_path || media.file_path}`);
-            checker.queueTelegramMessage(formatted);
+            checker.queueTelegramMessage(formatted, typeof msg.date === 'number' ? msg.date * 1000 : undefined);
           }).catch((err) => {
             log(`Media processing error: ${err} - falling back to text format`);
             const text = stripControlChars(msg.caption || '');
             const formatted = FastChecker.formatTelegramTextMessage(from, effectiveChatId, text, this.frameworkRoot, replyToText);
-            if (!checker.isDuplicate(formatted)) checker.queueTelegramMessage(formatted);
+            if (!checker.isDuplicate(formatted)) checker.queueTelegramMessage(formatted, typeof msg.date === 'number' ? msg.date * 1000 : undefined);
           });
           return;
         }
@@ -1009,7 +1009,7 @@ export class AgentManager {
           log('Duplicate Telegram message suppressed');
           return;
         }
-        checker.queueTelegramMessage(formatted);
+        checker.queueTelegramMessage(formatted, typeof msg.date === 'number' ? msg.date * 1000 : undefined);
       });
 
       poller.onCallback((query) => {
@@ -1085,7 +1085,7 @@ export class AgentManager {
           log('Duplicate Telegram reaction suppressed');
           return;
         }
-        checker.queueTelegramMessage(formatted);
+        checker.queueTelegramMessage(formatted, typeof reaction.date === 'number' ? reaction.date * 1000 : undefined);
       });
 
       // Wrap poller.start() in a restart-on-Conflict loop. The poller's

@@ -18,6 +18,7 @@ import { ensureDir } from '../utils/atomic.js';
 import { readReroutedAsk, isAnswerToReroutedAsk, clearReroutedAsk } from '../hooks/one-voice.js';
 import { agentHoldsContextHandoffLease, releaseContextHandoffLease, requestContextHandoffLease } from './context-handoff-lease.js';
 import { evaluateTurnWatch, readTurnEvidence, TURN_STALL_MS } from './turn-watch.js';
+import { ageLabel, ageLabelFromIso } from './message-age.js';
 
 type LogFn = (msg: string) => void;
 
@@ -267,8 +268,9 @@ export class FastChecker {
    * Queue a formatted Telegram message for injection.
    * Called by the daemon's Telegram handler.
    */
-  queueTelegramMessage(formatted: string): void {
-    this.telegramMessages.push({ formatted, ackIds: [] });
+  /** `sentAtMs` (when Telegram says it was sent) labels a re-delivered old message with its age. */
+  queueTelegramMessage(formatted: string, sentAtMs?: number): void {
+    this.telegramMessages.push({ formatted: ageLabel(sentAtMs) + formatted, ackIds: [] });
   }
 
   /**
@@ -380,7 +382,7 @@ export class FastChecker {
     const answerNote = answersReroutedAsk
       ? `[ONE VOICE] This is ${safeFrom}'s answer to the question you asked (rerouted from AskUserQuestion). It IS the user's answer: act on it now, do not wait for the owner.\n`
       : '';
-    return `=== AGENT MESSAGE from ${safeFrom}${replyNote} [msg_id: ${msg.id}] ===
+    return `${ageLabelFromIso(msg.timestamp)}=== AGENT MESSAGE from ${safeFrom}${replyNote} [msg_id: ${msg.id}] ===
 ${answerNote}${wrapFenceSafe(msg.text)}
 Reply using: cortextos bus send-message ${safeFrom} normal '<your reply>' ${msg.id}
 

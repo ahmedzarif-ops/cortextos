@@ -9,7 +9,15 @@ import { hermesDbExists } from '../utils/hermes-runtime.js';
 import { OpencodePTY, opencodeSessionExists } from '../pty/opencode-pty.js';
 import { MessageDedup, injectMessage as injectMessageIntoPty } from '../pty/inject.js';
 import type { TelegramAPI } from '../telegram/api.js';
-import { ensureDir } from '../utils/atomic.js';
+import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
+import {
+  newestHandoff,
+  newestTranscript,
+  readLastSession,
+  staleResumeReason,
+  writeLastSession,
+  type SessionIdentity,
+} from './session-continuity.js';
 import { writeCortextosEnv } from '../utils/env.js';
 import { getOverdueReminders } from '../bus/reminders.js';
 import { resolvePaths } from '../utils/paths.js';
@@ -174,6 +182,12 @@ export class AgentProcess {
 
     // Determine start mode
     const mode = this.shouldContinue() ? 'continue' : 'fresh';
+    // Record what this session runs on, so the next start can tell a switch happened.
+    try {
+      const stateDir = join(this.env.ctxRoot, 'state', this.name);
+      ensureDir(stateDir);
+      writeLastSession(stateDir, this.sessionIdentity());
+    } catch { /* observability for the next start, never a startup blocker */ }
     // Record the mode/time this lifecycle spawned in so handleExit can detect an
     // immediate exit-0-on-continue wedge (opencode --continue re-attach loop).
     this.lastSpawnMode = mode;
@@ -980,6 +994,21 @@ export class AgentProcess {
       return false;
     }
 
+    // A conversation is only a valid resume point if nothing newer was recorded
+    // elsewhere: a runtime/model switch, or a handoff written after it.
+    const identity = this.sessionIdentity();
+    const stale = staleResumeReason({
+      last: readLastSession(join(this.env.ctxRoot, 'state', this.name)),
+      current: identity,
+      handoff: this.env.agentDir ? newestHandoff(this.env.agentDir) : null,
+      transcript: identity.runtime === 'claude-code' ? this.newestClaudeTranscript() : null,
+    });
+    if (stale) {
+      this.log(`Starting fresh instead of resuming: ${stale}`);
+      this.pointAtNewestHandoff();
+      return false;
+    }
+
     // Hermes: session continuity is determined by whether the SQLite DB exists.
     // The explicit profile keeps each standing seat on its own history DB;
     // daemon-level HERMES_HOME may relocate the common Hermes root.
@@ -1037,18 +1066,8 @@ export class AgentProcess {
     }
 
     // Default (Claude runtime): existing conversation = JSONL files present.
-    const launchDir = this.config.working_directory || this.env.agentDir;
-    if (!launchDir) return false;
-
-    // Claude projects dir uses the absolute path with all separators replaced by dashes
-    // e.g. /Users/foo/agents/boss -> -Users-foo-agents-boss (leading sep becomes -)
-    // Use homedir() for cross-platform compatibility (HOME is not set on Windows).
-    const convDir = join(
-      homedir(),
-      '.claude',
-      'projects',
-      launchDir.split(sep).join('-'),
-    );
+    const convDir = this.claudeConvDir();
+    if (!convDir) return false;
 
     try {
       const files = require('fs').readdirSync(convDir);
@@ -1056,6 +1075,45 @@ export class AgentProcess {
     } catch {
       return false;
     }
+  }
+
+  /** This seat's runtime and model, as the last-session record stores them. */
+  private sessionIdentity(): SessionIdentity {
+    return { runtime: this.config.runtime || 'claude-code', model: this.config.model || '' };
+  }
+
+  /**
+   * Claude Code's conversation directory for this seat, or null.
+   * The projects dir uses the absolute launch path with all separators replaced
+   * by dashes, e.g. /Users/foo/agents/boss -> -Users-foo-agents-boss.
+   * homedir() rather than HOME, which is not set on Windows.
+   */
+  private claudeConvDir(): string | null {
+    const launchDir = this.config.working_directory || this.env.agentDir;
+    if (!launchDir) return null;
+    return join(homedir(), '.claude', 'projects', launchDir.split(sep).join('-'));
+  }
+
+  private newestClaudeTranscript() {
+    const convDir = this.claudeConvDir();
+    return convDir ? newestTranscript(convDir) : null;
+  }
+
+  /**
+   * Point a fresh session at the newest handoff document, unless a handoff
+   * marker is already pending (an explicit handoff restart always wins).
+   */
+  private pointAtNewestHandoff(): void {
+    if (!this.env.agentDir) return;
+    const handoff = newestHandoff(this.env.agentDir);
+    if (!handoff) return;
+    const stateDir = join(this.env.ctxRoot, 'state', this.name);
+    const markerPath = join(stateDir, '.handoff-doc-path');
+    if (existsSync(markerPath)) return;
+    try {
+      ensureDir(stateDir);
+      atomicWriteSync(markerPath, handoff.path);
+    } catch { /* the fresh start still happens; it just boots without the pointer */ }
   }
 
   /**
