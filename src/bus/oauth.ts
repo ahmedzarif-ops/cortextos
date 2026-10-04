@@ -323,7 +323,15 @@ export function recordStatuslineUsage(ctxRoot: string, rateLimits: unknown, now:
       if (age >= 0 && age < STATUSLINE_USAGE_MIN_INTERVAL_MS) return false;
     } catch { /* no previous reading */ }
 
-    const resets = (w: any): string | null => (w && typeof w.resets_at === 'string' ? w.resets_at : null);
+    // Claude Code sends resets_at as epoch seconds; accept ms and ISO strings too.
+    const resets = (w: any): string | null => {
+      const v = w?.resets_at;
+      if (typeof v === 'string') return v;
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+        return new Date(v > 1e12 ? v : v * 1000).toISOString();
+      }
+      return null;
+    };
     const snapshot: UsageSnapshot = {
       account: 'statusline',
       five_hour_utilization: fiveHour ?? 0,
