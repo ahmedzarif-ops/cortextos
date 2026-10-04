@@ -411,12 +411,16 @@ export class CodexAppServerPTY {
       .split('\nReply using:', 1)[0];
 
     const replyToContext = this.extractReplyToContext(beforeReply);
+    const ageLine = beforeReply.match(/^\[AGE: [^\]\n]+\]$/m)?.[0] ?? null;
     const replyDirective = chatId
       ? `Reply via: cortextos bus send-telegram ${chatId} '<your reply>' — this is the only path that surfaces in Telegram and on the dashboard. Do not reply through the codex channel.`
       : null;
     const wrap = (payload: string | null): { payload: string; replyDirective: string | null } | null => {
       if (!payload) return null;
-      const withReplyTo = replyToContext ? `${payload}\n\n${replyToContext}` : payload;
+      // A re-delivered old message carries an "[AGE: ...]" line under its header;
+      // keep it in front of the payload so the model sees the age before acting.
+      const aged = ageLine ? `${ageLine} ${payload}` : payload;
+      const withReplyTo = replyToContext ? `${aged}\n\n${replyToContext}` : aged;
       return { payload: withReplyTo, replyDirective };
     };
 
@@ -436,6 +440,7 @@ export class CodexAppServerPTY {
       if (line.startsWith('[Recent conversation:]')) continue;
       if (line.startsWith('[reply_to:')) continue;
       if (line.startsWith('[Replying to:')) continue;
+      if (line.startsWith('[AGE: ')) continue;
       if (line.startsWith('/') || line.startsWith('$')) return wrap(line);
       break;
     }
@@ -451,6 +456,7 @@ export class CodexAppServerPTY {
       if (line.startsWith('[Recent conversation:]')) continue;
       if (line.startsWith('[reply_to:')) continue;
       if (line.startsWith('[Replying to:')) continue;
+      if (line.startsWith('[AGE: ')) continue;
       return wrap(line);
     }
 

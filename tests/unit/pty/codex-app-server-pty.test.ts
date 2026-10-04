@@ -65,6 +65,7 @@ vi.mock('../../../src/bus/event.js', () => ({
 }));
 
 const { CodexAppServerPTY, codexAppServerArgs, codexThreadFeatures } = await import('../../../src/pty/codex-app-server-pty.js');
+const { withAgeLine } = await import('../../../src/daemon/message-age.js');
 
 const mockEnv = {
   instanceId: 'test',
@@ -761,6 +762,18 @@ describe('CodexAppServerPTY extractTelegramPayload media types', () => {
       extractTelegramPayload(c: string): { payload: string; replyDirective: string | null } | null;
     }).extractTelegramPayload(content);
   }
+
+  it('an AGED message (age line under the header) still parses and keeps the Telegram reply directive', () => {
+    const aged = withAgeLine(`=== TELEGRAM from James (chat_id:7940429114) ===
+hello from two days ago
+Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+`, '[AGE: 2d 0h] ');
+    const out = extractWithDirective(aged);
+    expect(out).not.toBeNull();
+    expect(out!.replyDirective).toContain('send-telegram 7940429114');
+    expect(out!.payload).toContain('[AGE: 2d 0h]');
+    expect(out!.payload).toContain('hello from two days ago');
+  });
 
   it('photo: surfaces both caption and local_file path', () => {
     const inject = `=== TELEGRAM PHOTO from James (chat_id:7940429114) ===

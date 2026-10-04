@@ -182,12 +182,11 @@ export class AgentProcess {
 
     // Determine start mode
     const mode = this.shouldContinue() ? 'continue' : 'fresh';
-    // Record what this session runs on, so the next start can tell a switch happened.
-    try {
-      const stateDir = join(this.env.ctxRoot, 'state', this.name);
-      ensureDir(stateDir);
-      writeLastSession(stateDir, this.sessionIdentity());
-    } catch { /* observability for the next start, never a startup blocker */ }
+    // Record what this session runs on ONLY once it has actually booted. If a
+    // forced-fresh start dies before that, the old record stands, so the next
+    // start sees the switch again and starts fresh again (re-pointing the
+    // handoff), instead of reopening the stale conversation.
+    this.recordSessionWhenBooted();
     // Record the mode/time this lifecycle spawned in so handleExit can detect an
     // immediate exit-0-on-continue wedge (opencode --continue re-attach loop).
     this.lastSpawnMode = mode;
@@ -1075,6 +1074,33 @@ export class AgentProcess {
     } catch {
       return false;
     }
+  }
+
+  private sessionRecordTimer: NodeJS.Timeout | null = null;
+
+  /** Write last-session.json once this lifecycle's session has bootstrapped. */
+  private recordSessionWhenBooted(pollMs = 5_000, maxMs = 10 * 60_000): void {
+    if (this.sessionRecordTimer) clearInterval(this.sessionRecordTimer);
+    const identity = this.sessionIdentity();
+    const deadline = Date.now() + maxMs;
+    const timer = setInterval(() => {
+      // A timer callback must never throw; an unreadable PTY counts as "not booted yet".
+      let booted = false;
+      try { booted = this.hasEverBootstrapped(); } catch { booted = false; }
+      if (booted) {
+        try {
+          const stateDir = join(this.env.ctxRoot, 'state', this.name);
+          ensureDir(stateDir);
+          writeLastSession(stateDir, identity);
+        } catch { /* observability for the next start, never a blocker */ }
+      } else if (Date.now() < deadline) {
+        return;
+      }
+      clearInterval(timer);
+      if (this.sessionRecordTimer === timer) this.sessionRecordTimer = null;
+    }, pollMs);
+    timer.unref?.();
+    this.sessionRecordTimer = timer;
   }
 
   /** This seat's runtime and model, as the last-session record stores them. */

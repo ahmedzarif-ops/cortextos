@@ -164,3 +164,30 @@ describe('AgentProcess.shouldContinue with real files', () => {
     expect(seat().shouldContinue()).toBe(true);
   });
 });
+
+describe('the session record is written only once the session has booted', () => {
+  it('not booted: nothing written, even after the deadline; booted: written once', async () => {
+    vi.useFakeTimers();
+    try {
+      const root = mkdtempSync(join(tmpdir(), 'continuity-boot-'));
+      const env = { instanceId: 't', ctxRoot: root, frameworkRoot: root, agentName: 'seat', agentDir: root, org: 'o', projectRoot: root };
+      const ap = new AgentProcess('seat', env as any, { runtime: 'claude-code', model: 'm' } as any, () => {});
+      const state = join(root, 'state', 'seat');
+      let booted = false;
+      vi.spyOn(ap, 'hasEverBootstrapped').mockImplementation(() => booted);
+
+      (ap as any).recordSessionWhenBooted(10, 100);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(readLastSession(state)).toBeNull(); // a failed boot leaves the old record standing
+
+      (ap as any).recordSessionWhenBooted(10, 100);
+      await vi.advanceTimersByTimeAsync(30);
+      expect(readLastSession(state)).toBeNull();
+      booted = true;
+      await vi.advanceTimersByTimeAsync(20);
+      expect(readLastSession(state)).toEqual({ runtime: 'claude-code', model: 'm' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

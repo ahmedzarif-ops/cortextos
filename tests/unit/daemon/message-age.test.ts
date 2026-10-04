@@ -5,7 +5,7 @@ vi.mock('child_process', () => ({ execFile: vi.fn() }));
 import { mkdtempSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { ageLabel, ageLabelFromIso, MESSAGE_AGE_THRESHOLD_MS } from '../../../src/daemon/message-age';
+import { ageLabel, ageLabelFromIso, MESSAGE_AGE_THRESHOLD_MS, withAgeLine } from '../../../src/daemon/message-age';
 import { FastChecker } from '../../../src/daemon/fast-checker';
 
 /**
@@ -40,6 +40,14 @@ describe('ageLabel', () => {
   });
 });
 
+describe('withAgeLine keeps the header first', () => {
+  it('inserts the age as the second line; no label leaves the text untouched', () => {
+    expect(withAgeLine('=== H ===\nbody\n', '[AGE: 1h 0m] ')).toBe('=== H ===\n[AGE: 1h 0m]\nbody\n');
+    expect(withAgeLine('=== H ===', '[AGE: 1h 0m] ')).toBe('=== H ===\n[AGE: 1h 0m]');
+    expect(withAgeLine('=== H ===\nbody\n', '')).toBe('=== H ===\nbody\n');
+  });
+});
+
 describe('delivery paths carry the label', () => {
   function checker() {
     const dir = mkdtempSync(join(tmpdir(), 'age-'));
@@ -54,18 +62,18 @@ describe('delivery paths carry the label', () => {
     c.queueTelegramMessage('=== TELEGRAM new ===\n', Date.now() - 1_000);
     c.queueTelegramMessage('=== TELEGRAM undated ===\n');
     const queued = (c as any).telegramMessages.map((m: { formatted: string }) => m.formatted);
-    expect(queued[0]).toMatch(/^\[AGE: 2d 0h\] === TELEGRAM old ===/);
+    expect(queued[0]).toBe('=== TELEGRAM old ===\n[AGE: 2d 0h]\n');
     expect(queued[1]).toBe('=== TELEGRAM new ===\n');
     expect(queued[2]).toBe('=== TELEGRAM undated ===\n');
   });
 
-  it('an old bus message is formatted with its age in front of the header', () => {
+  it('an old bus message carries its age on the line under the header', () => {
     const c = checker();
     const old = (c as any).formatInboxMessage({
       id: 'm1', from: 'other', text: 'hello', timestamp: new Date(Date.now() - 3 * 3_600_000).toISOString(),
     });
     const fresh = (c as any).formatInboxMessage({ id: 'm2', from: 'other', text: 'hello', timestamp: new Date().toISOString() });
-    expect(old).toMatch(/^\[AGE: 3h 0m\] === AGENT MESSAGE from other/);
+    expect(old).toMatch(/^=== AGENT MESSAGE from other[^\n]*===\n\[AGE: 3h 0m\]\n/);
     expect(fresh).toMatch(/^=== AGENT MESSAGE from other/);
   });
 });

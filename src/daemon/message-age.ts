@@ -22,6 +22,19 @@ export function ageLabel(sentAtMs: number | null | undefined, nowMs: number = Da
   return `[AGE: ${parts.join(' ')}] `;
 }
 
+/**
+ * Insert the age as its own line directly AFTER the header line. The header
+ * must stay first: runtime adapters recognise a delivery by an anchored match
+ * on it (e.g. /^=== TELEGRAM/), and a prefix would hide the message from them.
+ */
+export function withAgeLine(formatted: string, label: string): string {
+  if (!label) return formatted;
+  const line = label.trim();
+  const nl = formatted.indexOf('\n');
+  if (nl < 0) return `${formatted}\n${line}`;
+  return `${formatted.slice(0, nl + 1)}${line}\n${formatted.slice(nl + 1)}`;
+}
+
 /** ageLabel for an ISO 8601 timestamp; unparseable or missing gives "". */
 export function ageLabelFromIso(iso: string | null | undefined, nowMs: number = Date.now()): string {
   return ageLabel(iso ? Date.parse(iso) : null, nowMs);
