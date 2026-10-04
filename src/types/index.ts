@@ -273,6 +273,12 @@ export interface AgentConfig {
   /** Context window % at which to inject handoff prompt and hard-restart. Default: 80. */
   ctx_handoff_threshold?: number;
   /**
+   * Orchestrator only: route normal/low FYI/ack/status messages to a daily digest
+   * instead of a live turn. "shadow" (default) delivers live and logs what would
+   * have been digested; "on" diverts; "off" disables. See src/daemon/inbox-digest.ts.
+   */
+  inbox_digest?: 'off' | 'shadow' | 'on';
+  /**
    * Fallback context window cap (tokens) for codex-app-server agents when the
    * server's `thread/tokenUsage/updated` event reports `modelContextWindow=null`.
    * Defaults to 256000 when unset. Only applied to the codex-app-server runtime.
