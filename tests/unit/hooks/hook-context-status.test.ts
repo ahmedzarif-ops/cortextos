@@ -44,7 +44,7 @@ describe('hook-context-status', () => {
 
   it('feeds the usage meter from rate_limits in the same input', () => {
     run({ session_id: 's-3', context_window: { used_percentage: 9 }, rate_limits: { five_hour: { used_percentage: 12 }, seven_day: { used_percentage: 70 } } });
-    const usage = JSON.parse(readFileSync(join(root, 'state', 'usage', 'latest.json'), 'utf8'));
+    const usage = JSON.parse(readFileSync(join(root, 'state', 'usage', 'statusline.json'), 'utf8'));
     expect(usage).toMatchObject({ account: 'statusline', five_hour_utilization: 0.12, seven_day_utilization: 0.7 });
   });
 
