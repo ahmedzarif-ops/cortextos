@@ -44,8 +44,12 @@ export function digestPath(stateDir: string, day: string): string {
   return join(stateDir, 'digest', `${day}.jsonl`);
 }
 
-/** Append one message to the day's digest. Never throws. */
-export function appendDigest(stateDir: string, msg: InboxMessage, mode: DigestMode, now: Date = new Date()): void {
+/**
+ * Append one message to the day's digest. Never throws; returns false when the
+ * line could not be written, so the caller delivers the message live instead of
+ * acking something that was never recorded.
+ */
+export function appendDigest(stateDir: string, msg: InboxMessage, mode: DigestMode, now: Date = new Date()): boolean {
   try {
     ensureDir(join(stateDir, 'digest'));
     appendFileSync(
@@ -61,7 +65,10 @@ export function appendDigest(stateDir: string, msg: InboxMessage, mode: DigestMo
         text: msg.text,
       }) + '\n',
     );
-  } catch { /* the message is still handled by the caller */ }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Human-readable digest for one day ('' when empty). */

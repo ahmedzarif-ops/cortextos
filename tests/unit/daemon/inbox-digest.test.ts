@@ -115,6 +115,14 @@ describe('FastChecker routes orchestrator FYIs by mode', () => {
     expect(JSON.parse(readFileSync(r.digestFile, 'utf-8'))).toMatchObject({ id: 'f1', delivered_live: false });
   });
 
+  it('on, but the digest cannot be written: the FYI is delivered live, never lost', async () => {
+    const stateDir = join(root, 'state', 'boss');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'digest'), 'a file where the digest directory should be');
+    const r = await poll('boss', 'on', [msg('FYI: build finished', 'normal', 'f1')]);
+    expect(r.injected).toContain('FYI: build finished');
+  });
+
   it('a non-orchestrator never digests, whatever its config says', async () => {
     const r = await poll('worker', 'on', [msg('FYI: build finished', 'normal', 'f1')]);
     expect(r.injected).toContain('FYI: build finished');

@@ -336,8 +336,9 @@ export class FastChecker {
       const isAnswer = isAnswerToReroutedAsk(msg, pendingAsk);
       if (isAnswer) answeredReroutedAsk = true;
       if (digestMode !== 'off' && !isAnswer && isDigestible(msg)) {
-        appendDigest(this.paths.stateDir, msg, digestMode);
-        if (digestMode === 'on') {
+        const recorded = appendDigest(this.paths.stateDir, msg, digestMode);
+        // Divert only what was actually recorded; a failed write is delivered live.
+        if (digestMode === 'on' && recorded) {
           ackInbox(this.paths, msg.id);
           continue;
         }
