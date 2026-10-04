@@ -194,7 +194,7 @@ cortextos status
 ```bash
 AGENT="sentinel"
 ORG="myorg"
-NEW_MODEL="claude-sonnet-4-6"  # or "claude-opus-4-6" or "claude-haiku-4-5-20251001"
+NEW_MODEL="claude-sonnet-5-5"  # Claude worker default; override only for the task
 
 # Step 1: Update config.json
 node -e "
@@ -211,12 +211,12 @@ cortextos bus send-message "$AGENT" high "soft-restart" "model change to $NEW_MO
 
 **Available models:**
 - `claude-opus-4-6` - Most capable, highest cost
-- `claude-sonnet-4-6` - Good balance, ~5x cheaper than Opus
+- `claude-sonnet-5-5` - Default for Claude workers and sub-agents
 - `claude-haiku-4-5-20251001` - Fastest, cheapest, for simple tasks
 
 **Context window suffix:** Append `[1m]` to any model ID (e.g., `claude-opus-4-6[1m]`) to enable the extended 1M token context window. Without it, agents get the default shorter context window and will compact much sooner. Recommended for orchestrators and any agent doing complex multi-step work.
 
-**No model set = default (Opus).** Always set explicitly for cost control.
+**No model set may use the runtime's Opus default.** That is an implementation hazard, not the owner's worker policy. Set `claude-sonnet-5-5` explicitly unless the task authorizes another model.
 
 ---
 

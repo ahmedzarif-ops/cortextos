@@ -57,13 +57,7 @@ cortextos bus kb-collections --org $CTX_ORG
 
 ## First-Time Setup
 
-If the knowledge base hasn't been initialized for this org:
-
-```bash
-cortextos bus kb-setup --org $CTX_ORG
-```
-
-Run this once per org. Check collections list first — don't re-initialize if already set up.
+Check `cortextos bus kb-collections --org $CTX_ORG` first. If no collection exists, ask the configured orchestrator to run the framework's supported knowledge-base setup workflow. The bus has no `kb-setup` command; do not infer initialization from an empty query result.
 
 ---
 

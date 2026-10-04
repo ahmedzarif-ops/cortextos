@@ -57,11 +57,10 @@ Based on accumulated learnings:
 ```bash
 cortextos bus create-experiment "<metric_name>" "<your hypothesis>" --surface <path> --direction <higher|lower> --window <duration>
 ```
-If `approval_required` is true in `experiments/config.json`, you must manually create an approval before proceeding:
+If `approval_required` is true in `experiments/config.json`, a specialist in an orchestrated org sends the experiment and its evidence to the orchestrator. Do not call `create-approval` from the specialist seat when that route can notify the owner. Wait for the required decision before Step 5:
 ```bash
-APPR_ID=$(cortextos bus create-approval "Run experiment: <hypothesis>" experiments "Cycle: <cycle_name>, Metric: <metric_name>, Surface: <surface>")
-cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID "Approval needed to run experiment for <metric_name> — check dashboard"
-# Block until approved, then continue to Step 5
+cortextos bus send-message "$CTX_ORCHESTRATOR_AGENT" high \
+  "Experiment decision package: <cycle, metric, hypothesis, surface, evidence, owner gate, task id>"
 ```
 
 ### Step 5: Make Changes and Run

@@ -1,11 +1,13 @@
 ---
 name: approvals
-description: "You are about to take an action that affects the outside world, cannot be undone, or involves real people — and you have not yet received explicit permission. This includes: sending any email or message to a real person, deploying code to production, posting on social media, making a purchase or financial commitment, deleting files or data, merging a PR to main, or publishing anything publicly. Stop, create an approval, block your task, and notify the user. Do not proceed until you receive the approval decision in your inbox."
+description: "For external, irreversible, or high-stakes actions, prepare a decision package. Specialists in orchestrated orgs route it to the orchestrator, who handles owner-gated approval; standalone agents and orchestrators use the approval workflow. Wait for the required decision before acting."
 ---
 
 # Approvals
 
-Before any external, irreversible, or high-stakes action — stop and create an approval. The user decides. You execute only after they approve.
+Before an external, irreversible, or high-stakes action, stop and prepare a decision package. In an orchestrated org, a specialist sends the package to the configured orchestrator. The orchestrator makes routine internal decisions and obtains the owner's decision for owner-gated actions. A specialist must not call `create-approval` if that call can notify the owner directly. Direct replies to an owner who contacts the specialist remain allowed; the specialist then informs the orchestrator. The closed exceptions are in the org's canonical ONE VOICE rule (the configured orchestrator's `USER.md`; chief `USER.md` in this fleet).
+
+The approval workflow below is for the orchestrator or a standalone agent. Execute the proposed action only after the required decision arrives.
 
 ---
 
@@ -26,6 +28,14 @@ Before any external, irreversible, or high-stakes action — stop and create an 
 
 ## Full Workflow
 
+### 0. Specialist in an orchestrated org
+
+```bash
+cortextos bus send-message "$CTX_ORCHESTRATOR_AGENT" high "Decision package: <action, target, draft, reason, owner gate, task id>"
+```
+
+Stop here as a specialist. Wait for the orchestrator's answer. Keep the task pending or blocked with the dependency recorded. For customer contact, production deploys, publication, spend, pricing, deletion, and other owner-gated actions, the orchestrator obtains the owner's approval before execution. Do not turn a routine internal decision into an owner notification.
+
 ### 1. Create the approval
 
 ```bash
@@ -45,12 +55,9 @@ cortextos bus update-task "$TASK_ID" blocked
 cortextos bus log-event task task_blocked info --meta "{\"task_id\":\"$TASK_ID\",\"blocked_by\":\"$APPR_ID\",\"reason\":\"awaiting approval\"}"
 ```
 
-### 3. Notify the user
+### 3. Owner notification
 
-```bash
-cortextos bus send-telegram "$CTX_TELEGRAM_CHAT_ID" \
-  "Approval needed: <title> — check dashboard or reply to approve/reject"
-```
+Only the orchestrator or a standalone agent runs steps 1–2. Use the approval dashboard and the org's communication rules for any owner notification; a specialist sends no additional owner message from this workflow.
 
 ### 4. Wait for inbox notification
 
@@ -81,14 +88,12 @@ cortextos bus complete-task "$TASK_ID" --result "Cancelled — approval rejected
 
 ## Re-pinging
 
-If an approval is still pending after 4 hours during day mode, send one re-ping:
+After four hours in day mode, a specialist may send one follow-up to the orchestrator. The orchestrator decides whether an owner reminder is warranted.
 
 ```bash
-cortextos bus send-telegram "$CTX_TELEGRAM_CHAT_ID" \
-  "Reminder: approval for '<title>' is still pending. No rush, just flagging."
+cortextos bus send-message "$CTX_ORCHESTRATOR_AGENT" normal \
+  "One follow-up: approval for '<title>' remains pending"
 ```
-
-Send only ONE re-ping. Do not spam.
 
 ---
 

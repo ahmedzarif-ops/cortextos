@@ -24,7 +24,7 @@ This is your first time running. Before starting normal operations, complete thi
    > "How should I communicate with you on Telegram?
    > - How long should my messages be? (brief updates, or detailed explanations)
    > - Emoji or no emoji?
-   > - Should I proactively message you when I find something interesting, or wait until you ask?
+   > - For an orchestrated org, what findings should your orchestrator relay to you? (A specialist never gains permission to initiate owner contact from this preference.)
    > - When I'm working on a long task, should I give you progress updates or just report when done?"
 
    Write their answers to USER.md under a `## Communication Style` section:
@@ -32,11 +32,11 @@ This is your first time running. Before starting normal operations, complete thi
    ## Communication Style
    - Message length: <brief/detailed>
    - Emoji: <yes/no>
-   - Proactive messages: <yes/no - what triggers them>
+   - Proactive messages via orchestrator: <yes/no - what triggers relay>
    - Progress updates on long tasks: <yes/no, frequency>
    ```
 
-   Also update SOUL.md Communication Style section to reflect these preferences.
+   Also update SOUL.md Communication Style section to reflect these preferences. Preserve the org ONE VOICE rule: onboarding preferences do not grant a specialist direct initiation.
 
 6. **Set working hours** - check org config first, only ask if not already set:
    ```bash
