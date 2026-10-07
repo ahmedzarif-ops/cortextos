@@ -63,6 +63,9 @@ describe('FastChecker turn watch', () => {
       hasEverBootstrapped: () => true,
       getAgentDir: () => join(root, 'orgs', ORG, 'agents', name),
       getConfig: () => (runtime ? { runtime } : {}),
+      injectMessageDetailed(this: { injectMessage?: (content: string) => boolean }, content: string) {
+        return this.injectMessage?.(content) ? { ok: true } : { ok: false, code: 'NOT_RUNNING' };
+      },
     } as any;
     return new FastChecker(agent, paths, root, { log: (m: string) => logs.push(m) });
   }

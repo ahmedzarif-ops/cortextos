@@ -36,10 +36,14 @@ function pathsFor(ctxRoot: string, agent: string): BusPaths {
 }
 
 function mockAgent(name: string, injected = true) {
+  const injectMessage = vi.fn().mockReturnValue(injected);
   return {
     name,
     hasEverBootstrapped: vi.fn().mockReturnValue(true),
-    injectMessage: vi.fn().mockReturnValue(injected),
+    injectMessage,
+    injectMessageDetailed: vi.fn((content: string) => {
+      return injectMessage(content) ? { ok: true } : { ok: false, code: 'NOT_RUNNING' };
+    }),
     write: vi.fn(),
   } as any;
 }

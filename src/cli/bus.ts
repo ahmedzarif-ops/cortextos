@@ -12,7 +12,7 @@ import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
 import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity, activityChannelEnvCandidates } from '../bus/system.js';
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
-import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
+import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, checkMergeGateMetrics, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
 import { createApproval, updateApproval } from '../bus/approval.js';
 import { createReminder, listReminders, ackReminder, pruneReminders } from '../bus/reminders.js';
 import { updateCronFire, parseDurationMs, readCronState, computeNextFireMs } from '../bus/cron-state.js';
@@ -286,8 +286,15 @@ busCommand
   .action(() => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    const messages = checkInbox(paths);
-    console.log(JSON.stringify(messages));
+    // An unavailable inbox lock must exit nonzero with an error — printing []
+    // would be indistinguishable from a successfully-read empty inbox.
+    try {
+      const messages = checkInbox(paths);
+      console.log(JSON.stringify(messages));
+    } catch (err) {
+      console.error(`check-inbox failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    }
   });
 
 busCommand
@@ -1239,6 +1246,16 @@ busCommand
     const env = resolveEnv();
     const frameworkRoot = env.frameworkRoot || env.projectRoot || process.cwd();
     const result = checkUpstream(frameworkRoot, { apply: opts.apply });
+    console.log(JSON.stringify(result, null, 2));
+  });
+
+busCommand
+  .command('collect-merge-gate-metrics')
+  .description('Report gated_queue_depth/oldest_gated_age_days from the gh merge-ready label (canonical source; label lifecycle is operator-owned, this only reads)')
+  .argument('<repo>', 'GitHub repo in owner/name form')
+  .option('--label <name>', 'Label marking review-PASS+bake-elapsed PRs', 'merge-ready')
+  .action((repo: string, opts: { label?: string }) => {
+    const result = checkMergeGateMetrics(repo, { label: opts.label });
     console.log(JSON.stringify(result, null, 2));
   });
 

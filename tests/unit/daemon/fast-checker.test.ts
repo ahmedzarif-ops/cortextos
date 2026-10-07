@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, mkdirSyn
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { FastChecker } from '../../../src/daemon/fast-checker';
+import { acquireLock, releaseLock } from '../../../src/utils/lock';
 import type { BusPaths, TelegramCallbackQuery } from '../../../src/types';
 
 // Minimal mock for AgentProcess
@@ -13,6 +14,7 @@ function createMockAgent(name = 'test-agent') {
   return {
     name,
     hasEverBootstrapped: vi.fn().mockReturnValue(true),
+    isBootstrapped: vi.fn().mockReturnValue(true),
     injectMessage,
     // The urgent-signal path uses `injectMessageDetailed` rather than the boolean
     // wrapper, because it must tell NOT_RUNNING (retain the signal and retry) from
@@ -1464,6 +1466,129 @@ describe('FastChecker', () => {
       await (checker as any).checkContextStatus();
 
       expect((checker as any).ctxSessionBaselinePct).toBeNull();
+    });
+  });
+
+  describe('inbox lock failure visibility', () => {
+    it('logs the failure instead of treating the inbox as empty', async () => {
+      const log = vi.fn();
+      const checker = new FastChecker(createMockAgent(), paths, '/tmp/framework', { log }) as any;
+      // Hold the inbox lock from "another process" so checkInbox's acquire is refused.
+      const lockHandle = acquireLock(paths.inbox);
+      expect(lockHandle).not.toBe(false);
+
+      try {
+        await checker.pollCycle();
+      } finally {
+        if (lockHandle) releaseLock(lockHandle);
+      }
+
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('Inbox check failed'));
+      expect(log).toHaveBeenCalledWith(expect.stringContaining(paths.inbox));
+    });
+  });
+
+  describe('transport re-queue on inject failure', () => {
+    it('NOT_RUNNING: re-queues drained telegram/buzz/slack in order, then delivers once on recovery', async () => {
+      vi.useFakeTimers();
+      try {
+        const agent = createMockAgent();
+        agent.injectMessageDetailed.mockReturnValue({ ok: false, code: 'NOT_RUNNING', message: 'mid-restart' });
+        const log = vi.fn();
+        const checker = new FastChecker(agent, paths, '/tmp/framework', { log }) as any;
+
+        checker.queueTelegramMessage('tg-1');
+        checker.queueTelegramMessage('tg-2');
+        checker.queueBuzzMessage('bz-1');
+        checker.queueSlackMessage('sl-1');
+
+        await checker.pollCycle();
+
+        // The in-memory queues are the only backing store — a NOT_RUNNING inject
+        // must put every drained message back, at the front, in original order.
+        expect(checker.telegramMessages.map((m: { formatted: string }) => m.formatted)).toEqual(['tg-1', 'tg-2']);
+        expect(checker.buzzMessages.map((m: { formatted: string }) => m.formatted)).toEqual(['bz-1']);
+        expect(checker.slackMessages).toEqual(['sl-1']);
+        expect(log).toHaveBeenCalledWith(expect.stringContaining('re-queued 4 transport message(s)'));
+
+        // Recovery: the agent comes back, the next cycle delivers the SAME batch
+        // exactly once and the queues drain.
+        agent.injectMessageDetailed.mockReturnValue({ ok: true });
+        const cycle = checker.pollCycle();
+        await vi.advanceTimersByTimeAsync(5000); // post-inject cooldown sleep
+        await cycle;
+        const delivered = agent.injectMessageDetailed.mock.calls.at(-1)![0] as string;
+        expect(delivered).toContain('tg-1');
+        expect(delivered).toContain('tg-2');
+        expect(delivered).toContain('bz-1');
+        expect(delivered).toContain('sl-1');
+        expect(checker.telegramMessages).toEqual([]);
+        expect(checker.buzzMessages).toEqual([]);
+        expect(checker.slackMessages).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('DEDUPED: does NOT re-queue — treated as delivered, and no replay beside new traffic', async () => {
+      vi.useFakeTimers();
+      try {
+        const agent = createMockAgent();
+        agent.injectMessageDetailed.mockReturnValue({ ok: false, code: 'DEDUPED', message: 'duplicate' });
+        const log = vi.fn();
+        const checker = new FastChecker(agent, paths, '/tmp/framework', { log }) as any;
+
+        checker.queueTelegramMessage('dup-1');
+        checker.queueBuzzMessage('dup-2');
+        checker.queueSlackMessage('dup-3');
+
+        await checker.pollCycle();
+
+        // A deduped batch was already injected once — re-queueing it would park
+        // it forever (every retry dedups again) or replay it later. Dropped.
+        expect(checker.telegramMessages).toEqual([]);
+        expect(checker.buzzMessages).toEqual([]);
+        expect(checker.slackMessages).toEqual([]);
+        expect(log).toHaveBeenCalledWith(expect.stringContaining('DEDUPED'));
+
+        // New traffic arrives: the next inject carries ONLY the new message —
+        // no replay of the deduped batch.
+        agent.injectMessageDetailed.mockReturnValue({ ok: true });
+        checker.queueTelegramMessage('new-1');
+        const cycle = checker.pollCycle();
+        await vi.advanceTimersByTimeAsync(5000);
+        await cycle;
+        const delivered = agent.injectMessageDetailed.mock.calls.at(-1)![0] as string;
+        expect(delivered).toContain('new-1');
+        expect(delivered).not.toContain('dup-1');
+        expect(delivered).not.toContain('dup-2');
+        expect(delivered).not.toContain('dup-3');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('drains the queues (no re-queue) when inject succeeds', async () => {
+      vi.useFakeTimers();
+      try {
+        const agent = createMockAgent(); // injectMessageDetailed -> { ok: true }
+        const checker = new FastChecker(agent, paths, '/tmp/framework', { log: vi.fn() }) as any;
+
+        checker.queueTelegramMessage('tg-ok');
+        checker.queueBuzzMessage('bz-ok');
+        checker.queueSlackMessage('sl-ok');
+
+        const cycle = checker.pollCycle();
+        await vi.advanceTimersByTimeAsync(5000); // post-inject cooldown sleep
+        await cycle;
+
+        expect(agent.injectMessageDetailed).toHaveBeenCalledTimes(1);
+        expect(checker.telegramMessages).toEqual([]);
+        expect(checker.buzzMessages).toEqual([]);
+        expect(checker.slackMessages).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });
