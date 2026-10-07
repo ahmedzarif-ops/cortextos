@@ -347,6 +347,7 @@ export class FastChecker {
     let digestMode: 'off' | 'shadow' | 'on' = 'off';
     if (inboxMessages.length > 0 && this.resolveOrchestratorName() === this.agent.name) {
       try { digestMode = resolveDigestMode(this.agent.getConfig()?.inbox_digest); } catch { digestMode = 'shadow'; }
+    }
     for (const msg of inboxMessages) {
       const isAnswer = isAnswerToReroutedAsk(msg, pendingAsk);
       if (isAnswer) answeredReroutedAsk = true;

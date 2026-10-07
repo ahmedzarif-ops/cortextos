@@ -103,6 +103,7 @@ describe('FastChecker routes orchestrator FYIs by mode', () => {
       getAgentDir: () => join(root, 'orgs', 'acme', 'agents', name),
       getConfig: () => (mode ? { inbox_digest: mode } : {}),
       injectMessage: (t: string) => { injected.push(t); return true; },
+      injectMessageDetailed: (t: string) => { injected.push(t); return { ok: true }; },
     } as any;
     vi.mocked(checkInbox).mockReturnValueOnce(messages);
     const c = new FastChecker(agent, paths, root, { log: () => {} });
