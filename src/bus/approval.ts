@@ -60,6 +60,7 @@ function postApprovalToActivityChannel(
   agentName: string,
   context: string | undefined,
   frameworkRoot: string | undefined,
+  preApprovedNote?: string,
 ): Promise<void> {
   const root = frameworkRoot ?? process.env.CTX_FRAMEWORK_ROOT;
   if (!root) {
@@ -72,17 +73,20 @@ function postApprovalToActivityChannel(
 
   const orgDir = join(root, 'orgs', org);
   const lines = [
-    `🔔 Approval request: ${title}`,
+    `${preApprovedNote ? '✅ Approval receipt' : '🔔 Approval request'}: ${title}`,
     `Category: ${category}`,
     `Requested by: ${agentName}`,
   ];
+  if (preApprovedNote) {
+    lines.push(`Owner evidence: ${preApprovedNote}`);
+  }
   if (context) {
     lines.push('', context);
   }
   lines.push('', `id: ${approvalId}`);
   const message = lines.join('\n');
 
-  return postActivity(orgDir, paths.ctxRoot, org, message, buildApprovalKeyboard(approvalId))
+  return postActivity(orgDir, paths.ctxRoot, org, message, preApprovedNote ? undefined : buildApprovalKeyboard(approvalId))
     .then((posted) => {
       if (!posted) {
         // postActivity returns false when activity-channel.env is missing
@@ -174,6 +178,9 @@ function pingAgentChatId(
  * fallback chain (explicit arg → CTX_FRAMEWORK_ROOT env → skip). CLI call
  * sites should pass env.frameworkRoot explicitly; daemon-side callers
  * may rely on the env var.
+ * A chief-only preApprovedNote records an already-authorized receipt directly
+ * in resolved/, with the owner evidence in resolved_by. Pending requests
+ * always receive the agent-bot ping.
  */
 export async function createApproval(
   paths: BusPaths,
@@ -184,8 +191,13 @@ export async function createApproval(
   context?: string,
   frameworkRoot?: string,
   agentDir?: string,
+  options: { preApprovedNote?: string } = {},
 ): Promise<string> {
   validateApprovalCategory(category);
+  const preApprovedNote = options.preApprovedNote;
+  if (preApprovedNote !== undefined && (!preApprovedNote.trim() || agentName !== 'chief')) {
+    throw new Error('A pre-approved receipt requires chief identity and a nonempty owner evidence note');
+  }
 
   const epoch = Math.floor(Date.now() / 1000);
   const rand = randomString(5);
@@ -198,32 +210,35 @@ export async function createApproval(
     requesting_agent: agentName,
     org,
     category,
-    status: 'pending',
+    status: preApprovedNote === undefined ? 'pending' : 'approved',
     description: context || '',
     created_at: now,
     updated_at: now,
-    resolved_at: null,
-    resolved_by: null,
+    resolved_at: preApprovedNote === undefined ? null : now,
+    resolved_by: preApprovedNote === undefined ? null : preApprovedNote.trim(),
   };
 
-  const pendingDir = join(paths.approvalDir, 'pending');
-  ensureDir(pendingDir);
-  atomicWriteSync(join(pendingDir, `${approvalId}.json`), JSON.stringify(approval));
+  const approvalDir = join(paths.approvalDir, preApprovedNote === undefined ? 'pending' : 'resolved');
+  ensureDir(approvalDir);
+  atomicWriteSync(join(approvalDir, `${approvalId}.json`), JSON.stringify(approval));
 
-  // Fan-out to the activity channel so the operator can approve/deny from
-  // Telegram without opening the dashboard. AWAITED so short-lived CLI callers do
+  // Fan-out to the activity channel: pending requests carry decision buttons;
+  // approved receipts carry the evidence note and no stale buttons.
+  // AWAITED so short-lived CLI callers do
   // not exit before the Telegram post fetch completes. Errors are
   // suppressed inside postApprovalToActivityChannel — activity-channel
   // unreachable must not block approval creation. Callbacks route back
   // via the orchestrator's activity-channel poller (see
   // daemon/agent-manager.ts).
-  await postApprovalToActivityChannel(paths, org, approvalId, title, category, agentName, context, frameworkRoot);
+  await postApprovalToActivityChannel(paths, org, approvalId, title, category, agentName, context, frameworkRoot, preApprovedNote?.trim());
 
-  // Best-effort ping to the requesting agent's own Telegram bot (the
+  // Best-effort ping for pending requests to the requesting agent's own Telegram bot (the
   // operator's 1:1 conversation with the agent). Closes the gap where
   // operators not in the activity channel would miss approvals entirely
   // (the 50h+ Repo-B-style stall). Errors suppressed — see helper.
-  await pingAgentChatId(agentDir, approvalId, title, category, agentName, context);
+  if (preApprovedNote === undefined) {
+    await pingAgentChatId(agentDir, approvalId, title, category, agentName, context);
+  }
 
   return approvalId;
 }
