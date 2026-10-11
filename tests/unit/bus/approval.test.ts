@@ -28,6 +28,7 @@ vi.mock('../../../src/telegram/api', () => ({
 import { mkdtempSync, rmSync, readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { spawnSync } from 'child_process';
 import { createApproval, updateApproval, listPendingApprovals } from '../../../src/bus/approval';
 import type { BusPaths } from '../../../src/types';
 
@@ -296,6 +297,51 @@ describe('createApproval — agent-bot Telegram ping (closes 50h+ Repo-B-style s
     expect(opts.parseMode).toBeNull();
   });
 
+  it('records an approved receipt atomically and posts it without an agent bot ping', async () => {
+    const agentDir = join(testDir, 'receipt-agent');
+    writeAgentEnv(agentDir, { BOT_TOKEN: 'test-token-123', CHAT_ID: '987654321' });
+
+    const id = await createApproval(
+      paths,
+      'chief',
+      'TestOrg',
+      'Already authorized action',
+      'other',
+      'Decision already recorded',
+      frameworkRoot,
+      agentDir,
+      { preApprovedNote: 'Telegram decision 12345' },
+    );
+
+    expect(existsSync(join(paths.approvalDir, 'pending', `${id}.json`))).toBe(false);
+    const receipt = JSON.parse(readFileSync(join(paths.approvalDir, 'resolved', `${id}.json`), 'utf-8'));
+    expect(receipt.status).toBe('approved');
+    expect(receipt.resolved_by).toBe('Telegram decision 12345');
+    expect(receipt.resolved_at).toBeTruthy();
+    expect(postActivitySpy).toHaveBeenCalledTimes(1);
+    expect(postActivitySpy.mock.calls[0][3]).toContain('Owner evidence: Telegram decision 12345');
+    expect(postActivitySpy.mock.calls[0][4]).toBeUndefined();
+    expect(telegramConstructorSpy).not.toHaveBeenCalled();
+    expect(telegramSendMessageSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects an empty owner evidence note before writing or posting', async () => {
+    await expect(createApproval(
+      paths, 'chief', 'TestOrg', 'Empty note', 'other', undefined, frameworkRoot, undefined,
+      { preApprovedNote: '  ' },
+    )).rejects.toThrow(/nonempty owner evidence note/);
+    expect(listPendingApprovals(paths)).toEqual([]);
+    expect(postActivitySpy).not.toHaveBeenCalled();
+  });
+
+  it('limits pre-approved receipts to chief', async () => {
+    await expect(createApproval(
+      paths, 'alice', 'TestOrg', 'Other agent', 'other', undefined, frameworkRoot, undefined,
+      { preApprovedNote: 'Telegram decision 12345' },
+    )).rejects.toThrow(/chief identity/);
+    expect(postActivitySpy).not.toHaveBeenCalled();
+  });
+
   it('skips with a warn when agentDir is not provided', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
@@ -390,6 +436,72 @@ describe('createApproval — agent-bot Telegram ping (closes 50h+ Repo-B-style s
     // The ping must point operators at the action surface — they cannot
     // act from the per-agent bot, so the body tells them where to go.
     expect(text).toMatch(/orchestrator|dashboard/i);
+  });
+});
+
+describe('create-approval CLI receipt wiring', () => {
+  function runCli(args: string[]) {
+    const agentDir = join(frameworkRoot, 'orgs', 'TestOrg', 'agents', 'chief');
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(join(agentDir, '.env'), 'BOT_TOKEN=test-token-123\nCHAT_ID=987654321\n');
+    const fetchLog = join(testDir, 'fetch.log');
+    const fetchMock = join(testDir, 'fetch-mock.cjs');
+    writeFileSync(fetchMock,
+      "const fs = require('fs'); globalThis.fetch = async (url) => { " +
+      "fs.appendFileSync(process.env.TEST_FETCH_LOG, String(url) + '\\n'); " +
+      "return { json: async () => ({ ok: true, result: { message_id: 1 } }) }; };\n",
+    );
+    const repoRoot = join(__dirname, '..', '..', '..');
+    const result = spawnSync(
+      join(repoRoot, 'node_modules', '.bin', 'tsx'),
+      [join(repoRoot, 'src', 'cli', 'index.ts'), 'bus', 'create-approval', ...args],
+      {
+        encoding: 'utf8',
+        cwd: frameworkRoot,
+        env: {
+          ...process.env,
+          CTX_ROOT: testDir,
+          CTX_FRAMEWORK_ROOT: frameworkRoot,
+          CTX_PROJECT_ROOT: frameworkRoot,
+          CTX_AGENT_DIR: agentDir,
+          CTX_AGENT_NAME: 'chief',
+          CTX_ORG: 'TestOrg',
+          CTX_INSTANCE_ID: 'default',
+          TEST_FETCH_LOG: fetchLog,
+          NODE_OPTIONS: `--require ${fetchMock}`,
+        },
+      },
+    );
+    return { result, fetchLog };
+  }
+
+  it('pings on a pending CLI approval', () => {
+    const { result, fetchLog } = runCli(['Pending decision', 'other']);
+    expect(result.status).toBe(0);
+    const id = result.stdout.trim();
+    expect(existsSync(join(paths.approvalDir, 'pending', `${id}.json`))).toBe(true);
+    expect(readFileSync(fetchLog, 'utf8')).toContain('/sendMessage');
+  });
+
+  it('creates an approved CLI receipt without an owner ping', () => {
+    const { result, fetchLog } = runCli([
+      'Approved decision', 'other', '--pre-approved', 'Telegram decision 12345',
+    ]);
+    expect(result.status).toBe(0);
+    const id = result.stdout.trim();
+    expect(existsSync(join(paths.approvalDir, 'pending', `${id}.json`))).toBe(false);
+    const receipt = JSON.parse(readFileSync(join(paths.approvalDir, 'resolved', `${id}.json`), 'utf8'));
+    expect(receipt.status).toBe('approved');
+    expect(receipt.resolved_by).toBe('Telegram decision 12345');
+    expect(existsSync(fetchLog)).toBe(false);
+  });
+
+  it('rejects an empty CLI owner evidence note', () => {
+    const { result, fetchLog } = runCli(['Bad receipt', 'other', '--pre-approved', '']);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/nonempty owner evidence note/);
+    expect(existsSync(fetchLog)).toBe(false);
+    expect(listPendingApprovals(paths)).toEqual([]);
   });
 });
 

@@ -1409,7 +1409,8 @@ busCommand
   .argument('<title>', 'What you are requesting approval for')
   .argument('<category>', 'Category: external-comms, financial, deployment, data-deletion, other')
   .argument('[context]', 'Additional context')
-  .action(async (title: string, category: string, context?: string) => {
+  .option('--pre-approved <owner-evidence-note>', 'Record an already-approved owner decision as a receipt (chief only)')
+  .action(async (title: string, category: string, context: string | undefined, options: { preApproved?: string }) => {
     const validCategories: ApprovalCategory[] = ['external-comms', 'financial', 'deployment', 'data-deletion', 'other'];
     if (!validCategories.includes(category as ApprovalCategory)) {
       console.error(`Invalid category '${category}'. Must be one of: ${validCategories.join(', ')}`);
@@ -1425,7 +1426,7 @@ busCommand
     // src/bus/approval.ts:postApprovalToActivityChannel for the history).
     // WRITE PATH: an approval records who is asking, and it is read by a human deciding
     // whether to grant it.
-    const id = await createApproval(paths, requireAgentIdentity(undefined, 'create-approval'), env.org, title, category as ApprovalCategory, context || '', env.frameworkRoot, env.agentDir);
+    const id = await createApproval(paths, requireAgentIdentity(undefined, 'create-approval'), env.org, title, category as ApprovalCategory, context || '', env.frameworkRoot, env.agentDir, { preApprovedNote: options.preApproved });
     console.log(id);
   });
 
