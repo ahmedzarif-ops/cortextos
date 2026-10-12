@@ -1226,8 +1226,8 @@ describe('FastChecker', () => {
 
   // Futile-baseline guard: a session BORN at/above the handoff threshold (heavy
   // resume baseline) cannot be helped by a handoff — the fresh session inherits the
-  // same baseline and re-fires. The guard captures the first post-grace reading as
-  // the session baseline and suppresses the Tier-2 handoff when that baseline already
+  // same baseline and re-fires. The guard captures the lowest fresh-session reading
+  // through grace and suppresses Tier-2 handoff when that baseline already
   // meets/exceeds threshold AND ~no work-fill has accumulated, routing a single
   // once-per-session alert to the org's orchestrator (a bus inbox message, NOT the
   // human's Telegram). These exercise the REAL checkContextStatus flow.
@@ -1365,6 +1365,55 @@ describe('FastChecker', () => {
       expect(injected(agent).some(m => m.includes('CONTEXT HANDOFF REQUIRED'))).toBe(true);
       expect((checker as any).ctxHandoffFiredAt).toBeGreaterThan(0);
       expect(orchestratorMessages().length).toBe(0);
+    });
+
+    it('B2: Codex work during ten-minute grace is not mistaken for a heavy boot baseline', async () => {
+      vi.useFakeTimers();
+      const t0 = new Date('2026-06-01T00:00:00Z').getTime();
+      vi.setSystemTime(t0);
+      const agent = makeCtxAgent();
+      agent.getConfig().runtime = 'codex-app-server';
+      const checker = new FastChecker(agent, paths, frameworkRoot);
+      writeConfig({});
+
+      writeCtxStatus(12, 'sess-codex-work');
+      await (checker as any).checkContextStatus();
+      vi.setSystemTime(t0 + 2 * 60_000);
+      writeCtxStatus(35, 'sess-codex-work');
+      await (checker as any).checkContextStatus();
+      vi.setSystemTime(t0 + 9 * 60_000);
+      writeCtxStatus(61, 'sess-codex-work');
+      await (checker as any).checkContextStatus();
+      expect((checker as any).ctxHandoffFiredAt).toBe(0); // grace still protects the session
+
+      vi.setSystemTime(t0 + 10 * 60_000 + 1);
+      writeCtxStatus(62, 'sess-codex-work');
+      await (checker as any).checkContextStatus();
+      expect((checker as any).ctxSessionBaselinePct).toBe(12);
+      expect(injected(agent).some(m => m.includes('CONTEXT HANDOFF REQUIRED'))).toBe(true);
+      expect(orchestratorMessages().length).toBe(0);
+    });
+
+    it('B3: a genuinely heavy Codex boot stays suppressed after ten-minute grace', async () => {
+      vi.useFakeTimers();
+      const t0 = new Date('2026-06-01T00:00:00Z').getTime();
+      vi.setSystemTime(t0);
+      const agent = makeCtxAgent();
+      agent.getConfig().runtime = 'codex-app-server';
+      const checker = new FastChecker(agent, paths, frameworkRoot);
+      writeConfig({});
+
+      writeCtxStatus(72, 'sess-codex-heavy');
+      await (checker as any).checkContextStatus();
+      vi.setSystemTime(t0 + 5 * 60_000);
+      writeCtxStatus(71, 'sess-codex-heavy');
+      await (checker as any).checkContextStatus();
+      vi.setSystemTime(t0 + 10 * 60_000 + 1);
+      writeCtxStatus(72, 'sess-codex-heavy');
+      await (checker as any).checkContextStatus();
+      expect((checker as any).ctxSessionBaselinePct).toBe(71);
+      expect(injected(agent).some(m => m.includes('CONTEXT HANDOFF REQUIRED'))).toBe(false);
+      expect(orchestratorMessages().length).toBe(1);
     });
 
     it('C: session born above threshold still hands off once work-fill exceeds the margin', async () => {

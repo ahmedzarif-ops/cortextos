@@ -147,8 +147,11 @@ export class FastChecker {
   private ctxCircuitBrokenAt: number | null = null; // when circuit tripped (null = healthy)
   // Persisted to disk so --continue restarts don't reset the circuit breaker
   private ctxCircuitFile: string = '';
-  // Per-session (NOT persisted): first trustworthy ctx reading of this session,
-  // captured once the post-start grace window has expired. null = not yet captured.
+  // Per-session (NOT persisted): lowest fresh-session reading seen during grace.
+  // A Codex seat can do real work during its 10-minute grace, so its last grace
+  // reading is not necessarily its boot baseline.
+  private ctxSessionLowWaterPct: number | null = null;
+  // Per-session (NOT persisted): boot baseline captured once grace expires.
   private ctxSessionBaselinePct: number | null = null;
   // Per-session (NOT persisted): once-per-session throttle for the futile-handoff alert.
   private ctxBaselineAlertFiredAt: number = 0;
@@ -1590,6 +1593,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
           this.log(`New session detected (${incomingSessionId.slice(0, 8)}…) — per-session ctx state reset`);
         }
         this.ctxLastSessionId = incomingSessionId;
+        this.ctxSessionLowWaterPct = null;
         // Anchor the handoff grace window. A freshly-started session begins at low
         // context, so context-handoff actions are suppressed for HANDOFF_GRACE_MS to
         // avoid acting on a transient/stale high reading (observed on fresh codex
@@ -1623,6 +1627,19 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
     const effectivePct = pct ?? (exceeds200k ? 101 : null);
     if (effectivePct === null) return;
+
+    // Keep the low-water reading from a fresh session, including during grace.
+    // Spurious prior-cache readings are high, while a real low reading proves
+    // this session was born below the threshold. Continue-mode and unanchored
+    // status files cannot establish a fresh-session baseline.
+    if (
+      this.ctxSessionStartedAt > 0
+      && this.ctxSessionBaselinePct === null
+      && this.agent.getLastSpawnMode?.() === 'fresh'
+    ) {
+      this.ctxSessionLowWaterPct = this.ctxSessionLowWaterPct === null
+        ? effectivePct : Math.min(this.ctxSessionLowWaterPct, effectivePct);
+    }
 
     // Session-id-independent leaked-lease release (the Claude null-session_id edge).
     // The new-session detection above only releases a leaked lease when the bridge
@@ -1675,9 +1692,10 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       return;
     }
 
-    // Capture the session baseline: the first trustworthy reading once the post-start
-    // grace window has expired. Gated on ctxSessionStartedAt > 0 — only when we actually
-    // observed this session's birth can we distinguish baseline-fill from work-fill.
+    // Capture the fresh-session baseline after grace from its lowest observed
+    // reading. The first post-grace reading may include 10 minutes of real work.
+    // Gated on ctxSessionStartedAt > 0 — only when we observed this session's
+    // birth can we distinguish baseline-fill from work-fill.
     // Without an anchor the guard stays inert and legacy handoff behavior is preserved.
     // Only a FRESH-mode session yields a baseline. A continue-mode session inherits the
     // prior conversation (codex soft restart resumes the whole thread), so its reading is
@@ -1689,7 +1707,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       && this.ctxSessionBaselinePct === null
       && this.agent.getLastSpawnMode?.() === 'fresh'
     ) {
-      this.ctxSessionBaselinePct = effectivePct;
+      this.ctxSessionBaselinePct = this.ctxSessionLowWaterPct ?? effectivePct;
     }
 
     // Tier 1: warning — PTY injection only, no Telegram ping (context management is internal)
@@ -1847,6 +1865,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     this.ctxHandoffFiredAt = 0;
     this.ctxHandoffDeadlineAt = 0;
     this.ctxWarningFiredAt = 0;
+    this.ctxSessionLowWaterPct = null;
     this.ctxSessionBaselinePct = null;
     this.ctxBaselineAlertFiredAt = 0;
 
